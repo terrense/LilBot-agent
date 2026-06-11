@@ -26,6 +26,7 @@ class PermissionManager:
         self.interactive = interactive
         self.rules_path = state_dir / "permissions.json"
         self.rules = self._load_rules()
+        self.quiet = False
 
     def _load_rules(self) -> dict[str, bool]:
         try:
@@ -52,9 +53,10 @@ class PermissionManager:
         if not self.interactive:
             return PermissionDecision(False)
 
-        print()
-        print(f"? permission required: {description}")
-        print("  y = allow once, a = always allow, n = deny once, d = always deny")
+        if not self.quiet:
+            print()
+            print(f"? permission required: {description}")
+            print("  y = allow once, a = always allow, n = deny once, d = always deny")
         answer = self.prompt("permission> ").strip().lower()
         if answer in {"a", "always", "always allow"}:
             self.rules[action] = True
@@ -65,4 +67,3 @@ class PermissionManager:
             self.save()
             return PermissionDecision(False, True)
         return PermissionDecision(answer in {"y", "yes"})
-
