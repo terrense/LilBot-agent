@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import json
+import os
+import shutil
+import subprocess
+import threading
 from datetime import datetime
 from typing import Iterable
 
@@ -43,6 +48,17 @@ tool registry
   -> workspace sandbox
 """
 
+WAVE_FRAMES = [
+    "▁▂▃▄▅▆▇█▇▆▅▄▃▂",
+    "▂▃▄▅▆▇█▇▆▅▄▃▂▁",
+    "▃▄▅▆▇█▇▆▅▄▃▂▁▂",
+    "▄▅▆▇█▇▆▅▄▃▂▁▂▃",
+    "▅▆▇█▇▆▅▄▃▂▁▂▃▄",
+    "▆▇█▇▆▅▄▃▂▁▂▃▄▅",
+    "▇█▇▆▅▄▃▂▁▂▃▄▅▆",
+    "█▇▆▅▄▃▂▁▂▃▄▅▆▇",
+]
+
 
 STYLE = Style.from_dict(
     {
@@ -65,6 +81,7 @@ STYLE = Style.from_dict(
         "composer.prompt": "bg:#211234 #f9a8d4 bold",
         "toolbar": "bg:#211234 #c4b5fd",
         "hotkey": "bg:#211234 #f9a8d4 bold",
+        "wave": "bg:#211234 #f9a8d4 bold",
         "trace": "bg:#0f1226 #f8d8ec",
     }
 )
@@ -80,10 +97,12 @@ class DashboardUI:
         self.lines: list[str] = [
             "Boot sequence ready.",
             "Trace is the main conversation and tool-execution stream.",
-            "Use /help, /theme, /tools, /skills, or type a task.",
+            "Right-click paste works in the Composer. Select Trace text to copy, or use /copy.",
         ]
         self.work_items: list[str] = ["No active work."]
         self.tool_count = 0
+        self.busy = False
+        self.wave_index = 0
         self.ctx.permissions.prompt = self.permission_prompt
 
         self.trace = TextArea(
@@ -105,7 +124,8 @@ class DashboardUI:
             key_bindings=self._keys(),
             style=STYLE,
             full_screen=True,
-            mouse_support=True,
+            mouse_support=False,
+            refresh_interval=0.16,
         )
 
     def run(self) -> int:
@@ -128,6 +148,7 @@ class DashboardUI:
     def help(self, compact: bool = False) -> None:
         rows = [
             ("/help", "show commands"),
+            ("/copy", "copy Trace to clipboard"),
             ("/theme", "show theme preview"),
             ("/tools", "list tools"),
             ("/skills", "list skills"),
@@ -191,19 +212,33 @@ class DashboardUI:
         buffer.text = ""
         if not line:
             return False
+        if line in {"/exit", "/quit", "/q"}:
+            self.app.exit(result=0)
+            return False
+        if line == "/copy":
+            self._copy_trace()
+            return False
+        if self.busy:
+            self._append("Agent is still working. Wait for completion before sending another prompt.")
+            return False
         self._append(f"> {line}")
+        threading.Thread(target=self._process_line, args=(line,), daemon=True).start()
+        return False
+
+    def _process_line(self, line: str) -> None:
+        self.busy = True
+        self.work_items = ["thinking", "LLM turn in progress", "watch the wave strip below"]
+        self._refresh()
         try:
-            if line in {"/exit", "/quit", "/q"}:
-                self.app.exit(result=0)
-                return False
             if not handle_slash(line, self.agent, self.registry, self.ctx, self):
                 run_prompt(self.agent, self, line)
         except KeyboardInterrupt:
             self.app.exit(result=0)
         except Exception as exc:  # pragma: no cover - interactive guard
             self.error(f"{type(exc).__name__}: {exc}")
-        self._refresh()
-        return False
+        finally:
+            self.busy = False
+            self._refresh()
 
     def _append(self, text: str) -> None:
         for line in str(text).splitlines() or [""]:
@@ -232,7 +267,59 @@ class DashboardUI:
         def _focus_input(event) -> None:
             event.app.layout.focus(self.input)
 
+        @kb.add("c-v")
+        def _paste(event) -> None:
+            event.app.current_buffer.insert_text(self._read_clipboard())
+
+        @kb.add("f2")
+        def _copy(event) -> None:
+            self._copy_trace()
+
         return kb
+
+    def _copy_trace(self) -> None:
+        text = self._trace_text()
+        ok = self._write_clipboard(text)
+        self._append("Trace copied to clipboard." if ok else "Clipboard copy failed; select Trace text manually.")
+
+    def _write_clipboard(self, text: str) -> bool:
+        try:
+            if os.name == "nt":
+                subprocess.run(["clip"], input=text, text=True, check=True)
+                return True
+            if shutil.which("pbcopy"):
+                subprocess.run(["pbcopy"], input=text, text=True, check=True)
+                return True
+            if shutil.which("xclip"):
+                subprocess.run(["xclip", "-selection", "clipboard"], input=text, text=True, check=True)
+                return True
+        except Exception:
+            return False
+        return False
+
+    def _read_clipboard(self) -> str:
+        try:
+            import tkinter
+
+            root = tkinter.Tk()
+            root.withdraw()
+            text = root.clipboard_get()
+            root.destroy()
+            return text
+        except Exception:
+            pass
+        if os.name == "nt":
+            try:
+                proc = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
+                    text=True,
+                    capture_output=True,
+                    timeout=3,
+                )
+                return proc.stdout or ""
+            except Exception:
+                return ""
+        return ""
 
     def _root_container(self):
         left_column = HSplit(
@@ -284,8 +371,9 @@ class DashboardUI:
 
     def _topbar(self):
         cfg = self.ctx.config
-        text = f" Agent  LilBot-agent-code  ·  {cfg.model}  ·  {cfg.provider} "
-        right = f" permissions {self.ctx.permissions.mode}  ·  v0.1 "
+        context_pct = self._context_percent()
+        text = f" Agent  LilBot-agent-code  |  {cfg.model}  |  {cfg.provider} "
+        right = f" ctx {context_pct:02d}%  permissions {self.ctx.permissions.mode}  |  v0.1 "
         width = self._width()
         gap = max(1, width - len(text) - len(right))
         return FormattedText(
@@ -296,6 +384,26 @@ class DashboardUI:
             ]
         )
 
+    def _context_percent(self) -> int:
+        serialized = json.dumps(self.agent.messages, ensure_ascii=False, default=str)
+        estimated_tokens = max(1, len(serialized) // 4)
+        usage_tokens = self.agent.usage.get("prompt_tokens") or self.agent.usage.get("input_tokens") or 0
+        estimated_tokens = max(estimated_tokens, int(usage_tokens))
+        limit = self._model_context_limit()
+        return min(99, int((estimated_tokens / limit) * 100))
+
+    def _model_context_limit(self) -> int:
+        model = self.ctx.config.model.lower()
+        if "deepseek" in model:
+            return 64000
+        if "gpt-4o" in model:
+            return 128000
+        if "claude" in model:
+            return 200000
+        if "gemini" in model:
+            return 1000000
+        return 32000
+
     def _logo(self):
         width = self._width()
         logo = self._pixel_logo("LILBOT", scale_x=2, scale_y=2)
@@ -303,7 +411,7 @@ class DashboardUI:
             logo = self._pixel_logo("LILBOT", scale_x=1, scale_y=1)
         return FormattedText(
             [
-                ("class:logo.shadow", logo.replace("█", "▓")),
+                ("class:logo.shadow", logo.replace("\u2588", "\u2593")),
                 ("class:signature", "\n\nTerrence Shen  //  China  //  Deeplearningman0723@gmail.com\n"),
                 ("class:accent", "\n>_ clean-room local coding agent\n"),
                 ("class:muted", "model: "),
@@ -318,7 +426,7 @@ class DashboardUI:
         )
 
     def _pixel_logo(self, text: str, scale_x: int, scale_y: int) -> str:
-        filled = "█" * scale_x
+        filled = "\u2588" * scale_x
         empty = " " * scale_x
         gap = " " * max(1, scale_x)
         rows: list[str] = []
@@ -347,16 +455,29 @@ class DashboardUI:
         )
 
     def _toolbar(self):
+        if self.busy:
+            frame = WAVE_FRAMES[self.wave_index % len(WAVE_FRAMES)]
+            self.wave_index += 1
+            return FormattedText(
+                [
+                    ("class:wave", f" thinking {frame} "),
+                    ("class:toolbar", " DeepSeek turn running   "),
+                    ("class:hotkey", " F2 "),
+                    ("class:toolbar", " copy trace   "),
+                    ("class:hotkey", " Ctrl+C "),
+                    ("class:toolbar", " exit "),
+                ]
+            )
         return FormattedText(
             [
                 ("class:hotkey", " /help "),
                 ("class:toolbar", " commands   "),
+                ("class:hotkey", " /copy/F2 "),
+                ("class:toolbar", " copy trace   "),
+                ("class:hotkey", " right-click "),
+                ("class:toolbar", " paste/select   "),
                 ("class:hotkey", " /theme "),
-                ("class:toolbar", " blush/violet deck   "),
-                ("class:hotkey", " /tools "),
-                ("class:toolbar", " tool bus   "),
-                ("class:hotkey", " /skills "),
-                ("class:toolbar", " skill deck   "),
+                ("class:toolbar", " blush/violet   "),
                 ("class:hotkey", " Ctrl+C "),
                 ("class:toolbar", " exit "),
             ]

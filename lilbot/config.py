@@ -32,8 +32,28 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
 
 
+def load_dotenv(workspace: Path) -> None:
+    path = workspace / ".env"
+    if not path.exists():
+        return
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 def default_config(workspace: Path | None = None) -> LilBotConfig:
     root = (workspace or Path.cwd()).resolve()
+    load_dotenv(root)
     provider = _env("LILBOT_PROVIDER", "auto")
     deepseek_key = _env("DEEPSEEK_API_KEY", "")
     api_key = _env("LILBOT_API_KEY", _env("OPENAI_API_KEY", deepseek_key))
@@ -53,11 +73,35 @@ def default_config(workspace: Path | None = None) -> LilBotConfig:
     )
 
 
+def apply_env_overrides(cfg: LilBotConfig) -> LilBotConfig:
+    deepseek_key = _env("DEEPSEEK_API_KEY", "")
+    if _env("LILBOT_PROVIDER"):
+        cfg.provider = _env("LILBOT_PROVIDER")
+    elif deepseek_key and cfg.provider == "auto":
+        cfg.provider = "deepseek"
+
+    if _env("LILBOT_MODEL"):
+        cfg.model = _env("LILBOT_MODEL")
+    elif cfg.provider == "deepseek" and cfg.model == "lilbot-rule-model":
+        cfg.model = "deepseek-v4-flash"
+
+    if _env("LILBOT_BASE_URL"):
+        cfg.base_url = _env("LILBOT_BASE_URL").rstrip("/")
+    elif cfg.provider == "deepseek":
+        cfg.base_url = "https://api.deepseek.com"
+
+    cfg.api_key = _env("LILBOT_API_KEY", _env("OPENAI_API_KEY", deepseek_key or cfg.api_key))
+
+    if _env("LILBOT_PERMISSION_MODE"):
+        cfg.permission_mode = _env("LILBOT_PERMISSION_MODE")
+    return cfg
+
+
 def load_config(workspace: Path | None = None) -> LilBotConfig:
     cfg = default_config(workspace)
     path = cfg.config_path
     if not path.exists():
-        return cfg
+        return apply_env_overrides(cfg)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -67,7 +111,7 @@ def load_config(workspace: Path | None = None) -> LilBotConfig:
             continue
         if hasattr(cfg, key):
             setattr(cfg, key, value)
-    return cfg
+    return apply_env_overrides(cfg)
 
 
 def save_config(cfg: LilBotConfig) -> None:
