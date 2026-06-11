@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -22,6 +23,8 @@ try:
     from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
     from prompt_toolkit.layout.controls import FormattedTextControl
     from prompt_toolkit.layout.dimension import Dimension
+    from prompt_toolkit.lexers import Lexer
+    from prompt_toolkit.mouse_events import MouseButton, MouseEventType
     from prompt_toolkit.styles import Style
     from prompt_toolkit.widgets import Box, Frame, TextArea
 except ImportError:  # pragma: no cover - optional dependency fallback
@@ -60,6 +63,18 @@ WAVE_FRAMES = [
 ]
 
 
+WAVE_FRAMES = [
+    "▁▂▃▄▅▆▇█▇▆▅▄▃▂",
+    "▂▃▄▅▆▇█▇▆▅▄▃▂▁",
+    "▃▄▅▆▇█▇▆▅▄▃▂▁▂",
+    "▄▅▆▇█▇▆▅▄▃▂▁▂▃",
+    "▅▆▇█▇▆▅▄▃▂▁▂▃▄",
+    "▆▇█▇▆▅▄▃▂▁▂▃▄▅",
+    "▇█▇▆▅▄▃▂▁▂▃▄▅▆",
+    "█▇▆▅▄▃▂▁▂▃▄▅▆▇",
+]
+
+
 STYLE = Style.from_dict(
     {
         "root": "bg:#12091f #f8d8ec",
@@ -83,8 +98,90 @@ STYLE = Style.from_dict(
         "hotkey": "bg:#211234 #f9a8d4 bold",
         "wave": "bg:#211234 #f9a8d4 bold",
         "trace": "bg:#0f1226 #f8d8ec",
+        "trace.user": "bg:#0f1226 #f9a8d4 bold",
+        "trace.agent": "bg:#0f1226 #f8d8ec",
+        "trace.agent.label": "bg:#0f1226 #93c5fd bold",
+        "trace.heading": "bg:#0f1226 #93c5fd bold",
+        "trace.bold": "bg:#0f1226 #ffffff bold",
+        "trace.dim": "bg:#0f1226 #8d7aa8",
+        "trace.code": "bg:#1e1530 #c4b5fd italic",
+        "trace.code.inline": "bg:#26304a #fde68a",
+        "trace.bullet": "bg:#0f1226 #93c5fd",
+        "trace.table": "bg:#0f1226 #c4b5fd",
+        "trace.tool": "bg:#0f1226 #d8b4fe",
+        "trace.tool.rail": "bg:#0f1226 #8b5cf6 bold",
+        "trace.tool.ok": "bg:#0f1226 #86efac bold",
+        "trace.tool.error": "bg:#0f1226 #fca5a5 bold",
+        "trace.separator": "bg:#0f1226 #6d5c85",
+        "selected": "bg:#5b2c78 #fff5fb",
+        "scrollbar.background": "bg:#1a1230",
+        "scrollbar.button": "bg:#d8b4fe",
+        "scrollbar.arrow": "#f9a8d4 bold",
     }
 )
+
+
+class TraceLexer(Lexer):
+    def lex_document(self, document):
+        def get_line(lineno: int):
+            try:
+                line = document.lines[lineno]
+            except IndexError:
+                return []
+            return _highlight_trace_line(line)
+
+        return get_line
+
+
+def _highlight_trace_line(line: str):
+    stripped = line.strip()
+    if not line:
+        return [("class:trace", "")]
+    if line.startswith("> "):
+        return [("class:trace.user", "> "), *_inline_fragments(line[2:], "class:trace.user")]
+    if stripped == "LILBOT":
+        return [("class:trace.agent.label", "LILBOT")]
+    if re.match(r"^\s{0,3}#{1,6}\s+", line):
+        return [("class:trace.heading", stripped)]
+    if line.startswith("╭") or line.startswith("├"):
+        return [("class:trace.tool.rail", line[:2]), *_inline_fragments(line[2:], "class:trace.tool")]
+    if line.startswith("│"):
+        return [("class:trace.tool.rail", "│ "), *_inline_fragments(line[1:].lstrip(), "class:trace.dim")]
+    if line.startswith("╰"):
+        style = "class:trace.tool.error" if "error" in line.lower() else "class:trace.tool.ok"
+        return [("class:trace.tool.rail", line[:2]), (style, line[2:])]
+    if stripped.startswith("completed "):
+        return [("class:trace.tool.ok", line)]
+    if stripped.startswith("ERROR:") or stripped.startswith("error "):
+        return [("class:trace.tool.error", line)]
+    if re.match(r"^\s*[-*]\s+", line) or re.match(r"^\s*\d+\.\s+", line):
+        marker, rest = line.split(" ", 1)
+        return [("class:trace.bullet", marker + " "), *_inline_fragments(rest, "class:trace.agent")]
+    if stripped.startswith("|") or " | " in line:
+        return _inline_fragments(line, "class:trace.table")
+    if stripped.startswith("```") or line.startswith("    "):
+        return [("class:trace.code", line)]
+    if re.match(r"^\s*-{3,}\s*$", line):
+        return [("class:trace.separator", line)]
+    return _inline_fragments(line, "class:trace.agent")
+
+
+def _inline_fragments(text: str, base_style: str):
+    fragments = []
+    pattern = re.compile(r"(`[^`]+`|\*\*[^*]+\*\*)")
+    pos = 0
+    for match in pattern.finditer(text):
+        if match.start() > pos:
+            fragments.append((base_style, text[pos:match.start()]))
+        token = match.group(0)
+        if token.startswith("`"):
+            fragments.append(("class:trace.code.inline", token[1:-1]))
+        else:
+            fragments.append(("class:trace.bold", token[2:-2]))
+        pos = match.end()
+    if pos < len(text):
+        fragments.append((base_style, text[pos:]))
+    return fragments or [(base_style, "")]
 
 
 class DashboardUI:
@@ -97,18 +194,22 @@ class DashboardUI:
         self.lines: list[str] = [
             "Boot sequence ready.",
             "Trace is the main conversation and tool-execution stream.",
-            "Right-click paste works in the Composer. Select Trace text to copy, or use /copy.",
+            "Trace owns selection and scrolling: drag inside Trace, Ctrl+C/F2 to copy, PageUp/PageDown to scroll.",
         ]
         self.work_items: list[str] = ["No active work."]
         self.tool_count = 0
         self.busy = False
         self.wave_index = 0
+        self.auto_scroll = True
         self.ctx.permissions.prompt = self.permission_prompt
 
         self.trace = TextArea(
             text=self._trace_text(),
             read_only=True,
+            focusable=True,
+            focus_on_click=True,
             scrollbar=True,
+            lexer=TraceLexer(),
             wrap_lines=True,
             style="class:trace",
         )
@@ -124,9 +225,10 @@ class DashboardUI:
             key_bindings=self._keys(),
             style=STYLE,
             full_screen=True,
-            mouse_support=False,
+            mouse_support=True,
             refresh_interval=0.16,
         )
+        self._install_mouse_handlers()
 
     def run(self) -> int:
         self.app.run()
@@ -148,7 +250,7 @@ class DashboardUI:
     def help(self, compact: bool = False) -> None:
         rows = [
             ("/help", "show commands"),
-            ("/copy", "copy Trace to clipboard"),
+            ("/copy", "copy all Trace to clipboard"),
             ("/theme", "show theme preview"),
             ("/tools", "list tools"),
             ("/skills", "list skills"),
@@ -179,15 +281,18 @@ class DashboardUI:
         elif isinstance(event, ToolStarted):
             self.tool_count += 1
             stamp = datetime.now().strftime("%H%M%S")
+            args = json.dumps(event.arguments, ensure_ascii=False)
             self.work_items = [
                 f"step {self.tool_count}",
                 f"tool  {event.name}",
                 f"args  {event.arguments}",
             ]
-            self._append(f"run {stamp}-{self.tool_count:02d}  tool {event.name} {event.arguments}")
+            self._append("")
+            self._append(f"╭─ ▷ run {stamp}-{self.tool_count:02d}  {event.name}")
+            self._append(f"│ args {args}")
         elif isinstance(event, ToolFinished):
             mark = "done" if event.ok else "error"
-            self._append(f"{mark} {event.name} {event.elapsed_ms}ms")
+            self._append(f"╰─ {mark} {event.name} {event.elapsed_ms}ms")
             if event.output:
                 self._append(event.output)
             self.work_items = [f"{mark} {event.name}", f"{event.elapsed_ms}ms"]
@@ -247,7 +352,10 @@ class DashboardUI:
         self._refresh()
 
     def _refresh(self) -> None:
-        self.trace.text = self._trace_text()
+        text = self._trace_text()
+        self.trace.text = text
+        if self.auto_scroll:
+            self.trace.buffer.cursor_position = len(text)
         try:
             self.app.invalidate()
         except Exception:
@@ -261,6 +369,9 @@ class DashboardUI:
 
         @kb.add("c-c")
         def _exit(event) -> None:
+            if event.app.layout.has_focus(self.trace) and self.trace.buffer.selection_state is not None:
+                self._copy_trace(selection_first=True)
+                return
             event.app.exit(result=0)
 
         @kb.add("escape")
@@ -269,18 +380,95 @@ class DashboardUI:
 
         @kb.add("c-v")
         def _paste(event) -> None:
-            event.app.current_buffer.insert_text(self._read_clipboard())
+            event.app.layout.focus(self.input)
+            self.input.buffer.insert_text(self._read_clipboard())
 
         @kb.add("f2")
         def _copy(event) -> None:
-            self._copy_trace()
+            self._copy_trace(selection_first=True)
+
+        @kb.add("f3")
+        def _copy_all(event) -> None:
+            self._copy_trace(selection_first=False)
+
+        @kb.add("f4")
+        def _focus_trace(event) -> None:
+            event.app.layout.focus(self.trace)
+
+        @kb.add("pageup")
+        def _page_up(event) -> None:
+            self._scroll_trace(-18)
+
+        @kb.add("pagedown")
+        def _page_down(event) -> None:
+            self._scroll_trace(18)
+
+        @kb.add("c-home")
+        def _trace_home(event) -> None:
+            self.auto_scroll = False
+            self.trace.buffer.cursor_position = 0
+            event.app.layout.focus(self.trace)
+
+        @kb.add("c-end")
+        def _trace_end(event) -> None:
+            self.auto_scroll = True
+            self.trace.buffer.cursor_position = len(self.trace.text)
+            event.app.layout.focus(self.trace)
 
         return kb
 
-    def _copy_trace(self) -> None:
-        text = self._trace_text()
+    def _scroll_trace(self, lines: int) -> None:
+        self.auto_scroll = False
+        self.app.layout.focus(self.trace)
+        if lines < 0:
+            self.trace.buffer.cursor_up(count=abs(lines))
+        else:
+            self.trace.buffer.cursor_down(count=lines)
+            if self.trace.buffer.cursor_position >= len(self.trace.text):
+                self.auto_scroll = True
+
+    def _copy_trace(self, selection_first: bool = True) -> None:
+        text = self._selected_trace_text() if selection_first else ""
+        label = "selection" if text else "Trace"
+        text = text or self._trace_text()
         ok = self._write_clipboard(text)
-        self._append("Trace copied to clipboard." if ok else "Clipboard copy failed; select Trace text manually.")
+        self._append(f"{label} copied to clipboard." if ok else "Clipboard copy failed.")
+
+    def _selected_trace_text(self) -> str:
+        if self.trace.buffer.selection_state is None:
+            return ""
+        try:
+            data = self.trace.buffer.copy_selection()
+            return data.text
+        except Exception:
+            return ""
+
+    def _install_mouse_handlers(self) -> None:
+        input_mouse_handler = self.input.control.mouse_handler
+        trace_mouse_handler = self.trace.control.mouse_handler
+
+        def composer_mouse(mouse_event):
+            if (
+                mouse_event.button == MouseButton.RIGHT
+                and mouse_event.event_type == MouseEventType.MOUSE_UP
+            ):
+                self.app.layout.focus(self.input)
+                text = self._read_clipboard()
+                if text:
+                    self.input.buffer.insert_text(text)
+                return None
+            return input_mouse_handler(mouse_event)
+
+        def trace_mouse(mouse_event):
+            if mouse_event.event_type == MouseEventType.MOUSE_UP:
+                self.auto_scroll = False
+            if mouse_event.button == MouseButton.RIGHT and mouse_event.event_type == MouseEventType.MOUSE_UP:
+                self._copy_trace(selection_first=True)
+                return None
+            return trace_mouse_handler(mouse_event)
+
+        self.input.control.mouse_handler = composer_mouse
+        self.trace.control.mouse_handler = trace_mouse
 
     def _write_clipboard(self, text: str) -> bool:
         try:
@@ -463,7 +651,9 @@ class DashboardUI:
                     ("class:wave", f" thinking {frame} "),
                     ("class:toolbar", " DeepSeek turn running   "),
                     ("class:hotkey", " F2 "),
-                    ("class:toolbar", " copy trace   "),
+                    ("class:toolbar", " copy selection/trace   "),
+                    ("class:hotkey", " F4 "),
+                    ("class:toolbar", " focus trace   "),
                     ("class:hotkey", " Ctrl+C "),
                     ("class:toolbar", " exit "),
                 ]
@@ -474,8 +664,10 @@ class DashboardUI:
                 ("class:toolbar", " commands   "),
                 ("class:hotkey", " /copy/F2 "),
                 ("class:toolbar", " copy trace   "),
+                ("class:hotkey", " F4/PageUp/PageDown "),
+                ("class:toolbar", " trace nav   "),
                 ("class:hotkey", " right-click "),
-                ("class:toolbar", " paste/select   "),
+                ("class:toolbar", " paste in composer/copy trace selection   "),
                 ("class:hotkey", " /theme "),
                 ("class:toolbar", " blush/violet   "),
                 ("class:hotkey", " Ctrl+C "),
