@@ -15,62 +15,57 @@ try:
     from prompt_toolkit.formatted_text import FormattedText
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
-    from prompt_toolkit.layout.dimension import Dimension
     from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.layout.dimension import Dimension
     from prompt_toolkit.styles import Style
     from prompt_toolkit.widgets import Box, Frame, TextArea
 except ImportError:  # pragma: no cover - optional dependency fallback
     Application = None
 
 
-BIG_LOGO = r"""
-██╗     ██╗██╗     ██████╗  ██████╗ ████████╗
-██║     ██║██║     ██╔══██╗██╔═══██╗╚══██╔══╝
-██║     ██║██║     ██████╔╝██║   ██║   ██║
-██║     ██║██║     ██╔══██╗██║   ██║   ██║
-███████╗██║███████╗██████╔╝╚██████╔╝   ██║
-╚══════╝╚═╝╚══════╝╚═════╝  ╚═════╝    ╚═╝
-"""
-
-SMALL_LOGO = r"""
- _     _ _ ____        _
-| |   (_) | __ )  ___ | |_
-| |   | | |  _ \ / _ \| __|
-| |___| | | |_) | (_) | |_
-|_____|_|_|____/ \___/ \__|
-"""
+PIXEL_FONT = {
+    "L": ["10000", "10000", "10000", "10000", "10000", "10000", "11111"],
+    "I": ["11111", "00100", "00100", "00100", "00100", "00100", "11111"],
+    "B": ["11110", "10001", "10001", "11110", "10001", "10001", "11110"],
+    "O": ["01110", "10001", "10001", "10001", "10001", "10001", "01110"],
+    "T": ["11111", "00100", "00100", "00100", "00100", "00100", "00100"],
+}
 
 SYSTEM_MAP = """\
-memory core      skill deck       subagent bay       mcp dock
-    │                │                 │                │
-    └────── tool registry ─────────────┴──── permission gate
-                         │
-                    workspace sandbox
+memory core
+  -> skill deck
+  -> subagent bay
+  -> mcp dock
+        |
+        v
+tool registry
+  -> permission gate
+  -> workspace sandbox
 """
 
 
 STYLE = Style.from_dict(
     {
-        "root": "bg:#130a22 #f7d6e8",
-        "topbar": "bg:#25143f #ffd1e8 bold",
-        "topbar.dim": "bg:#25143f #b8a6d9",
-        "frame": "bg:#170d29 #f7d6e8",
+        "root": "bg:#12091f #f8d8ec",
+        "topbar": "bg:#211234 #ffd6ea bold",
+        "topbar.dim": "bg:#211234 #bda4df",
+        "frame": "bg:#170d29 #f8d8ec",
         "frame.border": "#d8b4fe",
         "frame.label": "#f9a8d4 bold",
-        "frame.shadow": "bg:#0f172a",
         "logo": "#f9a8d4 bold",
-        "logo.shadow": "#a78bfa bold",
-        "accent": "#c4b5fd bold",
-        "muted": "#9ca3af",
-        "deep": "#60a5fa",
+        "logo.shadow": "#8b5cf6 bold",
+        "signature": "#f0abfc bold",
+        "accent": "#d8b4fe bold",
+        "muted": "#b8a6d9",
+        "deep": "#93c5fd",
         "ok": "#86efac bold",
         "warn": "#fde68a bold",
         "error": "#fca5a5 bold",
         "composer": "bg:#211234 #ffe4f1",
         "composer.prompt": "bg:#211234 #f9a8d4 bold",
-        "toolbar": "bg:#25143f #c4b5fd",
-        "hotkey": "bg:#25143f #f9a8d4 bold",
-        "trace": "bg:#0f172a #f7d6e8",
+        "toolbar": "bg:#211234 #c4b5fd",
+        "hotkey": "bg:#211234 #f9a8d4 bold",
+        "trace": "bg:#0f1226 #f8d8ec",
     }
 )
 
@@ -84,6 +79,7 @@ class DashboardUI:
         self.ctx = ctx
         self.lines: list[str] = [
             "Boot sequence ready.",
+            "Trace is the main conversation and tool-execution stream.",
             "Use /help, /theme, /tools, /skills, or type a task.",
         ]
         self.work_items: list[str] = ["No active work."]
@@ -146,7 +142,7 @@ class DashboardUI:
         self._append("Theme deck")
         self._append("1  nebula blush      selected")
         self._append("2  pale violet       soon")
-        self._append("3  midnight blue     soon")
+        self._append("3  soft midnight     soon")
         self._append("4  ansi compatible   soon")
         self._append("")
         self._append("  1  function greet() {")
@@ -212,7 +208,7 @@ class DashboardUI:
     def _append(self, text: str) -> None:
         for line in str(text).splitlines() or [""]:
             self.lines.append(line)
-        self.lines = self.lines[-500:]
+        self.lines = self.lines[-700:]
         self._refresh()
 
     def _refresh(self) -> None:
@@ -239,27 +235,41 @@ class DashboardUI:
         return kb
 
     def _root_container(self):
+        left_column = HSplit(
+            [
+                Frame(
+                    Box(Window(FormattedTextControl(self._logo), wrap_lines=False), padding=1),
+                    title="  >_ lilbot  ",
+                    style="class:frame",
+                    height=Dimension(min=18, preferred=22, max=26),
+                ),
+                Frame(
+                    Box(Window(FormattedTextControl(self._work), wrap_lines=True), padding=1),
+                    title="  Work  ",
+                    style="class:frame",
+                    height=Dimension(weight=1),
+                ),
+            ],
+            width=Dimension(weight=2),
+        )
+
+        main_area = VSplit(
+            [
+                left_column,
+                Frame(
+                    self.trace,
+                    title="  Trace  ",
+                    style="class:frame",
+                    width=Dimension(weight=5),
+                ),
+            ],
+            height=Dimension(weight=1),
+        )
+
         return HSplit(
             [
                 Window(FormattedTextControl(self._topbar), height=1, style="class:topbar"),
-                VSplit(
-                    [
-                        Frame(
-                            Box(Window(FormattedTextControl(self._logo), wrap_lines=False), padding=1),
-                            title="  >_ lilbot  ",
-                            style="class:frame",
-                            width=Dimension(weight=3),
-                        ),
-                        Frame(
-                            Box(Window(FormattedTextControl(self._work), wrap_lines=True), padding=1),
-                            title="  Work  ",
-                            style="class:frame",
-                            width=Dimension(weight=2),
-                        ),
-                    ],
-                    height=Dimension(weight=3),
-                ),
-                Frame(self.trace, title="  Trace  ", style="class:frame", height=Dimension(weight=2)),
+                main_area,
                 Frame(self.input, title="  Composer  ", style="class:frame", height=5),
                 Window(FormattedTextControl(self._toolbar), height=1, style="class:toolbar"),
             ],
@@ -288,10 +298,13 @@ class DashboardUI:
 
     def _logo(self):
         width = self._width()
-        logo = SMALL_LOGO if width < 110 else BIG_LOGO
+        logo = self._pixel_logo("LILBOT", scale_x=2, scale_y=2)
+        if width < 120:
+            logo = self._pixel_logo("LILBOT", scale_x=1, scale_y=1)
         return FormattedText(
             [
                 ("class:logo.shadow", logo.replace("█", "▓")),
+                ("class:signature", "\n\nTerrence Shen  //  China  //  Deeplearningman0723@gmail.com\n"),
                 ("class:accent", "\n>_ clean-room local coding agent\n"),
                 ("class:muted", "model: "),
                 ("class:deep", self.ctx.config.model),
@@ -303,6 +316,24 @@ class DashboardUI:
                 ("class:accent", str(self.ctx.config.workspace)),
             ]
         )
+
+    def _pixel_logo(self, text: str, scale_x: int, scale_y: int) -> str:
+        filled = "█" * scale_x
+        empty = " " * scale_x
+        gap = " " * max(1, scale_x)
+        rows: list[str] = []
+        for row_idx in range(7):
+            pieces = []
+            for char in text:
+                pattern = PIXEL_FONT.get(char.upper())
+                if not pattern:
+                    pieces.append(empty * 3)
+                    continue
+                pieces.append("".join(filled if bit == "1" else empty for bit in pattern[row_idx]))
+            line = gap.join(pieces).rstrip()
+            for _ in range(scale_y):
+                rows.append(line)
+        return "\n".join(rows)
 
     def _work(self):
         work = "\n".join(self.work_items)
