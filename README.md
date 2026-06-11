@@ -1,8 +1,274 @@
-# LilBot Agent
+<div align="center">
 
-LilBot is a clean-room local coding-agent playground. It is written in Python so we can move fast on the agent kernel, tools, permissions, memory, skills, subagents, MCP-style adapters, and a polished terminal UI.
+# LILBOT AGENT
 
-The code is original. It copies no proprietary implementation.
+### Clean-room Local Coding Agent / Windows-first / DeepSeek-ready
+
+![LilBot hero placeholder](docs/assets/1.png)
+
+[![Python](https://img.shields.io/badge/Python-3.10%2B-36C5F0?style=for-the-badge&logo=python&logoColor=white)](#windows-quick-start)
+[![Windows](https://img.shields.io/badge/Windows-Terminal-0078D4?style=for-the-badge&logo=windows-terminal&logoColor=white)](#windows-terminal-notes)
+[![DeepSeek](https://img.shields.io/badge/DeepSeek-V4-7C3AED?style=for-the-badge)](#deepseek)
+[![TUI](https://img.shields.io/badge/TUI-Rich%20%2B%20Future%20Textual-00E5FF?style=for-the-badge)](#flight-deck)
+
+`LilBot` is a futuristic local coding-agent lab: agent loop, tool bus, permission gate, sandbox, memory core, skills, subagents, and MCP-style adapters.
+
+</div>
+
+---
+
+## Visual Placeholders
+
+Put your future screenshots and sticker art here:
+
+```text
+docs/assets/1.png  hero image / main cockpit screenshot
+docs/assets/2.png  theme selector screenshot
+docs/assets/3.png  architecture sticker sheet
+docs/assets/4.png  permission flow / tool execution screenshot
+```
+
+![Theme placeholder](docs/assets/2.png)
+![Architecture sticker placeholder](docs/assets/3.png)
+
+---
+
+## Why `python -m lilbot`
+
+`-m` means **run a Python module as a program**.
+
+When you run:
+
+```powershell
+python -m lilbot
+```
+
+Python does this:
+
+```text
+current conda/python environment
+  -> find package named lilbot
+  -> execute lilbot/__main__.py
+  -> __main__.py calls lilbot.cli:main()
+```
+
+Why this is good on Windows:
+
+- It uses the exact `python` from your active conda environment.
+- It avoids hardcoding script paths.
+- It works before installing a global `lilbot.exe` command.
+- It is the standard way to run package-style CLIs during development.
+
+Later we can also expose:
+
+```powershell
+lilbot
+```
+
+through `pyproject.toml`, but `python -m lilbot` is the cleanest dev command.
+
+---
+
+## Flight Deck
+
+LilBot is aiming for a terminal cockpit, not a boring command prompt.
+
+```text
+┌──────────────────────────────────────────────────────────────┐
+│ Agent LilBot-agent-code - deepseek-v4-flash     ready  v0.1  │
+├─────────────────────────────┬────────────────────────────────┤
+│                             │                                │
+│       L I L B O T           │      Work / Tool Stream         │
+│   local coding agent        │      permissions / memory       │
+│                             │      subagents / mcp            │
+├─────────────────────────────┴────────────────────────────────┤
+│ Composer: write a task, use /, or run ! command safely        │
+└──────────────────────────────────────────────────────────────┘
+```
+
+Current renderer: `Rich`.
+
+Next full-screen renderer candidate: `Textual`.
+
+Python can absolutely build a CLI/TUI as polished as TypeScript tools. Terminals receive ANSI escape sequences, keyboard events, mouse events, and layout redraws. Python libraries like `Rich`, `Textual`, and `prompt_toolkit` can drive those just as well as Node libraries.
+
+---
+
+## System Map
+
+```mermaid
+flowchart TB
+    User["User / Windows Terminal"]:::human
+    TUI["LilBot TUI\nRich cockpit today\nTextual cockpit later"]:::ui
+    Loop["Agent Loop\nreason -> tool -> observe -> continue"]:::core
+    Provider["Provider Layer\nDeepSeek V4 / OpenAI-compatible / local rule model"]:::model
+    Registry["Tool Registry\nschemas + handlers + result model"]:::tool
+    Gate["Permission Gate\nask / accept-all / deny-all"]:::guard
+    Sandbox["Workspace Sandbox\npath boundary + shell boundary"]:::guard
+    Memory["Memory Core\nproject JSONL + search"]:::memory
+    Skills["Skill Deck\nmarkdown prompt capsules"]:::skill
+    Subagents["Subagent Bay\ncoder / reviewer / researcher / planner"]:::agent
+    MCP["MCP Dock\nexternal tools via JSON-RPC style adapter"]:::mcp
+    Files["Workspace Files"]:::data
+
+    User --> TUI --> Loop
+    Loop <--> Provider
+    Loop --> Registry
+    Registry --> Gate --> Sandbox
+    Sandbox --> Files
+    Registry --> Memory
+    Registry --> Skills
+    Registry --> Subagents
+    Registry --> MCP
+
+    classDef human fill:#111827,stroke:#00e5ff,color:#ffffff,stroke-width:2px
+    classDef ui fill:#061A2E,stroke:#36c5f0,color:#ffffff,stroke-width:2px
+    classDef core fill:#1E1B4B,stroke:#a78bfa,color:#ffffff,stroke-width:2px
+    classDef model fill:#312E81,stroke:#c084fc,color:#ffffff,stroke-width:2px
+    classDef tool fill:#042F2E,stroke:#2dd4bf,color:#ffffff,stroke-width:2px
+    classDef guard fill:#451A03,stroke:#f59e0b,color:#ffffff,stroke-width:2px
+    classDef memory fill:#052E16,stroke:#22c55e,color:#ffffff,stroke-width:2px
+    classDef skill fill:#3B0764,stroke:#e879f9,color:#ffffff,stroke-width:2px
+    classDef agent fill:#172554,stroke:#60a5fa,color:#ffffff,stroke-width:2px
+    classDef mcp fill:#4C0519,stroke:#fb7185,color:#ffffff,stroke-width:2px
+    classDef data fill:#0F172A,stroke:#94a3b8,color:#ffffff,stroke-width:2px
+```
+
+---
+
+## Agent Loop
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as User
+    participant UI as LilBot TUI
+    participant A as Agent Loop
+    participant L as DeepSeek / Provider
+    participant R as Tool Registry
+    participant P as Permission Gate
+    participant S as Sandbox
+    participant W as Workspace
+
+    U->>UI: prompt or slash command
+    UI->>A: user message
+    A->>L: messages + tool schemas
+    L-->>A: text or tool calls
+    alt tool call requested
+        A->>R: execute tool
+        R->>P: ask permission if needed
+        P-->>R: allow / deny
+        R->>S: workspace-scoped action
+        S->>W: read / write / search / shell
+        W-->>S: result
+        S-->>R: safe output
+        R-->>A: tool result
+        A->>L: observation
+    else direct answer
+        A-->>UI: final text
+    end
+    UI-->>U: cockpit output
+```
+
+---
+
+## Permission Gate
+
+```mermaid
+stateDiagram-v2
+    [*] --> InspectTool
+    InspectTool --> NoApprovalNeeded: read/list/search
+    InspectTool --> ApprovalNeeded: write/edit/bash
+    ApprovalNeeded --> AllowOnce: y
+    ApprovalNeeded --> AlwaysAllow: a
+    ApprovalNeeded --> DenyOnce: n
+    ApprovalNeeded --> AlwaysDeny: d
+    AlwaysAllow --> PersistRule
+    AlwaysDeny --> PersistRule
+    AllowOnce --> ExecuteTool
+    NoApprovalNeeded --> ExecuteTool
+    DenyOnce --> StopTool
+    PersistRule --> ExecuteOrStop
+    ExecuteOrStop --> ExecuteTool: allow
+    ExecuteOrStop --> StopTool: deny
+    ExecuteTool --> [*]
+    StopTool --> [*]
+```
+
+---
+
+## Memory / Skills / Subagents
+
+```mermaid
+flowchart LR
+    Prompt["User Intent"]:::input
+
+    subgraph MemoryCore["Memory Core"]
+        M1["memory_save"]
+        M2["memory_search"]
+        M3["memory_list"]
+        M4["memory_delete"]
+    end
+
+    subgraph SkillDeck["Skill Deck"]
+        S1["review.md"]
+        S2["plan.md"]
+        S3["commit.md"]
+        S4["summarize.md"]
+    end
+
+    subgraph AgentBay["Subagent Bay"]
+        A1["coder"]
+        A2["reviewer"]
+        A3["researcher"]
+        A4["planner"]
+    end
+
+    Prompt --> MemoryCore
+    Prompt --> SkillDeck
+    Prompt --> AgentBay
+
+    MemoryCore --> Context["Injected Context"]
+    SkillDeck --> Rendered["Rendered Prompt Capsule"]
+    AgentBay --> Result["Background or inline result"]
+
+    Context --> Loop["Agent Loop"]
+    Rendered --> Loop
+    Result --> Loop
+
+    classDef input fill:#020617,stroke:#00e5ff,color:#ffffff
+    classDef default fill:#111827,stroke:#64748b,color:#ffffff
+```
+
+---
+
+## MCP Dock
+
+```mermaid
+flowchart TB
+    Config[".lilbot/mcp.json"]:::file
+    Manager["MCPManager"]:::core
+    ServerA["server: filesystem"]:::server
+    ServerB["server: browser"]:::server
+    ServerC["server: custom lab tool"]:::server
+    ToolCall["mcp_call(server, tool, args)"]:::call
+    Result["tool result -> Agent Loop"]:::result
+
+    Config --> Manager
+    Manager --> ServerA
+    Manager --> ServerB
+    Manager --> ServerC
+    ToolCall --> Manager
+    Manager --> Result
+
+    classDef file fill:#172554,stroke:#60a5fa,color:#fff
+    classDef core fill:#1E1B4B,stroke:#a78bfa,color:#fff
+    classDef server fill:#042F2E,stroke:#2dd4bf,color:#fff
+    classDef call fill:#451A03,stroke:#f59e0b,color:#fff
+    classDef result fill:#052E16,stroke:#22c55e,color:#fff
+```
+
+---
 
 ## Windows Quick Start
 
@@ -12,17 +278,11 @@ Python 3.10 is OK. The project is tested with Python 3.10.20 on Windows.
 cd F:\Experiment_laborotory\collection-claude-code-source-code-main\LilBot-agent-code
 conda activate LilBot
 pip install -r requirements.txt
+pip check
 python -m lilbot
 ```
 
-If pip says `uvicorn ... requires click`, reinstall requirements after this update:
-
-```powershell
-pip install -r requirements.txt
-pip check
-```
-
-If box lines or Chinese text look like `鈺...`, your PowerShell tab is not using UTF-8. LilBot now tries to enable UTF-8 automatically, but this manual setup is still useful:
+If box lines or Chinese text look wrong, force UTF-8 for the current PowerShell tab:
 
 ```powershell
 chcp 65001
@@ -32,13 +292,17 @@ $OutputEncoding = [System.Text.UTF8Encoding]::new()
 python -m lilbot
 ```
 
-Recommended terminal: Windows Terminal + Cascadia Mono or JetBrains Mono.
+Recommended terminal:
+
+```text
+Windows Terminal + Cascadia Mono / JetBrains Mono
+```
+
+---
 
 ## DeepSeek
 
 Do not commit API keys. Set the key only in your shell or in Windows user environment variables.
-
-Temporary current-shell use:
 
 ```powershell
 $env:DEEPSEEK_API_KEY="sk-..."
@@ -52,74 +316,62 @@ $env:DEEPSEEK_API_KEY="sk-..."
 python -m lilbot --provider deepseek --model deepseek-v4-flash --print "Reply exactly: LilBot OK"
 ```
 
-LilBot uses DeepSeek's OpenAI-compatible endpoint:
+Endpoint:
 
 ```text
 https://api.deepseek.com
 ```
 
-## GitHub Login On Windows
+---
 
-This repo already has the remote configured:
+## Command Deck
+
+| Command | Purpose |
+|---|---|
+| `/help` | Show commands |
+| `/theme` | Show theme preview |
+| `/tools` | List tools |
+| `/skills` | List skills |
+| `/skill review <target>` | Run a skill template |
+| `/memory list/search/save/delete` | Manage memory |
+| `/agents` | List subagent types and tasks |
+| `/mcp` | List MCP-style server config |
+| `/permissions ask/accept-all/deny-all` | Switch permission mode |
+| `/exit` | Quit |
+
+---
+
+## Roadmap
+
+```mermaid
+flowchart LR
+    V01["v0.1\nRich cockpit\nDeepSeek link\ncore tools"] --> V02["v0.2\nTextual fullscreen\nlive work panel\nstreaming transcript"]
+    V02 --> V03["v0.3\nstronger sandbox\npatch editor\npermission memory"]
+    V03 --> V04["v0.4\nreal MCP sessions\nsubagent worktrees\nskill marketplace"]
+    V04 --> V05["v1.0\nLilBot mission control"]
+```
+
+---
+
+## Repository Upload
+
+Remote:
 
 ```powershell
 git remote -v
 ```
 
-To push from your own Windows terminal, log in using one of these methods.
-
-### Option A: Git Credential Manager
+Push:
 
 ```powershell
 git push -u origin main
 ```
 
-Git will open a GitHub browser login or ask for credentials. For password prompts, GitHub requires a Personal Access Token instead of your account password.
-
-### Option B: GitHub CLI
-
-Install GitHub CLI, then:
+If GitHub asks for login, use Git Credential Manager or GitHub CLI:
 
 ```powershell
 gh auth login
+gh auth setup-git
 git push -u origin main
 ```
 
-Use:
-
-```powershell
-gh auth status
-```
-
-to confirm login.
-
-## CLI Commands
-
-- `/help` show commands
-- `/theme` show theme preview
-- `/tools` list tools
-- `/skills` list skills
-- `/skill review <target>` run a skill template
-- `/memory list|search|save|delete` manage memory
-- `/agents` list subagent types and tasks
-- `/mcp` list MCP-style server config
-- `/permissions ask|accept-all|deny-all` switch permission mode
-- `/exit` quit
-
-## Architecture
-
-```text
-User / TUI
-  -> AgentLoop
-      -> Provider(OpenAI-compatible, DeepSeek, or local rule model)
-      -> ToolRegistry
-          -> Sandbox + PermissionManager
-          -> File/Bash/Search tools
-          -> Memory tools
-          -> Skill tools
-          -> Subagent tools
-          -> MCP adapter tools
-      -> Session transcript + compaction
-```
-
-Python can absolutely build a CLI/TUI as polished as TypeScript tools. The terminal only receives ANSI escape sequences, text, mouse events, and keyboard events. Python libraries such as Rich, Textual, prompt_toolkit, and curses/blessed can drive those just as well as Node libraries. Rich gives us beautiful rendering now; Textual can give us full-screen reactive panels later.
