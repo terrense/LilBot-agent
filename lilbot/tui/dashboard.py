@@ -31,14 +31,6 @@ except ImportError:  # pragma: no cover - optional dependency fallback
     Application = None
 
 
-PIXEL_FONT = {
-    "L": ["10000", "10000", "10000", "10000", "10000", "10000", "11111"],
-    "I": ["11111", "00100", "00100", "00100", "00100", "00100", "11111"],
-    "B": ["11110", "10001", "10001", "11110", "10001", "10001", "11110"],
-    "O": ["01110", "10001", "10001", "10001", "10001", "10001", "01110"],
-    "T": ["11111", "00100", "00100", "00100", "00100", "00100", "00100"],
-}
-
 SYSTEM_MAP = """\
 memory core
   -> skill deck
@@ -85,6 +77,28 @@ NOISY_PATH_MARKERS = (
     ".ruff_cache/",
     ".mypy_cache/",
 )
+
+LILBOT_LOGO_ROWS = [
+    "██╗     ██╗██╗     ██████╗  ██████╗ ████████╗",
+    "██║     ██║██║     ██╔══██╗██╔═══██╗╚══██╔══╝",
+    "██║     ██║██║     ██████╔╝██║   ██║   ██║",
+    "██║     ██║██║     ██╔══██╗██║   ██║   ██║",
+    "███████╗██║███████╗██████╔╝╚██████╔╝   ██║",
+    "╚══════╝╚═╝╚══════╝╚═════╝  ╚═════╝    ╚═╝",
+]
+LILBOT_LOGO_COMPACT_ROWS = [
+    "╦  ╦╦  ╔╗ ╔═╗╔╦╗",
+    "║  ║║  ╠╩╗║ ║ ║ ",
+    "╩═╝╩╩═╝╚═╝╚═╝ ╩ ",
+]
+LILBOT_LOGO_STYLES = [
+    "class:logo.hot",
+    "class:logo.hot",
+    "class:logo.mid",
+    "class:logo.mid",
+    "class:logo.cool",
+    "class:logo.shadow",
+]
 
 
 STYLE = Style.from_dict(
@@ -305,6 +319,8 @@ class DashboardUI:
         self.permission_event = threading.Event()
         self.permission_lock = threading.Lock()
         self.quit_armed_until = 0.0
+        self.drag_target: str | None = None
+        self.drag_last_y = 0
         self.ctx.permissions.quiet = True
         self.ctx.permissions.prompt = self.permission_prompt
 
@@ -609,6 +625,31 @@ class DashboardUI:
             if self.work.buffer.cursor_position >= len(self.work.text):
                 self.work_auto_scroll = True
 
+    def _begin_drag_scroll(self, target: str, y: int) -> None:
+        self.drag_target = target
+        self.drag_last_y = y
+        self.auto_scroll = False if target == "trace" else self.auto_scroll
+        self.work_auto_scroll = False if target == "work" else self.work_auto_scroll
+        self.app.layout.focus(self.trace if target == "trace" else self.work)
+
+    def _drag_scroll(self, target: str, y: int) -> bool:
+        if self.drag_target != target:
+            return False
+        delta = y - self.drag_last_y
+        if delta:
+            if target == "trace":
+                self._scroll_trace(delta)
+            else:
+                self._scroll_work(delta)
+            self.drag_last_y = y
+        return True
+
+    def _end_drag_scroll(self, target: str) -> bool:
+        if self.drag_target != target:
+            return False
+        self.drag_target = None
+        return True
+
     def _copy_trace(self, selection_first: bool = True) -> None:
         text = self._selected_trace_text() if selection_first else ""
         label = "selection" if text else "Trace"
@@ -651,6 +692,13 @@ class DashboardUI:
             if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
                 self._scroll_trace(3)
                 return None
+            if mouse_event.button == MouseButton.LEFT and mouse_event.event_type == MouseEventType.MOUSE_DOWN:
+                self._begin_drag_scroll("trace", mouse_event.position.y)
+                return None
+            if mouse_event.event_type == MouseEventType.MOUSE_MOVE and self._drag_scroll("trace", mouse_event.position.y):
+                return None
+            if mouse_event.event_type == MouseEventType.MOUSE_UP and self._end_drag_scroll("trace"):
+                return None
             if mouse_event.event_type == MouseEventType.MOUSE_UP:
                 self.auto_scroll = False
             if mouse_event.button == MouseButton.RIGHT and mouse_event.event_type == MouseEventType.MOUSE_UP:
@@ -664,6 +712,13 @@ class DashboardUI:
                 return None
             if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
                 self._scroll_work(2)
+                return None
+            if mouse_event.button == MouseButton.LEFT and mouse_event.event_type == MouseEventType.MOUSE_DOWN:
+                self._begin_drag_scroll("work", mouse_event.position.y)
+                return None
+            if mouse_event.event_type == MouseEventType.MOUSE_MOVE and self._drag_scroll("work", mouse_event.position.y):
+                return None
+            if mouse_event.event_type == MouseEventType.MOUSE_UP and self._end_drag_scroll("work"):
                 return None
             if mouse_event.event_type == MouseEventType.MOUSE_UP:
                 self.work_auto_scroll = False
@@ -719,13 +774,13 @@ class DashboardUI:
                     Box(Window(FormattedTextControl(self._agent_panel), wrap_lines=False), padding=1),
                     title="  LilBot Agent  ",
                     style="class:frame",
-                    height=Dimension(min=28, preferred=42, weight=5),
+                    height=Dimension(min=22, preferred=30, max=34, weight=3),
                 ),
                 Frame(
                     self.work,
                     title="  Work  ",
                     style="class:frame",
-                    height=Dimension(min=7, preferred=9, max=12, weight=1),
+                    height=Dimension(min=11, preferred=16, max=22, weight=2),
                 ),
             ],
             width=Dimension(weight=3),
@@ -798,23 +853,15 @@ class DashboardUI:
     def _agent_panel(self):
         width = self._width()
         left_width = max(44, int(width * 0.375) - 6)
-        logo_base_width = len("LILBOT") * 5 + (len("LILBOT") - 1)
-        scale_x = max(1, min(3, left_width // logo_base_width))
-        scale_y = 3 if scale_x >= 3 else 2 if scale_x >= 2 else 1
         fragments = []
-        logo_rows = self._pixel_logo_rows("LILBOT", scale_x=scale_x, scale_y=scale_y)
+        logo_rows = LILBOT_LOGO_ROWS if left_width >= 54 else LILBOT_LOGO_COMPACT_ROWS
         for idx, row in enumerate(logo_rows):
-            if idx < len(logo_rows) * 0.34:
-                style = "class:logo.hot"
-            elif idx < len(logo_rows) * 0.68:
-                style = "class:logo.mid"
-            else:
-                style = "class:logo.cool"
-            fragments.append((style, row + "\n"))
+            style = LILBOT_LOGO_STYLES[min(idx, len(LILBOT_LOGO_STYLES) - 1)]
+            fragments.append((style, _clip_line(row, left_width) + "\n"))
 
         fragments.extend(
             [
-                ("class:signature", "\nTerrence Shen  //  China  //  Deeplearningman0723@gmail.com\n"),
+                ("class:signature", "Terrence Shen  //  China  //  Deeplearningman0723@gmail.com\n"),
                 ("class:accent", ">_ clean-room local agent deck\n"),
                 ("class:muted", "model: "),
                 ("class:deep", self.ctx.config.model),
@@ -827,16 +874,6 @@ class DashboardUI:
                 ("class:panel.title", "\n\nAvailable Tools "),
                 ("class:panel.count", f"{len(self.registry.list())}"),
                 ("class:muted", "\n"),
-            ]
-        )
-        fragments.extend(
-            [
-                ("class:muted", "\n\n"),
-                ("class:panel.title", "╭─ live architecture "),
-                ("class:muted", "memory -> skills -> agents -> mcp\n"),
-                ("class:muted", "│  workspace sandbox  │  tool registry  │  permission gate\n"),
-                ("class:panel.title", "╰─ "),
-                ("class:panel.value", "Trace streams on the right. Work logs below.\n"),
             ]
         )
         for label, names in self._tool_groups():
@@ -855,55 +892,19 @@ class DashboardUI:
                 ("class:muted", "\n"),
             ]
         )
-        for skill in skills[:8]:
-            desc = f" - {skill.description}" if skill.description else ""
-            fragments.extend(
-                [
-                    ("class:panel.label", f"{skill.name}: "),
-                    ("class:panel.value", self._truncate(desc.lstrip(" -"), 56)),
-                    ("class:muted", "\n"),
-                ]
-            )
-        if len(skills) > 8:
-            fragments.append(("class:muted", f"... {len(skills) - 8} more skills\n"))
+        skill_names = [skill.name for skill in skills]
+        fragments.extend(
+            [
+                ("class:panel.label", "bundled: "),
+                ("class:panel.value", self._compact_names(skill_names, 8)),
+                ("class:muted", "\n\n"),
+                ("class:panel.title", "╭─ flow "),
+                ("class:muted", "memory -> skills -> subagents -> mcp\n"),
+                ("class:panel.title", "╰─ "),
+                ("class:panel.value", "Trace on right, Work below this card.\n"),
+            ]
+        )
         return FormattedText(fragments)
-
-    def _pixel_logo_rows(self, text: str, scale_x: int, scale_y: int) -> list[str]:
-        filled = "\u2588" * scale_x
-        empty = " " * scale_x
-        gap = " " * max(1, scale_x)
-        rows: list[str] = []
-        for row_idx in range(7):
-            pieces = []
-            for char in text:
-                pattern = PIXEL_FONT.get(char.upper())
-                if not pattern:
-                    pieces.append(empty * 3)
-                    continue
-                pieces.append(
-                    "".join(
-                        filled if self._is_logo_edge(pattern, row_idx, col_idx) else empty
-                        for col_idx, bit in enumerate(pattern[row_idx])
-                        if bit in {"0", "1"}
-                    )
-                )
-            line = gap.join(pieces).rstrip()
-            for _ in range(scale_y):
-                rows.append(line)
-        shadow = [(" " * max(1, scale_x)) + row.replace("\u2588", "\u2591") for row in rows[-2:]]
-        return rows + shadow
-
-    def _is_logo_edge(self, pattern: list[str], row_idx: int, col_idx: int) -> bool:
-        if pattern[row_idx][col_idx] != "1":
-            return False
-        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            rr = row_idx + dr
-            cc = col_idx + dc
-            if rr < 0 or rr >= len(pattern) or cc < 0 or cc >= len(pattern[rr]):
-                return True
-            if pattern[rr][cc] == "0":
-                return True
-        return False
 
     def _tool_groups(self) -> list[tuple[str, list[str]]]:
         groups: list[tuple[str, list[str]]] = [

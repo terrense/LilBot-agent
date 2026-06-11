@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import unittest
 
-from lilbot.tui.dashboard import _highlight_trace_line, _summarize_interim_text, _summarize_tool_output
+from lilbot.tui.dashboard import (
+    LILBOT_LOGO_COMPACT_ROWS,
+    LILBOT_LOGO_ROWS,
+    _clip_line,
+    _highlight_trace_line,
+    _summarize_interim_text,
+    _summarize_tool_output,
+)
 
 
 class DashboardTraceTests(unittest.TestCase):
@@ -39,6 +46,11 @@ class DashboardTraceTests(unittest.TestCase):
 
         self.assertEqual(summary[0], "planning tool work; condensed intermediate reasoning.")
         self.assertTrue(summary[-1].startswith("... hidden"))
+
+    def test_lilbot_logo_rows_are_fixed_banner_art(self):
+        self.assertIn("██████", "\n".join(LILBOT_LOGO_ROWS))
+        self.assertEqual(len(LILBOT_LOGO_COMPACT_ROWS), 3)
+        self.assertLessEqual(len(_clip_line(LILBOT_LOGO_ROWS[0], 30)), 30)
 
 
 if __name__ == "__main__":
