@@ -311,6 +311,15 @@ Windows Terminal + Cascadia Mono / JetBrains Mono
 
 Do not commit API keys. Set the key only in your shell or in Windows user environment variables.
 
+For local development, LilBot also auto-loads `.env` from the project root. The file is ignored by Git.
+
+```powershell
+DEEPSEEK_API_KEY=sk-...
+LILBOT_PROVIDER=deepseek
+LILBOT_MODEL=deepseek-v4-flash
+LILBOT_BASE_URL=https://api.deepseek.com
+```
+
 ```powershell
 $env:DEEPSEEK_API_KEY="sk-..."
 python -m lilbot --provider deepseek --model deepseek-v4-flash
@@ -336,6 +345,7 @@ https://api.deepseek.com
 | Command | Purpose |
 |---|---|
 | `/help` | Show commands |
+| `/copy` | Copy the Trace panel to clipboard |
 | `/theme` | Show theme preview |
 | `/tools` | List tools |
 | `/skills` | List skills |
@@ -345,6 +355,14 @@ https://api.deepseek.com
 | `/mcp` | List MCP-style server config |
 | `/permissions ask/accept-all/deny-all` | Switch permission mode |
 | `/exit` | Quit |
+
+Dashboard interaction notes:
+
+- `Trace` is the main conversation and tool-execution stream.
+- Select text in `Trace` to copy, or use `/copy` / `F2`.
+- Right-click paste and `Ctrl+V` are supported in the Composer.
+- The top bar shows approximate context usage, for example `ctx 03%`.
+- During model work, the footer switches to a wave animation.
 
 ---
 
