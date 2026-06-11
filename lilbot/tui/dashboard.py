@@ -71,9 +71,16 @@ STYLE = Style.from_dict(
         "frame.border": "#d8b4fe",
         "frame.label": "#f9a8d4 bold",
         "logo": "#f9a8d4 bold",
+        "logo.hot": "#f9a8d4 bold",
+        "logo.mid": "#c4b5fd bold",
+        "logo.cool": "#93c5fd bold",
         "logo.shadow": "#8b5cf6 bold",
         "signature": "#f0abfc bold",
         "accent": "#d8b4fe bold",
+        "panel.title": "#fde68a bold",
+        "panel.label": "#f9a8d4 bold",
+        "panel.value": "#f8d8ec",
+        "panel.count": "#86efac bold",
         "muted": "#b8a6d9",
         "deep": "#93c5fd",
         "ok": "#86efac bold",
@@ -188,6 +195,7 @@ class DashboardUI:
         self.busy = False
         self.wave_index = 0
         self.auto_scroll = True
+        self.work_auto_scroll = True
         self.pending_permission: str | None = None
         self.permission_answer = ""
         self.permission_event = threading.Event()
@@ -197,6 +205,16 @@ class DashboardUI:
 
         self.trace = TextArea(
             text=self._trace_text(),
+            read_only=True,
+            focusable=True,
+            focus_on_click=True,
+            scrollbar=True,
+            lexer=TraceLexer(),
+            wrap_lines=True,
+            style="class:trace",
+        )
+        self.work = TextArea(
+            text=self._work_text(),
             read_only=True,
             focusable=True,
             focus_on_click=True,
@@ -370,6 +388,11 @@ class DashboardUI:
         self.trace.text = text
         if self.auto_scroll:
             self.trace.buffer.cursor_position = len(text)
+        work_text = self._work_text()
+        if self.work.text != work_text:
+            self.work.text = work_text
+            if self.work_auto_scroll:
+                self.work.buffer.cursor_position = len(work_text)
         try:
             self.app.invalidate()
         except Exception:
@@ -409,13 +432,23 @@ class DashboardUI:
         def _focus_trace(event) -> None:
             event.app.layout.focus(self.trace)
 
+        @kb.add("f5")
+        def _focus_work(event) -> None:
+            event.app.layout.focus(self.work)
+
         @kb.add("pageup")
         def _page_up(event) -> None:
-            self._scroll_trace(-18)
+            if event.app.layout.has_focus(self.work):
+                self._scroll_work(-8)
+            else:
+                self._scroll_trace(-18)
 
         @kb.add("pagedown")
         def _page_down(event) -> None:
-            self._scroll_trace(18)
+            if event.app.layout.has_focus(self.work):
+                self._scroll_work(8)
+            else:
+                self._scroll_trace(18)
 
         @kb.add("c-home")
         def _trace_home(event) -> None:
@@ -441,6 +474,16 @@ class DashboardUI:
             if self.trace.buffer.cursor_position >= len(self.trace.text):
                 self.auto_scroll = True
 
+    def _scroll_work(self, lines: int) -> None:
+        self.work_auto_scroll = False
+        self.app.layout.focus(self.work)
+        if lines < 0:
+            self.work.buffer.cursor_up(count=abs(lines))
+        else:
+            self.work.buffer.cursor_down(count=lines)
+            if self.work.buffer.cursor_position >= len(self.work.text):
+                self.work_auto_scroll = True
+
     def _copy_trace(self, selection_first: bool = True) -> None:
         text = self._selected_trace_text() if selection_first else ""
         label = "selection" if text else "Trace"
@@ -460,6 +503,7 @@ class DashboardUI:
     def _install_mouse_handlers(self) -> None:
         input_mouse_handler = self.input.control.mouse_handler
         trace_mouse_handler = self.trace.control.mouse_handler
+        work_mouse_handler = self.work.control.mouse_handler
 
         def composer_mouse(mouse_event):
             if mouse_event.event_type in {MouseEventType.MOUSE_DOWN, MouseEventType.MOUSE_UP}:
@@ -483,8 +527,14 @@ class DashboardUI:
                 return None
             return trace_mouse_handler(mouse_event)
 
+        def work_mouse(mouse_event):
+            if mouse_event.event_type == MouseEventType.MOUSE_UP:
+                self.work_auto_scroll = False
+            return work_mouse_handler(mouse_event)
+
         self.input.control.mouse_handler = composer_mouse
         self.trace.control.mouse_handler = trace_mouse
+        self.work.control.mouse_handler = work_mouse
 
     def _write_clipboard(self, text: str) -> bool:
         try:
@@ -529,19 +579,19 @@ class DashboardUI:
         left_column = HSplit(
             [
                 Frame(
-                    Box(Window(FormattedTextControl(self._logo), wrap_lines=False), padding=1),
-                    title="  >_ lilbot  ",
+                    Box(Window(FormattedTextControl(self._agent_panel), wrap_lines=False), padding=1),
+                    title="  LilBot Agent  ",
                     style="class:frame",
-                    height=Dimension(min=18, preferred=22, max=26),
+                    height=Dimension(min=28, preferred=42, weight=5),
                 ),
                 Frame(
-                    Box(Window(FormattedTextControl(self._work), wrap_lines=True), padding=1),
+                    self.work,
                     title="  Work  ",
                     style="class:frame",
-                    height=Dimension(weight=1),
+                    height=Dimension(min=7, preferred=9, max=12, weight=1),
                 ),
             ],
-            width=Dimension(weight=2),
+            width=Dimension(weight=3),
         )
 
         main_area = VSplit(
@@ -608,28 +658,80 @@ class DashboardUI:
             return 1000000
         return 32000
 
-    def _logo(self):
+    def _agent_panel(self):
         width = self._width()
-        logo = self._pixel_logo("LILBOT", scale_x=2, scale_y=2)
-        if width < 120:
-            logo = self._pixel_logo("LILBOT", scale_x=1, scale_y=1)
-        return FormattedText(
+        left_width = max(44, int(width * 0.375) - 6)
+        logo_base_width = len("LILBOT") * 5 + (len("LILBOT") - 1)
+        scale_x = max(1, min(3, left_width // logo_base_width))
+        scale_y = 3 if scale_x >= 3 else 2 if scale_x >= 2 else 1
+        fragments = []
+        logo_rows = self._pixel_logo_rows("LILBOT", scale_x=scale_x, scale_y=scale_y)
+        for idx, row in enumerate(logo_rows):
+            if idx < len(logo_rows) * 0.34:
+                style = "class:logo.hot"
+            elif idx < len(logo_rows) * 0.68:
+                style = "class:logo.mid"
+            else:
+                style = "class:logo.cool"
+            fragments.append((style, row + "\n"))
+
+        fragments.extend(
             [
-                ("class:logo.shadow", logo.replace("\u2588", "\u2593")),
-                ("class:signature", "\n\nTerrence Shen  //  China  //  Deeplearningman0723@gmail.com\n"),
-                ("class:accent", "\n>_ clean-room local coding agent\n"),
+                ("class:signature", "\nTerrence Shen  //  China  //  Deeplearningman0723@gmail.com\n"),
+                ("class:accent", ">_ clean-room local agent deck\n"),
                 ("class:muted", "model: "),
                 ("class:deep", self.ctx.config.model),
-                ("class:muted", "    provider: "),
+                ("class:muted", "   provider: "),
                 ("class:deep", self.ctx.config.provider),
-                ("class:muted", "    permissions: "),
+                ("class:muted", "   permissions: "),
                 ("class:ok", self.ctx.permissions.mode),
-                ("class:muted", "\ndirectory: "),
-                ("class:accent", str(self.ctx.config.workspace)),
+                ("class:muted", "\nworkspace: "),
+                ("class:accent", self._shorten_path(str(self.ctx.config.workspace), 78)),
+                ("class:panel.title", "\n\nAvailable Tools "),
+                ("class:panel.count", f"{len(self.registry.list())}"),
+                ("class:muted", "\n"),
             ]
         )
+        fragments.extend(
+            [
+                ("class:muted", "\n\n"),
+                ("class:panel.title", "╭─ live architecture "),
+                ("class:muted", "memory -> skills -> agents -> mcp\n"),
+                ("class:muted", "│  workspace sandbox  │  tool registry  │  permission gate\n"),
+                ("class:panel.title", "╰─ "),
+                ("class:panel.value", "Trace streams on the right. Work logs below.\n"),
+            ]
+        )
+        for label, names in self._tool_groups():
+            fragments.extend(
+                [
+                    ("class:panel.label", f"{label}: "),
+                    ("class:panel.value", self._compact_names(names, 6)),
+                    ("class:muted", "\n"),
+                ]
+            )
+        skills = self.ctx.skills.list()
+        fragments.extend(
+            [
+                ("class:panel.title", "\nAvailable Skills "),
+                ("class:panel.count", f"{len(skills)}"),
+                ("class:muted", "\n"),
+            ]
+        )
+        for skill in skills[:8]:
+            desc = f" - {skill.description}" if skill.description else ""
+            fragments.extend(
+                [
+                    ("class:panel.label", f"{skill.name}: "),
+                    ("class:panel.value", self._truncate(desc.lstrip(" -"), 56)),
+                    ("class:muted", "\n"),
+                ]
+            )
+        if len(skills) > 8:
+            fragments.append(("class:muted", f"... {len(skills) - 8} more skills\n"))
+        return FormattedText(fragments)
 
-    def _pixel_logo(self, text: str, scale_x: int, scale_y: int) -> str:
+    def _pixel_logo_rows(self, text: str, scale_x: int, scale_y: int) -> list[str]:
         filled = "\u2588" * scale_x
         empty = " " * scale_x
         gap = " " * max(1, scale_x)
@@ -641,52 +743,122 @@ class DashboardUI:
                 if not pattern:
                     pieces.append(empty * 3)
                     continue
-                pieces.append("".join(filled if bit == "1" else empty for bit in pattern[row_idx]))
+                pieces.append(
+                    "".join(
+                        filled if self._is_logo_edge(pattern, row_idx, col_idx) else empty
+                        for col_idx, bit in enumerate(pattern[row_idx])
+                        if bit in {"0", "1"}
+                    )
+                )
             line = gap.join(pieces).rstrip()
             for _ in range(scale_y):
                 rows.append(line)
-        return "\n".join(rows)
+        shadow = [(" " * max(1, scale_x)) + row.replace("\u2588", "\u2591") for row in rows[-2:]]
+        return rows + shadow
 
-    def _work(self):
-        work = "\n".join(self.work_items)
-        return FormattedText(
-            [
-                ("class:accent", "Nebula workplane\n\n"),
-                ("class:muted", SYSTEM_MAP),
-                ("class:deep", "\nActive work\n"),
-                ("class:ok", work),
-            ]
-        )
+    def _is_logo_edge(self, pattern: list[str], row_idx: int, col_idx: int) -> bool:
+        if pattern[row_idx][col_idx] != "1":
+            return False
+        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            rr = row_idx + dr
+            cc = col_idx + dc
+            if rr < 0 or rr >= len(pattern) or cc < 0 or cc >= len(pattern[rr]):
+                return True
+            if pattern[rr][cc] == "0":
+                return True
+        return False
+
+    def _tool_groups(self) -> list[tuple[str, list[str]]]:
+        groups: list[tuple[str, list[str]]] = [
+            ("workspace", []),
+            ("search", []),
+            ("shell", []),
+            ("memory", []),
+            ("skills", []),
+            ("agents", []),
+            ("mcp", []),
+        ]
+        by_name = {label: names for label, names in groups}
+        for tool in self.registry.list():
+            name = tool.name
+            if name in {"list_dir", "read_file", "write_file", "edit_file"}:
+                by_name["workspace"].append(name)
+            elif name in {"glob", "grep"}:
+                by_name["search"].append(name)
+            elif name == "bash":
+                by_name["shell"].append(name)
+            elif name.startswith("memory_"):
+                by_name["memory"].append(name.removeprefix("memory_"))
+            elif name.startswith("skill_"):
+                by_name["skills"].append(name.removeprefix("skill_"))
+            elif name.startswith("agent_"):
+                by_name["agents"].append(name.removeprefix("agent_"))
+            elif name.startswith("mcp_"):
+                by_name["mcp"].append(name.removeprefix("mcp_"))
+        return [(label, names) for label, names in groups if names]
+
+    def _compact_names(self, names: list[str], limit: int) -> str:
+        if not names:
+            return "(none)"
+        shown = names[:limit]
+        suffix = f", +{len(names) - limit}" if len(names) > limit else ""
+        return ", ".join(shown) + suffix
+
+    def _shorten_path(self, value: str, limit: int) -> str:
+        return value if len(value) <= limit else "..." + value[-(limit - 3):]
+
+    def _truncate(self, value: str, limit: int) -> str:
+        return value if len(value) <= limit else value[: max(0, limit - 3)] + "..."
+
+    def _work_text(self) -> str:
+        rows = [
+            "### Nebula workplane",
+            "",
+            *SYSTEM_MAP.splitlines(),
+            "",
+            "### Active work",
+            *(self.work_items or ["No active work."]),
+            "",
+            "---",
+            "F5 focuses Work. Mouse wheel or PageUp/PageDown scrolls the focused pane.",
+            "Esc returns to Composer.",
+        ]
+        return "\n".join(rows)
 
     def _toolbar(self):
         if self.busy:
-            frame = WAVE_FRAMES[self.wave_index % len(WAVE_FRAMES)]
-            self.wave_index += 1
-            return FormattedText(
-                [
-                    ("class:wave", f" thinking {frame} "),
-                    ("class:toolbar", " DeepSeek turn running   "),
-                    ("class:hotkey", " F2 "),
-                    ("class:toolbar", " copy selection/trace   "),
-                    ("class:hotkey", " F4 "),
-                    ("class:toolbar", " focus trace   "),
-                    ("class:hotkey", " Ctrl+C "),
-                    ("class:toolbar", " exit "),
-                ]
-            )
+            return self._busy_toolbar()
         return FormattedText(
             [
-                ("class:hotkey", " /help "),
+                ("class:hotkey", "/help"),
                 ("class:toolbar", " commands   "),
-                ("class:hotkey", " /copy/F2 "),
-                ("class:toolbar", " copy trace   "),
-                ("class:hotkey", " F4/PageUp/PageDown "),
-                ("class:toolbar", " trace nav   "),
-                ("class:hotkey", " right-click "),
-                ("class:toolbar", " paste in composer/copy trace selection   "),
-                ("class:hotkey", " /theme "),
-                ("class:toolbar", " blush/violet   "),
-                ("class:hotkey", " Ctrl+C "),
+                ("class:hotkey", "F2"),
+                ("class:toolbar", " copy   "),
+                ("class:hotkey", "F4"),
+                ("class:toolbar", " trace   "),
+                ("class:hotkey", "F5"),
+                ("class:toolbar", " work   "),
+                ("class:hotkey", "PgUp/PgDn"),
+                ("class:toolbar", " scroll   "),
+                ("class:hotkey", "Ctrl+V"),
+                ("class:toolbar", " paste   "),
+                ("class:hotkey", "Ctrl+C"),
                 ("class:toolbar", " exit "),
+            ]
+        )
+
+    def _busy_toolbar(self):
+        frame = WAVE_FRAMES[self.wave_index % len(WAVE_FRAMES)]
+        self.wave_index += 1
+        left = " thinking "
+        right = " running  F2 copy  F4 trace  F5 work  Esc compose "
+        width = self._width()
+        wave_width = max(8, width - len(left) - len(right))
+        wave = (frame * ((wave_width // len(frame)) + 2))[:wave_width]
+        return FormattedText(
+            [
+                ("class:wave", left),
+                ("class:wave", wave),
+                ("class:toolbar", right),
             ]
         )
