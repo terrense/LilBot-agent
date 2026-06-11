@@ -246,13 +246,13 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    Config[".lilbot/mcp.json"]:::file
-    Manager["MCPManager"]:::core
-    ServerA["server: filesystem"]:::server
-    ServerB["server: browser"]:::server
-    ServerC["server: custom lab tool"]:::server
-    ToolCall["mcp_call(server, tool, args)"]:::call
-    Result["tool result -> Agent Loop"]:::result
+    Config[".lilbot/mcp.json"]
+    Manager["MCPManager"]
+    ServerA["server: filesystem"]
+    ServerB["server: browser"]
+    ServerC["server: custom lab tool"]
+    ToolCall["mcp_call(server, tool, args)"]
+    Result["tool result → Agent Loop"]
 
     Config --> Manager
     Manager --> ServerA
@@ -261,11 +261,17 @@ flowchart TB
     ToolCall --> Manager
     Manager --> Result
 
+    class Config file
+    class Manager core
+    class ServerA,ServerB,ServerC server
+    class ToolCall toolcall
+    class Result result
+
     classDef file fill:#172554,stroke:#60a5fa,color:#fff
-    classDef core fill:#1E1B4B,stroke:#a78bfa,color:#fff
-    classDef server fill:#042F2E,stroke:#2dd4bf,color:#fff
-    classDef call fill:#451A03,stroke:#f59e0b,color:#fff
-    classDef result fill:#052E16,stroke:#22c55e,color:#fff
+    classDef core fill:#1e1b4b,stroke:#a78bfa,color:#fff
+    classDef server fill:#042f2e,stroke:#2dd4bf,color:#fff
+    classDef toolcall fill:#451a03,stroke:#f59e0b,color:#fff
+    classDef result fill:#052e16,stroke:#22c55e,color:#fff
 ```
 
 ---
