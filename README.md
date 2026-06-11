@@ -17,16 +17,11 @@
 
 ---
 
-## Visual Placeholders
+## Whole Architecture
 
-Put your future screenshots and sticker art here:
+now we only have the CLI version, in the future, I will find some guy to coorperate with me to develop a coller software version like this:
 
-```text
-docs/assets/1.png  hero image / main cockpit screenshot
-docs/assets/2.png  theme selector screenshot
-docs/assets/3.png  architecture sticker sheet
-docs/assets/4.png  permission flow / tool execution screenshot
-```
+
 
 ![Theme placeholder](docs/assets/2.png)
 ![Architecture sticker placeholder](docs/assets/3.png)
