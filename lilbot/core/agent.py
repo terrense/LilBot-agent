@@ -36,7 +36,7 @@ class Agent:
             turn = self.provider.complete(self.messages, self.registry.schemas())
             self._add_usage(turn)
             if turn.content:
-                yield TextDelta(turn.content)
+                yield TextDelta(turn.content, interim=bool(turn.tool_calls))
             if not turn.tool_calls:
                 self.messages.append({"role": "assistant", "content": turn.content})
                 yield TurnFinished(steps, dict(self.usage))
