@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from .memory import MemoryStore
-from .skills import SkillRegistry
+from ..memory import MemoryStore
+from ..skills import SkillRegistry
 
 
 def build_system_prompt(memory: MemoryStore, skills: SkillRegistry) -> str:
@@ -20,4 +20,3 @@ Available skill templates:
 Persistent memory:
 {memory.context()}
 """
-

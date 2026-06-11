@@ -4,7 +4,7 @@ import sys
 from datetime import datetime
 from typing import Iterable
 
-from .events import TextDelta, ToolFinished, ToolStarted, TurnFinished
+from ..core.events import TextDelta, ToolFinished, ToolStarted, TurnFinished
 
 try:
     from rich import box

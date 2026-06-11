@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 from uuid import uuid4
 
-from .events import ProviderTurn
+from ..core.events import ProviderTurn
 
 
 ProviderCallable = Callable[[list[dict], list[dict]], ProviderTurn]
@@ -86,4 +86,3 @@ class SubAgentManager:
             task.status = "error"
         finally:
             task.finished_at = time.time()
-

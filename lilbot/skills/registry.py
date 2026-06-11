@@ -42,7 +42,7 @@ class SkillRegistry:
     def __init__(self, state_dir: Path):
         self.state_dir = state_dir
         self.project_dir = state_dir / "skills"
-        self.bundled_dir = Path(__file__).parent / "skills" / "bundled"
+        self.bundled_dir = Path(__file__).parent / "bundled"
         self._skills: dict[str, Skill] = {}
         self.reload()
 
@@ -71,4 +71,3 @@ class SkillRegistry:
     def ensure_project_dir(self) -> Path:
         self.project_dir.mkdir(parents=True, exist_ok=True)
         return self.project_dir
-

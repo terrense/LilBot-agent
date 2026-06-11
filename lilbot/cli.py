@@ -6,18 +6,17 @@ import sys
 from pathlib import Path
 from typing import Iterable
 
-from .agent import Agent
 from .config import LilBotConfig, load_config, save_config
+from .core.agent import Agent
+from .llm.providers import choose_provider
 from .mcp import MCPManager
 from .memory import MemoryStore
-from .permissions import PermissionManager
-from .providers import choose_provider
-from .sandbox import Sandbox
+from .sandbox import PermissionManager, Sandbox
 from .skills import SkillRegistry
 from .subagents import SubAgentManager
 from .tools import ToolContext, ToolRegistry, register_builtins
-from .ui import LilBotUI
-from .windows_console import configure_windows_console
+from .tui.classic import LilBotUI
+from .tui.windows_console import configure_windows_console
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -231,7 +230,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     can_use_dashboard = sys.stdin.isatty() and sys.stdout.isatty()
     if not args.classic and not args.no_rich and can_use_dashboard:
         try:
-            from .dashboard import DashboardUI
+            from .tui.dashboard import DashboardUI
 
             return DashboardUI(agent, registry, ctx).run()
         except Exception as exc:

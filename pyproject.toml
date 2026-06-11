@@ -9,6 +9,7 @@ description = "LilBot: a clean-room local coding agent playground."
 requires-python = ">=3.10"
 dependencies = [
   "httpx>=0.27.0",
+  "prompt_toolkit>=3.0.0",
   "rich>=13.0.0",
 ]
 
@@ -18,4 +19,3 @@ lilbot = "lilbot.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["lilbot*"]
-
