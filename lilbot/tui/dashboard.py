@@ -16,7 +16,6 @@ from ..tools import ToolContext, ToolRegistry
 
 try:
     from prompt_toolkit import Application
-    from prompt_toolkit.application import run_in_terminal
     from prompt_toolkit.application.current import get_app
     from prompt_toolkit.formatted_text import FormattedText
     from prompt_toolkit.key_binding import KeyBindings
@@ -50,18 +49,6 @@ tool registry
   -> permission gate
   -> workspace sandbox
 """
-
-WAVE_FRAMES = [
-    "▁▂▃▄▅▆▇█▇▆▅▄▃▂",
-    "▂▃▄▅▆▇█▇▆▅▄▃▂▁",
-    "▃▄▅▆▇█▇▆▅▄▃▂▁▂",
-    "▄▅▆▇█▇▆▅▄▃▂▁▂▃",
-    "▅▆▇█▇▆▅▄▃▂▁▂▃▄",
-    "▆▇█▇▆▅▄▃▂▁▂▃▄▅",
-    "▇█▇▆▅▄▃▂▁▂▃▄▅▆",
-    "█▇▆▅▄▃▂▁▂▃▄▅▆▇",
-]
-
 
 WAVE_FRAMES = [
     "▁▂▃▄▅▆▇█▇▆▅▄▃▂",
@@ -201,6 +188,11 @@ class DashboardUI:
         self.busy = False
         self.wave_index = 0
         self.auto_scroll = True
+        self.pending_permission: str | None = None
+        self.permission_answer = ""
+        self.permission_event = threading.Event()
+        self.permission_lock = threading.Lock()
+        self.ctx.permissions.quiet = True
         self.ctx.permissions.prompt = self.permission_prompt
 
         self.trace = TextArea(
@@ -214,8 +206,11 @@ class DashboardUI:
             style="class:trace",
         )
         self.input = TextArea(
-            height=3,
+            height=4,
             multiline=False,
+            focusable=True,
+            focus_on_click=True,
+            wrap_lines=True,
             prompt=[("class:composer.prompt", " LilBot / compose > ")],
             accept_handler=self._accept,
             style="class:composer",
@@ -301,21 +296,31 @@ class DashboardUI:
             self.work_items = ["No active work."]
 
     def permission_prompt(self, label: str) -> str:
-        holder: list[str] = []
-
-        def ask() -> None:
-            print()
-            print("Permission required inside LilBot dashboard.")
-            print("y = allow once, a = always allow, n = deny once, d = always deny")
-            holder.append(input(label))
-
-        run_in_terminal(ask)
-        return holder[0] if holder else "n"
+        with self.permission_lock:
+            self.permission_answer = ""
+            self.pending_permission = label
+            self.permission_event.clear()
+        self.work_items = ["waiting for permission", "type y/a/n/d in Composer"]
+        self._append("")
+        self._append("### Permission required")
+        self._append(label)
+        self._append("Type `y` allow once, `a` always allow, `n` deny once, or `d` always deny.")
+        try:
+            self.app.layout.focus(self.input)
+        except Exception:
+            pass
+        self.permission_event.wait()
+        with self.permission_lock:
+            answer = self.permission_answer or "n"
+            self.pending_permission = None
+        return answer
 
     def _accept(self, buffer) -> bool:
         line = buffer.text.strip()
         buffer.text = ""
         if not line:
+            return False
+        if self._answer_permission(line):
             return False
         if line in {"/exit", "/quit", "/q"}:
             self.app.exit(result=0)
@@ -329,6 +334,15 @@ class DashboardUI:
         self._append(f"> {line}")
         threading.Thread(target=self._process_line, args=(line,), daemon=True).start()
         return False
+
+    def _answer_permission(self, line: str) -> bool:
+        with self.permission_lock:
+            if self.pending_permission is None:
+                return False
+            self.permission_answer = line
+            self.permission_event.set()
+        self._append(f"permission answer: `{line}`")
+        return True
 
     def _process_line(self, line: str) -> None:
         self.busy = True
@@ -448,6 +462,8 @@ class DashboardUI:
         trace_mouse_handler = self.trace.control.mouse_handler
 
         def composer_mouse(mouse_event):
+            if mouse_event.event_type in {MouseEventType.MOUSE_DOWN, MouseEventType.MOUSE_UP}:
+                self.app.layout.focus(self.input)
             if (
                 mouse_event.button == MouseButton.RIGHT
                 and mouse_event.event_type == MouseEventType.MOUSE_UP
