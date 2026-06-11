@@ -16,6 +16,7 @@ from .skills import SkillRegistry
 from .subagents import SubAgentManager
 from .tools import ToolContext, ToolRegistry, register_builtins
 from .ui import LilBotUI
+from .windows_console import configure_windows_console
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -88,6 +89,9 @@ def handle_slash(line: str, agent: Agent, registry: ToolRegistry, ctx: ToolConte
         raise KeyboardInterrupt
     if cmd in {"help", "h", ""}:
         ui.help()
+        return True
+    if cmd == "theme":
+        ui.theme_demo()
         return True
     if cmd == "tools":
         ui.table("Tools", ["Name", "Description"], [(t.name, t.description) for t in registry.list()])
@@ -188,7 +192,7 @@ def handle_memory(args: str, ctx: ToolContext, ui: LilBotUI) -> None:
 
 def interactive_loop(agent: Agent, registry: ToolRegistry, ctx: ToolContext, ui: LilBotUI) -> int:
     ui.banner(str(ctx.config.workspace), ctx.config.provider, ctx.config.model, ctx.config.permission_mode)
-    ui.help()
+    ui.help(compact=True)
     while True:
         try:
             line = ui.prompt().strip()
@@ -208,6 +212,7 @@ def interactive_loop(agent: Agent, registry: ToolRegistry, ctx: ToolContext, ui:
 
 
 def main(argv: Iterable[str] | None = None) -> int:
+    configure_windows_console()
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
     cfg = load_config(args.workspace)

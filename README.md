@@ -1,35 +1,110 @@
 # LilBot Agent
 
-LilBot 是一个原创的本地 Agent 实验框架，用来学习和复刻现代 coding agent 的核心形态：Agent loop、工具调用、权限审批、沙箱、记忆、技能、子 Agent 和 MCP 风格外部工具接入。
+LilBot is a clean-room local coding-agent playground. It is written in Python so we can move fast on the agent kernel, tools, permissions, memory, skills, subagents, MCP-style adapters, and a polished terminal UI.
 
-这个项目刻意不复制任何专有实现。代码是干净实现，架构上参考的是通用 Agent 设计模式和本目录里玩具实现暴露出来的公开概念。
+The code is original. It copies no proprietary implementation.
 
-## 快速开始
+## Windows Quick Start
+
+Python 3.10 is OK. The project is tested with Python 3.10.20 on Windows.
 
 ```powershell
+cd F:\Experiment_laborotory\collection-claude-code-source-code-main\LilBot-agent-code
+conda activate LilBot
 pip install -r requirements.txt
 python -m lilbot
 ```
 
-无 API Key 时会使用内置的规则模型，方便测试 TUI、工具、记忆和技能。接入 OpenAI-compatible 模型：
+If box lines or Chinese text look like `鈺...`, your PowerShell tab is not using UTF-8. LilBot now tries to enable UTF-8 automatically, but this manual setup is still useful:
+
+```powershell
+chcp 65001
+$OutputEncoding = [System.Text.UTF8Encoding]::new()
+[Console]::InputEncoding = [System.Text.UTF8Encoding]::new()
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+python -m lilbot
+```
+
+Recommended terminal: Windows Terminal + Cascadia Mono or JetBrains Mono.
+
+## DeepSeek
+
+Do not commit API keys. Set the key only in your shell or in Windows user environment variables.
+
+Temporary current-shell use:
 
 ```powershell
 $env:DEEPSEEK_API_KEY="sk-..."
 python -m lilbot --provider deepseek --model deepseek-v4-flash
-
-# or any OpenAI-compatible endpoint:
-$env:LILBOT_API_KEY="sk-..."
-$env:LILBOT_BASE_URL="https://api.openai.com/v1"
-$env:LILBOT_MODEL="gpt-4o-mini"
-python -m lilbot --provider openai
 ```
 
-## 核心架构
+One-shot real API smoke test:
+
+```powershell
+$env:DEEPSEEK_API_KEY="sk-..."
+python -m lilbot --provider deepseek --model deepseek-v4-flash --print "Reply exactly: LilBot OK"
+```
+
+LilBot uses DeepSeek's OpenAI-compatible endpoint:
 
 ```text
-User / CLI / TUI
+https://api.deepseek.com
+```
+
+## GitHub Login On Windows
+
+This repo already has the remote configured:
+
+```powershell
+git remote -v
+```
+
+To push from your own Windows terminal, log in using one of these methods.
+
+### Option A: Git Credential Manager
+
+```powershell
+git push -u origin main
+```
+
+Git will open a GitHub browser login or ask for credentials. For password prompts, GitHub requires a Personal Access Token instead of your account password.
+
+### Option B: GitHub CLI
+
+Install GitHub CLI, then:
+
+```powershell
+gh auth login
+git push -u origin main
+```
+
+Use:
+
+```powershell
+gh auth status
+```
+
+to confirm login.
+
+## CLI Commands
+
+- `/help` show commands
+- `/theme` show theme preview
+- `/tools` list tools
+- `/skills` list skills
+- `/skill review <target>` run a skill template
+- `/memory list|search|save|delete` manage memory
+- `/agents` list subagent types and tasks
+- `/mcp` list MCP-style server config
+- `/permissions ask|accept-all|deny-all` switch permission mode
+- `/exit` quit
+
+## Architecture
+
+```text
+User / TUI
   -> AgentLoop
-      -> Provider(OpenAI-compatible or local rule model)
+      -> Provider(OpenAI-compatible, DeepSeek, or local rule model)
       -> ToolRegistry
           -> Sandbox + PermissionManager
           -> File/Bash/Search tools
@@ -40,30 +115,5 @@ User / CLI / TUI
       -> Session transcript + compaction
 ```
 
-## 常用命令
+Python can absolutely build a CLI/TUI as polished as TypeScript tools. The terminal only receives ANSI escape sequences, text, mouse events, and keyboard events. Python libraries such as Rich, Textual, prompt_toolkit, and curses/blessed can drive those just as well as Node libraries. Rich gives us beautiful rendering now; Textual can give us full-screen reactive panels later.
 
-- `/help` 查看命令
-- `/tools` 查看工具
-- `/skills` 查看技能
-- `/skill review <目标>` 执行技能模板
-- `/memory list|search|save|delete` 管理记忆
-- `/agents` 查看子 Agent 类型和任务
-- `/mcp` 查看 MCP 风格 server 配置
-- `/permissions ask|accept-all|deny-all` 切换权限模式
-- `/exit` 退出
-
-## 已实现模块
-
-- 原创 Agent loop：支持多轮工具调用、事件流、轻量上下文压缩
-- Tool registry：工具 schema、执行器、统一结果模型
-- Sandbox：文件路径限制在 workspace 内，shell 在 workspace 下执行
-- Permission：写文件和 shell 默认审批，可按会话记住 allow/deny
-- Memory：项目级 JSONL 记忆，支持关键词评分搜索
-- Skills：Markdown 技能模板，支持 `{{args}}` 替换
-- Subagents：轻量后台任务模型，支持 coder/reviewer/researcher/planner
-- MCP adapter：读取 `.lilbot/mcp.json`，提供实验性 JSON-RPC stdio 调用入口
-- TUI：Rich 彩色 logo、状态条、工具过程和命令面板
-
-## 安全边界
-
-LilBot 默认把工作空间作为根目录。文件工具不能读写根目录外文件；bash 命令需要权限审批。它是学习用 agent，不应该直接用于高风险生产环境。
