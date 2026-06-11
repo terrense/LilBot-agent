@@ -9,7 +9,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-36C5F0?style=for-the-badge&logo=python&logoColor=white)](#windows-quick-start)
 [![Windows](https://img.shields.io/badge/Windows-Terminal-0078D4?style=for-the-badge&logo=windows-terminal&logoColor=white)](#windows-terminal-notes)
 [![DeepSeek](https://img.shields.io/badge/DeepSeek-V4-7C3AED?style=for-the-badge)](#deepseek)
-[![TUI](https://img.shields.io/badge/TUI-Rich%20%2B%20Future%20Textual-00E5FF?style=for-the-badge)](#flight-deck)
+[![TUI](https://img.shields.io/badge/TUI-prompt__toolkit%20Fullscreen-F9A8D4?style=for-the-badge)](#flight-deck)
 
 `LilBot` is a futuristic local coding-agent lab: agent loop, tool bus, permission gate, sandbox, memory core, skills, subagents, and MCP-style adapters.
 
@@ -86,11 +86,11 @@ LilBot is aiming for a terminal cockpit, not a boring command prompt.
 └──────────────────────────────────────────────────────────────┘
 ```
 
-Current renderer: `Rich`.
+Current default renderer: `prompt_toolkit` full-screen dashboard.
 
-Next full-screen renderer candidate: `Textual`.
+Classic fallback renderer: `Rich`, available with `--classic`.
 
-Python can absolutely build a CLI/TUI as polished as TypeScript tools. Terminals receive ANSI escape sequences, keyboard events, mouse events, and layout redraws. Python libraries like `Rich`, `Textual`, and `prompt_toolkit` can drive those just as well as Node libraries.
+Python can absolutely build a CLI/TUI as polished as TypeScript tools. Terminals receive ANSI escape sequences, keyboard events, mouse events, and layout redraws. Python libraries like `prompt_toolkit`, `Rich`, and `Textual` can drive those just as well as Node libraries.
 
 ---
 
@@ -99,7 +99,7 @@ Python can absolutely build a CLI/TUI as polished as TypeScript tools. Terminals
 ```mermaid
 flowchart TB
     User["User / Windows Terminal"]:::human
-    TUI["LilBot TUI\nRich cockpit today\nTextual cockpit later"]:::ui
+    TUI["LilBot TUI\nprompt_toolkit fullscreen\nRich classic fallback"]:::ui
     Loop["Agent Loop\nreason -> tool -> observe -> continue"]:::core
     Provider["Provider Layer\nDeepSeek V4 / OpenAI-compatible / local rule model"]:::model
     Registry["Tool Registry\nschemas + handlers + result model"]:::tool
@@ -282,6 +282,12 @@ pip check
 python -m lilbot
 ```
 
+Use the legacy printed interface only when debugging:
+
+```powershell
+python -m lilbot --classic
+```
+
 If box lines or Chinese text look wrong, force UTF-8 for the current PowerShell tab:
 
 ```powershell
@@ -345,7 +351,7 @@ https://api.deepseek.com
 
 ```mermaid
 flowchart LR
-    V01["v0.1\nRich cockpit\nDeepSeek link\ncore tools"] --> V02["v0.2\nTextual fullscreen\nlive work panel\nstreaming transcript"]
+    V01["v0.1\nfullscreen dashboard\nDeepSeek link\ncore tools"] --> V02["v0.2\nlive work panel\nstreaming transcript\nbetter logo motion"]
     V02 --> V03["v0.3\nstronger sandbox\npatch editor\npermission memory"]
     V03 --> V04["v0.4\nreal MCP sessions\nsubagent worktrees\nskill marketplace"]
     V04 --> V05["v1.0\nLilBot mission control"]
@@ -374,4 +380,3 @@ gh auth login
 gh auth setup-git
 git push -u origin main
 ```
-

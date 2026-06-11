@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import shlex
+import sys
 from pathlib import Path
 from typing import Iterable
 
@@ -29,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--permission-mode", choices=["ask", "accept-all", "deny-all"], default=None)
     parser.add_argument("--print", action="store_true", dest="print_mode", help="Run one prompt and exit.")
+    parser.add_argument("--classic", action="store_true", help="Use the legacy printed Rich interface.")
     parser.add_argument("--no-rich", action="store_true")
     return parser
 
@@ -226,4 +228,12 @@ def main(argv: Iterable[str] | None = None) -> int:
             parser.error("--print requires a prompt or positional prompt text")
         run_prompt(agent, ui, prompt)
         return 0
+    can_use_dashboard = sys.stdin.isatty() and sys.stdout.isatty()
+    if not args.classic and not args.no_rich and can_use_dashboard:
+        try:
+            from .dashboard import DashboardUI
+
+            return DashboardUI(agent, registry, ctx).run()
+        except Exception as exc:
+            ui.error(f"Dashboard unavailable ({type(exc).__name__}); falling back to classic UI.")
     return interactive_loop(agent, registry, ctx, ui)
