@@ -5,8 +5,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from .config import LilBotConfig
-from .events import ProviderTurn, ToolCall
+from ..config import LilBotConfig
+from ..core.events import ProviderTurn, ToolCall
 
 
 class ProviderError(RuntimeError):

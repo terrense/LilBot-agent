@@ -8,10 +8,10 @@ import threading
 from datetime import datetime
 from typing import Iterable
 
-from .agent import Agent
-from .cli import handle_slash, run_prompt
-from .events import TextDelta, ToolFinished, ToolStarted, TurnFinished
-from .tools import ToolContext, ToolRegistry
+from ..core.agent import Agent
+from ..cli import handle_slash, run_prompt
+from ..core.events import TextDelta, ToolFinished, ToolStarted, TurnFinished
+from ..tools import ToolContext, ToolRegistry
 
 try:
     from prompt_toolkit import Application
@@ -482,4 +482,3 @@ class DashboardUI:
                 ("class:toolbar", " exit "),
             ]
         )
-

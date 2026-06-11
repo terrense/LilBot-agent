@@ -4,11 +4,11 @@ import json
 from collections.abc import Iterator
 from typing import Any
 
-from .config import LilBotConfig
+from ..config import LilBotConfig
 from .events import ProviderTurn, TextDelta, ToolFinished, ToolStarted, TurnFinished
 from .prompts import build_system_prompt
-from .providers import BaseProvider
-from .tools import ToolContext, ToolRegistry
+from ..llm.providers import BaseProvider
+from ..tools import ToolContext, ToolRegistry
 
 
 class Agent:
@@ -100,4 +100,3 @@ class Agent:
                 for call in turn.tool_calls
             ],
         }
-
