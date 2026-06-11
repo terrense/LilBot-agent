@@ -23,6 +23,7 @@ class ProviderTurn:
 @dataclass
 class TextDelta:
     text: str
+    interim: bool = False
 
 
 @dataclass
@@ -45,4 +46,3 @@ class ToolFinished:
 class TurnFinished:
     steps: int
     usage: dict[str, int] = field(default_factory=dict)
-

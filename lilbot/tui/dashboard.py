@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import threading
 from datetime import datetime
+from time import monotonic
 from typing import Iterable
 
 from ..core.agent import Agent
@@ -60,6 +61,30 @@ WAVE_FRAMES = [
     "▇█▇▆▅▄▃▂▁▂▃▄▅▆",
     "█▇▆▅▄▃▂▁▂▃▄▅▆▇",
 ]
+
+QUIT_CONFIRM_SECONDS = 1.6
+TRACE_MAX_LINES = 900
+TRACE_OUTPUT_SMALL_CHARS = 1800
+TRACE_OUTPUT_MAX_LINE_CHARS = 180
+TRACE_TOOL_LINE_LIMITS = {
+    "bash": 10,
+    "glob": 10,
+    "grep": 18,
+    "list_dir": 10,
+    "read_file": 10,
+    "write_file": 36,
+    "edit_file": 36,
+    "mcp_call": 14,
+}
+NOISY_PATH_MARKERS = (
+    ".git/objects/",
+    ".git\\objects\\",
+    "__pycache__/",
+    "__pycache__\\",
+    ".pytest_cache/",
+    ".ruff_cache/",
+    ".mypy_cache/",
+)
 
 
 STYLE = Style.from_dict(
@@ -178,6 +203,84 @@ def _inline_fragments(text: str, base_style: str):
     return fragments or [(base_style, "")]
 
 
+def _compact_json(value: object, limit: int = 220) -> str:
+    text = json.dumps(value, ensure_ascii=False, default=str)
+    return _clip_line(text, limit)
+
+
+def _clip_line(value: str, limit: int = TRACE_OUTPUT_MAX_LINE_CHARS) -> str:
+    value = value.replace("\t", "    ")
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 1)] + "…"
+
+
+def _is_noisy_path_line(line: str) -> bool:
+    normalized = line.replace("\\", "/")
+    return any(marker.replace("\\", "/") in normalized for marker in NOISY_PATH_MARKERS)
+
+
+def _summarize_interim_text(text: str) -> list[str]:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return []
+    if len(lines) <= 4 and len(text) <= 700:
+        return [_clip_line(line) for line in lines]
+    shown = [_clip_line(line, 160) for line in lines[:3]]
+    hidden = max(0, len(lines) - len(shown))
+    return [
+        "planning tool work; condensed intermediate reasoning.",
+        *shown,
+        f"... hidden {hidden} planning lines while tools run.",
+    ]
+
+
+def _summarize_tool_output(name: str, output: str, metadata: dict | None = None, ok: bool = True) -> list[str]:
+    if not output:
+        return []
+    metadata = metadata or {}
+    lines = output.splitlines() or [output]
+    line_limit = TRACE_TOOL_LINE_LIMITS.get(name, 12)
+    char_count = len(output)
+    hidden_noisy = 0
+    candidate_lines = lines
+
+    if name in {"list_dir", "glob"}:
+        filtered = []
+        for line in lines:
+            if _is_noisy_path_line(line):
+                hidden_noisy += 1
+            else:
+                filtered.append(line)
+        candidate_lines = filtered or ["(only noisy cache/git paths matched)"]
+
+    should_summarize = (
+        hidden_noisy > 0
+        or len(candidate_lines) > line_limit
+        or len(lines) > line_limit
+        or char_count > TRACE_OUTPUT_SMALL_CHARS
+        or any(len(line) > TRACE_OUTPUT_MAX_LINE_CHARS for line in candidate_lines)
+    )
+    if not should_summarize:
+        return [_clip_line(line) for line in candidate_lines]
+
+    shown = [_clip_line(line) for line in candidate_lines[:line_limit]]
+    hidden_lines = max(0, len(lines) - len(shown) - hidden_noisy)
+    summary = [
+        f"output summarized: {len(lines)} lines, {char_count} chars; showing {len(shown)} representative lines."
+    ]
+    if hidden_noisy:
+        summary.append(f"omitted {hidden_noisy} noisy cache/git path lines.")
+    if metadata.get("truncated"):
+        summary.append("tool result was truncated by the registry before it reached the model.")
+    summary.extend(shown)
+    if hidden_lines:
+        summary.append(f"... hidden {hidden_lines} more lines to keep Trace responsive.")
+    if ok:
+        summary.append("full tool result is kept in the agent turn context, subject to registry limits.")
+    return summary
+
+
 class DashboardUI:
     def __init__(self, agent: Agent, registry: ToolRegistry, ctx: ToolContext):
         if Application is None:
@@ -188,7 +291,8 @@ class DashboardUI:
         self.lines: list[str] = [
             "Boot sequence ready.",
             "Trace is the main conversation and tool-execution stream.",
-            "Trace owns selection and scrolling: drag inside Trace, Ctrl+C/F2 to copy, PageUp/PageDown to scroll.",
+            "Trace keeps final answers readable and summarizes noisy tool output.",
+            "Copy: terminal Ctrl+Shift+C or F2. Exit: press Ctrl+C twice.",
         ]
         self.work_items: list[str] = ["No active work."]
         self.tool_count = 0
@@ -200,6 +304,7 @@ class DashboardUI:
         self.permission_answer = ""
         self.permission_event = threading.Event()
         self.permission_lock = threading.Lock()
+        self.quit_armed_until = 0.0
         self.ctx.permissions.quiet = True
         self.ctx.permissions.prompt = self.permission_prompt
 
@@ -288,27 +393,41 @@ class DashboardUI:
 
     def event(self, event: object) -> None:
         if isinstance(event, TextDelta):
-            self._append("")
-            self._append("LILBOT")
-            self._append(event.text)
+            if event.interim:
+                summary = _summarize_interim_text(event.text)
+                if summary:
+                    self._append("")
+                    self._append("╭─ ◌ planning")
+                    for line in summary:
+                        self._append(f"│ {line}")
+                    self._append("╰─ waiting for tool results")
+            else:
+                self._append("")
+                self._append("LILBOT")
+                self._append(event.text)
         elif isinstance(event, ToolStarted):
             self.tool_count += 1
             stamp = datetime.now().strftime("%H%M%S")
-            args = json.dumps(event.arguments, ensure_ascii=False)
+            args = _compact_json(event.arguments)
             self.work_items = [
                 f"step {self.tool_count}",
                 f"tool  {event.name}",
-                f"args  {event.arguments}",
+                f"args  {_compact_json(event.arguments, 150)}",
             ]
             self._append("")
             self._append(f"╭─ ▷ run {stamp}-{self.tool_count:02d}  {event.name}")
             self._append(f"│ args {args}")
         elif isinstance(event, ToolFinished):
             mark = "done" if event.ok else "error"
+            summary = _summarize_tool_output(event.name, event.output, event.metadata, event.ok)
+            for line in summary:
+                self._append(f"│ {line}")
             self._append(f"╰─ {mark} {event.name} {event.elapsed_ms}ms")
-            if event.output:
-                self._append(event.output)
-            self.work_items = [f"{mark} {event.name}", f"{event.elapsed_ms}ms"]
+            self.work_items = [
+                f"{mark} {event.name}",
+                f"{event.elapsed_ms}ms",
+                f"{len(event.output.splitlines()) if event.output else 0} output lines",
+            ]
         elif isinstance(event, TurnFinished):
             self._append(f"completed {event.steps} steps")
             self.work_items = ["No active work."]
@@ -380,7 +499,7 @@ class DashboardUI:
     def _append(self, text: str) -> None:
         for line in str(text).splitlines() or [""]:
             self.lines.append(line)
-        self.lines = self.lines[-700:]
+        self.lines = self.lines[-TRACE_MAX_LINES:]
         self._refresh()
 
     def _refresh(self) -> None:
@@ -406,10 +525,12 @@ class DashboardUI:
 
         @kb.add("c-c")
         def _exit(event) -> None:
-            if event.app.layout.has_focus(self.trace) and self.trace.buffer.selection_state is not None:
-                self._copy_trace(selection_first=True)
+            now = monotonic()
+            if now <= self.quit_armed_until:
+                event.app.exit(result=0)
                 return
-            event.app.exit(result=0)
+            self.quit_armed_until = now + QUIT_CONFIRM_SECONDS
+            self._append("Press Ctrl+C again to exit. Use terminal Ctrl+Shift+C or F2 to copy Trace.")
 
         @kb.add("escape")
         def _focus_input(event) -> None:
@@ -422,6 +543,10 @@ class DashboardUI:
 
         @kb.add("f2")
         def _copy(event) -> None:
+            self._copy_trace(selection_first=True)
+
+        @kb.add("c-insert")
+        def _copy_ctrl_insert(event) -> None:
             self._copy_trace(selection_first=True)
 
         @kb.add("f3")
@@ -439,16 +564,16 @@ class DashboardUI:
         @kb.add("pageup")
         def _page_up(event) -> None:
             if event.app.layout.has_focus(self.work):
-                self._scroll_work(-8)
+                self._scroll_work(-6)
             else:
-                self._scroll_trace(-18)
+                self._scroll_trace(-12)
 
         @kb.add("pagedown")
         def _page_down(event) -> None:
             if event.app.layout.has_focus(self.work):
-                self._scroll_work(8)
+                self._scroll_work(6)
             else:
-                self._scroll_trace(18)
+                self._scroll_trace(12)
 
         @kb.add("c-home")
         def _trace_home(event) -> None:
@@ -520,6 +645,12 @@ class DashboardUI:
             return input_mouse_handler(mouse_event)
 
         def trace_mouse(mouse_event):
+            if mouse_event.event_type == MouseEventType.SCROLL_UP:
+                self._scroll_trace(-3)
+                return None
+            if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
+                self._scroll_trace(3)
+                return None
             if mouse_event.event_type == MouseEventType.MOUSE_UP:
                 self.auto_scroll = False
             if mouse_event.button == MouseButton.RIGHT and mouse_event.event_type == MouseEventType.MOUSE_UP:
@@ -528,6 +659,12 @@ class DashboardUI:
             return trace_mouse_handler(mouse_event)
 
         def work_mouse(mouse_event):
+            if mouse_event.event_type == MouseEventType.SCROLL_UP:
+                self._scroll_work(-2)
+                return None
+            if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
+                self._scroll_work(2)
+                return None
             if mouse_event.event_type == MouseEventType.MOUSE_UP:
                 self.work_auto_scroll = False
             return work_mouse_handler(mouse_event)
@@ -842,7 +979,7 @@ class DashboardUI:
                 ("class:toolbar", " scroll   "),
                 ("class:hotkey", "Ctrl+V"),
                 ("class:toolbar", " paste   "),
-                ("class:hotkey", "Ctrl+C"),
+                ("class:hotkey", "Ctrl+C x2"),
                 ("class:toolbar", " exit "),
             ]
         )
@@ -851,9 +988,13 @@ class DashboardUI:
         frame = WAVE_FRAMES[self.wave_index % len(WAVE_FRAMES)]
         self.wave_index += 1
         left = " thinking "
-        right = " running  F2 copy  F4 trace  F5 work  Esc compose "
+        right = " running  F2 copy  F4 trace  F5 work  Ctrl+C x2 exit "
         width = self._width()
-        wave_width = max(8, width - len(left) - len(right))
+        if width < len(left) + len(right) + 8:
+            right = " running  F2 copy  Ctrl+C x2 exit "
+        if width < len(left) + len(right) + 4:
+            right = _clip_line(right, max(0, width - len(left)))
+        wave_width = max(0, width - len(left) - len(right))
         wave = (frame * ((wave_width // len(frame)) + 2))[:wave_width]
         return FormattedText(
             [
