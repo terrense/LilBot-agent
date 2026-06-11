@@ -15,6 +15,13 @@ pip install -r requirements.txt
 python -m lilbot
 ```
 
+If pip says `uvicorn ... requires click`, reinstall requirements after this update:
+
+```powershell
+pip install -r requirements.txt
+pip check
+```
+
 If box lines or Chinese text look like `鈺...`, your PowerShell tab is not using UTF-8. LilBot now tries to enable UTF-8 automatically, but this manual setup is still useful:
 
 ```powershell
@@ -116,4 +123,3 @@ User / TUI
 ```
 
 Python can absolutely build a CLI/TUI as polished as TypeScript tools. The terminal only receives ANSI escape sequences, text, mouse events, and keyboard events. Python libraries such as Rich, Textual, prompt_toolkit, and curses/blessed can drive those just as well as Node libraries. Rich gives us beautiful rendering now; Textual can give us full-screen reactive panels later.
-
