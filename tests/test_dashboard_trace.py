@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from lilbot.tui.dashboard import (
     LILBOT_AGENT_LOGO_COMPACT_ROWS,
@@ -10,6 +11,7 @@ from lilbot.tui.dashboard import (
     _highlight_trace_line,
     _summarize_interim_text,
     _summarize_tool_output,
+    DashboardUI,
 )
 
 
@@ -75,12 +77,21 @@ class DashboardTraceTests(unittest.TestCase):
         self.assertEqual({line.count("│") for line in lines if line.startswith("│")}, {3})
 
     def test_line_start_offset_for_scroll_cursor(self):
-        from lilbot.tui.dashboard import DashboardUI
-
         text = "alpha\nbeta\r\ngamma"
         self.assertEqual(DashboardUI._line_start_offset(None, text, 0), 0)
         self.assertEqual(DashboardUI._line_start_offset(None, text, 1), len("alpha\n"))
         self.assertEqual(DashboardUI._line_start_offset(None, text, 2), len("alpha\nbeta\r\n"))
+
+    def test_permission_popup_is_separate_render_text(self):
+        ui = SimpleNamespace(pending_permission="run shell command: " + "x" * 220)
+
+        fragments = DashboardUI._permission_popup(ui)
+        plain = "".join(text for _style, text in fragments)
+
+        self.assertIn("PERMISSION GATE", plain)
+        self.assertIn("allow once", plain)
+        self.assertIn("always deny", plain)
+        self.assertIn("Display shortened", plain)
 
 
 if __name__ == "__main__":

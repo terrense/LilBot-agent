@@ -20,9 +20,10 @@ try:
     from prompt_toolkit import Application
     from prompt_toolkit.application.current import get_app
     from prompt_toolkit.cursor_shapes import CursorShape
+    from prompt_toolkit.filters import Condition
     from prompt_toolkit.formatted_text import FormattedText
     from prompt_toolkit.key_binding import KeyBindings
-    from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
+    from prompt_toolkit.layout import ConditionalContainer, Float, FloatContainer, HSplit, Layout, VSplit, Window
     from prompt_toolkit.layout.controls import FormattedTextControl
     from prompt_toolkit.layout.dimension import Dimension
     from prompt_toolkit.lexers import Lexer
@@ -150,12 +151,12 @@ STYLE = Style.from_dict(
         "trace.agent.label": "bg:#0f1226 #93c5fd bold",
         "trace.heading": "bg:#0f1226 #93c5fd bold",
         "trace.bold": "bg:#0f1226 #ffffff bold",
-        "trace.dim": "bg:#0f1226 #8d7aa8",
-        "trace.code": "bg:#1e1530 #c4b5fd italic",
-        "trace.code.inline": "bg:#26304a #fde68a",
-        "trace.bullet": "bg:#0f1226 #93c5fd",
+        "trace.dim": "bg:#0f1226 #bda4df bold",
+        "trace.code": "bg:#1e1530 #d8b4fe bold italic",
+        "trace.code.inline": "bg:#26304a #fde68a bold",
+        "trace.bullet": "bg:#0f1226 #93c5fd bold",
         "trace.table": "bg:#0f1226 #c4b5fd bold",
-        "trace.tool": "bg:#0f1226 #d8b4fe",
+        "trace.tool": "bg:#0f1226 #e9d5ff bold",
         "trace.tool.rail": "bg:#0f1226 #8b5cf6 bold",
         "trace.tool.ok": "bg:#0f1226 #86efac bold",
         "trace.tool.error": "bg:#0f1226 #fca5a5 bold",
@@ -164,6 +165,12 @@ STYLE = Style.from_dict(
         "scrollbar.background": "bg:#1a1230",
         "scrollbar.button": "bg:#d8b4fe",
         "scrollbar.arrow": "#f9a8d4 bold",
+        "permission.frame": "bg:#1b0f2e #ffe4f1 bold",
+        "permission.title": "bg:#1b0f2e #f9a8d4 bold",
+        "permission.text": "bg:#1b0f2e #fff5fb bold",
+        "permission.dim": "bg:#1b0f2e #c4b5fd bold",
+        "permission.option": "bg:#3b1b55 #fde68a bold",
+        "permission.alert": "bg:#1b0f2e #93c5fd bold",
     }
 )
 
@@ -529,19 +536,35 @@ class DashboardUI:
             self._append(f"completed {event.steps} steps")
             self.work_items = ["No active work."]
 
+    def _permission_popup(self):
+        label = self.pending_permission or ""
+        display_label = _clip_line(label, 140)
+        fragments = [
+            ("class:permission.title", "  >> PERMISSION GATE\n"),
+            ("class:permission.dim", "  Local sandbox request is paused until you choose.\n\n"),
+            ("class:permission.alert", "  request  "),
+            ("class:permission.text", display_label + "\n\n"),
+            ("class:permission.option", "  y  "),
+            ("class:permission.text", " allow once        "),
+            ("class:permission.option", "  a  "),
+            ("class:permission.text", " always allow\n"),
+            ("class:permission.option", "  n  "),
+            ("class:permission.text", " deny once         "),
+            ("class:permission.option", "  d  "),
+            ("class:permission.text", " always deny\n\n"),
+            ("class:permission.dim", "  Type the letter in Composer, then press Enter."),
+        ]
+        if display_label != label:
+            fragments.append(("class:permission.dim", "\n  Display shortened here; the full request remains intact."))
+        return FormattedText(fragments)
+
     def permission_prompt(self, label: str) -> str:
         with self.permission_lock:
             self.permission_answer = ""
             self.pending_permission = label
             self.permission_event.clear()
         self.work_items = ["waiting for permission", "type y/a/n/d in Composer"]
-        self._append("")
-        self._append("### Permission required")
-        display_label = _clip_line(label, 180)
-        self._append(display_label)
-        if display_label != label:
-            self._append("permission text shortened for display; full command remains in the tool request.")
-        self._append("Type `y` allow once, `a` always allow, `n` deny once, or `d` always deny.")
+        self._refresh()
         try:
             self.app.layout.focus(self.input)
         except Exception:
@@ -550,6 +573,7 @@ class DashboardUI:
         with self.permission_lock:
             answer = self.permission_answer or "n"
             self.pending_permission = None
+        self._refresh()
         return answer
 
     def _accept(self, buffer) -> bool:
@@ -568,6 +592,7 @@ class DashboardUI:
         if self.busy:
             self._append("Agent is still working. Wait for completion before sending another prompt.")
             return False
+        self._force_trace_autoscroll()
         self._append(f"> {line}")
         threading.Thread(target=self._process_line, args=(line,), daemon=True).start()
         return False
@@ -578,7 +603,8 @@ class DashboardUI:
                 return False
             self.permission_answer = line
             self.permission_event.set()
-        self._append(f"permission answer: `{line}`")
+        self.work_items = [f"permission answered: {line[:24]}", "resuming tool execution"]
+        self._refresh()
         return True
 
     def _process_line(self, line: str) -> None:
@@ -602,11 +628,27 @@ class DashboardUI:
         self.lines = self.lines[-TRACE_MAX_LINES:]
         self._refresh()
 
+    def _force_trace_autoscroll(self) -> None:
+        self.auto_scroll = True
+        try:
+            self.trace.buffer.exit_selection()
+        except Exception:
+            pass
+        self._scroll_trace_to_bottom(self.trace.text)
+
+    def _scroll_trace_to_bottom(self, text: str) -> None:
+        self.trace.buffer.cursor_position = len(text)
+        render_info = self.trace.window.render_info
+        height = int(getattr(render_info, "window_height", 0) or 0) if render_info is not None else 0
+        if height > 0:
+            self.trace.window.vertical_scroll = max(0, len(text.splitlines()) - height)
+        self.trace.window.vertical_scroll_2 = 0
+
     def _refresh(self) -> None:
         text = self._trace_text()
         self.trace.text = text
         if self.auto_scroll:
-            self.trace.buffer.cursor_position = len(text)
+            self._scroll_trace_to_bottom(text)
         work_text = self._work_text()
         if self.work.text != work_text:
             self.work.text = work_text
@@ -932,7 +974,7 @@ class DashboardUI:
             height=Dimension(weight=1),
         )
 
-        return HSplit(
+        base = HSplit(
             [
                 Window(FormattedTextControl(self._topbar), height=1, style="class:topbar"),
                 main_area,
@@ -941,6 +983,32 @@ class DashboardUI:
                 Window(FormattedTextControl(self._toolbar), height=1, style="class:toolbar"),
             ],
             style="class:root",
+        )
+        return FloatContainer(
+            content=base,
+            floats=[
+                Float(
+                    content=ConditionalContainer(
+                        Frame(
+                            Box(
+                                Window(
+                                    FormattedTextControl(self._permission_popup),
+                                    height=10,
+                                    wrap_lines=True,
+                                    style="class:permission.text",
+                                ),
+                                padding=1,
+                            ),
+                            title="  Permission Gate  ",
+                            style="class:permission.frame",
+                        ),
+                        filter=Condition(lambda: self.pending_permission is not None),
+                    ),
+                    left=8,
+                    right=8,
+                    top=3,
+                )
+            ],
         )
 
     def _width(self) -> int:
