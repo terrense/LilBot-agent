@@ -213,6 +213,7 @@ class LilBotUI:
             ("/permissions MODE", "ask, accept-all, or deny-all"),
             ("/compact", "compact conversation"),
             ("/status", "show session status"),
+            ("/display", "show terminal and font diagnostics"),
             ("! command", "run shell command through permission gate"),
             ("/exit", "quit"),
         ]

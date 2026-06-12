@@ -8,8 +8,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from lilbot.cli import normalize_model_name, switch_runtime_model
-from lilbot.config import load_config
+from lilbot.config import DEFAULT_TUI_FONT_SIZE, load_config
 from lilbot.config import LilBotConfig
+from lilbot.tui.windows_console import set_windows_console_font_size
 
 
 class ConfigTests(unittest.TestCase):
@@ -33,6 +34,26 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.model, "deepseek-v4-flash")
         self.assertEqual(cfg.base_url, "https://api.deepseek.com")
         self.assertEqual(cfg.api_key, "test-key")
+
+    def test_font_size_defaults_and_dotenv_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.dict(os.environ, {}, clear=True):
+                cfg = load_config(root)
+        self.assertEqual(cfg.font_size, DEFAULT_TUI_FONT_SIZE)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".env").write_text("LILBOT_FONT_SIZE=21\n", encoding="utf-8")
+            with patch.dict(os.environ, {}, clear=True):
+                cfg = load_config(root)
+        self.assertEqual(cfg.font_size, 21)
+
+    def test_console_font_request_is_safe_off_windows(self):
+        status = set_windows_console_font_size(18)
+        if os.name != "nt":
+            self.assertFalse(status.supported)
+            self.assertEqual(status.message, "not windows")
 
     def test_model_aliases_normalize(self):
         self.assertEqual(normalize_model_name("pro"), "deepseek-v4-pro")

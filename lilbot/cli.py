@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import shlex
 import sys
 from pathlib import Path
@@ -16,7 +17,7 @@ from .skills import SkillRegistry
 from .subagents import SubAgentManager
 from .tools import ToolContext, ToolRegistry, register_builtins
 from .tui.classic import LilBotUI
-from .tui.windows_console import configure_windows_console
+from .tui.windows_console import configure_windows_console, console_font_status
 
 
 SUPPORTED_MODELS: dict[str, dict[str, str | tuple[str, ...]]] = {
@@ -48,6 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url", default=None)
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--permission-mode", choices=["ask", "accept-all", "deny-all"], default=None)
+    parser.add_argument("--font-size", type=int, default=None, help="Request a Windows console font size for the TUI.")
     parser.add_argument("--print", action="store_true", dest="print_mode", help="Run one prompt and exit.")
     parser.add_argument("--classic", action="store_true", help="Use the legacy printed Rich interface.")
     parser.add_argument("--no-rich", action="store_true")
@@ -121,6 +123,8 @@ def apply_args(cfg: LilBotConfig, args: argparse.Namespace) -> LilBotConfig:
         cfg.api_key = args.api_key
     if args.permission_mode:
         cfg.permission_mode = args.permission_mode
+    if args.font_size is not None:
+        cfg.font_size = max(0, args.font_size)
     return cfg
 
 
@@ -220,6 +224,20 @@ def handle_slash(line: str, agent: Agent, registry: ToolRegistry, ctx: ToolConte
             ("model", ctx.config.model),
             ("messages", str(len(agent.messages))),
             ("permission", ctx.permissions.mode),
+            ("font_size", str(ctx.config.font_size)),
+        ])
+        return True
+    if cmd == "display":
+        font = console_font_status()
+        terminal = shutil.get_terminal_size(fallback=(0, 0))
+        ui.table("Display", ["Key", "Value"], [
+            ("terminal_columns", str(terminal.columns)),
+            ("terminal_rows", str(terminal.lines)),
+            ("font_requested", str(font.requested_size or ctx.config.font_size)),
+            ("font_current", str(font.current_size or "unknown")),
+            ("font_face", font.face_name or "unknown"),
+            ("font_applied", str(font.applied)),
+            ("font_message", font.message),
         ])
         return True
     ui.error(f"Unknown command: /{cmd}. Try /help")
@@ -291,6 +309,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     can_use_dashboard = sys.stdin.isatty() and sys.stdout.isatty()
     if not args.classic and not args.no_rich and can_use_dashboard:
         try:
+            configure_windows_console(font_size=cfg.font_size)
             from .tui.dashboard import DashboardUI
 
             return DashboardUI(agent, registry, ctx).run()
