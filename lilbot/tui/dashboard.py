@@ -83,19 +83,12 @@ NOISY_PATH_MARKERS = (
 )
 
 LILBOT_AGENT_LOGO_ROWS = [
-    "██╗     ██╗██╗     ██████╗  ██████╗ ████████╗",
-    "██║     ██║██║     ██╔══██╗██╔═══██╗╚══██╔══╝",
-    "██║     ██║██║     ██████╔╝██║   ██║   ██║",
-    "██║     ██║██║     ██╔══██╗██║   ██║   ██║",
-    "███████╗██║███████╗██████╔╝╚██████╔╝   ██║",
-    "╚══════╝╚═╝╚══════╝╚═════╝  ╚═════╝    ╚═╝",
-    "                 ─────── AGENT ───────",
-    " █████╗  ██████╗ ███████╗███╗   ██╗████████╗",
-    "██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝",
-    "███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║",
-    "██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║",
-    "██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║",
-    "╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝",
+    "██╗     ██╗██╗     ██████╗  ██████╗ ████████╗  -   █████╗  ██████╗ ███████╗███╗   ██╗████████╗",
+    "██║     ██║██║     ██╔══██╗██╔═══██╗╚══██╔══╝  -  ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝",
+    "██║     ██║██║     ██████╔╝██║   ██║   ██║     -  ███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║",
+    "██║     ██║██║     ██╔══██╗██║   ██║   ██║     -  ██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║",
+    "███████╗██║███████╗██████╔╝╚██████╔╝   ██║     -  ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║",
+    "╚══════╝╚═╝╚══════╝╚═════╝  ╚═════╝    ╚═╝     -  ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝",
 ]
 LILBOT_AGENT_LOGO_COMPACT_ROWS = [
     "╦  ╦╦  ╔╗ ╔═╗╔╦╗ ─ ╔═╗╔═╗╔═╗╔╗╔╔╦╗",
@@ -856,7 +849,7 @@ class DashboardUI:
                     height=Dimension(min=14, preferred=22, weight=3),
                 ),
             ],
-            width=Dimension(weight=3),
+            width=Dimension(weight=5),
         )
 
         main_area = VSplit(
@@ -926,9 +919,9 @@ class DashboardUI:
 
     def _agent_panel(self):
         width = self._width()
-        left_width = max(44, int(width * 0.375) - 6)
+        left_width = max(96, int(width * 0.48) - 6)
         fragments = []
-        logo_rows = LILBOT_AGENT_LOGO_ROWS if left_width >= 54 else LILBOT_AGENT_LOGO_COMPACT_ROWS
+        logo_rows = LILBOT_AGENT_LOGO_ROWS if left_width >= 94 else LILBOT_AGENT_LOGO_COMPACT_ROWS
         for idx, row in enumerate(logo_rows):
             style = LILBOT_LOGO_STYLES[min(idx, len(LILBOT_LOGO_STYLES) - 1)]
             fragments.append((style, _clip_line(row, left_width) + "\n"))
