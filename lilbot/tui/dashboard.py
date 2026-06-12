@@ -63,6 +63,9 @@ TRACE_TOOL_LINE_LIMITS = {
     "bash": 10,
     "glob": 10,
     "grep": 18,
+    "web_search": 14,
+    "fetch_url": 16,
+    "web_fetch": 16,
     "list_dir": 10,
     "read_file": 10,
     "write_file": 36,
@@ -402,6 +405,7 @@ class DashboardUI:
             ("/help", "show commands"),
             ("/copy", "copy all Trace to clipboard"),
             ("/theme", "show theme preview"),
+            ("/model [flash|pro]", "switch DeepSeek model"),
             ("/tools", "list tools"),
             ("/skills", "list skills"),
             ("/memory list|search|save|delete", "manage memory"),
@@ -976,6 +980,7 @@ class DashboardUI:
         groups: list[tuple[str, list[str]]] = [
             ("workspace", []),
             ("search", []),
+            ("web", []),
             ("shell", []),
             ("memory", []),
             ("skills", []),
@@ -989,6 +994,8 @@ class DashboardUI:
                 by_name["workspace"].append(name)
             elif name in {"glob", "grep"}:
                 by_name["search"].append(name)
+            elif name in {"web_search", "fetch_url", "web_fetch"}:
+                by_name["web"].append(name)
             elif name == "bash":
                 by_name["shell"].append(name)
             elif name.startswith("memory_"):

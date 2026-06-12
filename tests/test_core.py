@@ -37,8 +37,9 @@ class CoreTests(unittest.TestCase):
         self.assertIn("read_file", names)
         self.assertIn("agent_spawn", names)
         self.assertIn("mcp_servers", names)
+        self.assertIn("web_search", names)
+        self.assertIn("fetch_url", names)
 
 
 if __name__ == "__main__":
     unittest.main()
-
