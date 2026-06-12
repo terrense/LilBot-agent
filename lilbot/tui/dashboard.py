@@ -608,22 +608,41 @@ class DashboardUI:
     def _scroll_trace(self, lines: int) -> None:
         self.auto_scroll = False
         self.app.layout.focus(self.trace)
-        if lines < 0:
-            self.trace.buffer.cursor_up(count=abs(lines))
-        else:
-            self.trace.buffer.cursor_down(count=lines)
-            if self.trace.buffer.cursor_position >= len(self.trace.text):
-                self.auto_scroll = True
+        at_bottom = self._scroll_text_area(self.trace, lines)
+        if at_bottom:
+            self.auto_scroll = True
 
     def _scroll_work(self, lines: int) -> None:
         self.work_auto_scroll = False
         self.app.layout.focus(self.work)
-        if lines < 0:
-            self.work.buffer.cursor_up(count=abs(lines))
-        else:
-            self.work.buffer.cursor_down(count=lines)
-            if self.work.buffer.cursor_position >= len(self.work.text):
-                self.work_auto_scroll = True
+        at_bottom = self._scroll_text_area(self.work, lines)
+        if at_bottom:
+            self.work_auto_scroll = True
+
+    def _scroll_text_area(self, area: TextArea, lines: int) -> bool:
+        area.buffer.exit_selection()
+        logical_lines = area.text.splitlines() or [""]
+        max_scroll = max(0, len(logical_lines) - 1)
+        current = int(getattr(area.window, "vertical_scroll", 0) or 0)
+        target = max(0, min(max_scroll, current + lines))
+        area.window.vertical_scroll = target
+        area.window.vertical_scroll_2 = 0
+        area.buffer.cursor_position = self._line_start_offset(area.text, target)
+        try:
+            self.app.invalidate()
+        except Exception:
+            pass
+        return target >= max_scroll
+
+    def _line_start_offset(self, text: str, line_index: int) -> int:
+        if line_index <= 0:
+            return 0
+        offset = 0
+        for idx, line in enumerate(text.splitlines(keepends=True)):
+            if idx >= line_index:
+                break
+            offset += len(line)
+        return min(offset, len(text))
 
     def _begin_drag_scroll(self, target: str, y: int) -> None:
         self.drag_target = target
