@@ -42,8 +42,10 @@ class Agent:
                 yield TurnFinished(steps, dict(self.usage))
                 return
 
-            self.messages.append(self._assistant_tool_message(turn))
-            for call in turn.tool_calls:
+            remaining_steps = self.config.max_steps - steps
+            calls_to_run = turn.tool_calls[:remaining_steps]
+            self.messages.append(self._assistant_tool_message(ProviderTurn(turn.content, calls_to_run)))
+            for call in calls_to_run:
                 steps += 1
                 yield ToolStarted(call.name, call.arguments)
                 result, elapsed_ms = self.registry.execute(call.name, call.arguments, self.ctx)
@@ -57,7 +59,9 @@ class Agent:
                 if steps >= self.config.max_steps:
                     break
 
-        yield TextDelta(f"Stopped after max_steps={self.config.max_steps}.")
+        final = self._synthesize_after_step_limit()
+        self.messages.append({"role": "assistant", "content": final})
+        yield TextDelta(final)
         yield TurnFinished(steps, dict(self.usage))
 
     def compact(self) -> str:
@@ -83,6 +87,38 @@ class Agent:
         for key, value in turn.usage.items():
             if isinstance(value, int):
                 self.usage[key] = self.usage.get(key, 0) + value
+
+    def _synthesize_after_step_limit(self) -> str:
+        prompt = (
+            f"Tool step budget reached after {self.config.max_steps} executed tool step(s). "
+            "Do not call any more tools. Use only the conversation and existing tool results above "
+            "to provide the best possible final answer now. If evidence is incomplete, say what is "
+            "uncertain, but still answer directly and helpfully."
+        )
+        try:
+            turn = self.provider.complete([*self.messages, {"role": "user", "content": prompt}], [])
+            self._add_usage(turn)
+            if turn.content.strip():
+                return turn.content.strip()
+        except Exception as exc:  # pragma: no cover - final safety net
+            return self._fallback_step_limit_answer(str(exc))
+        return self._fallback_step_limit_answer()
+
+    def _fallback_step_limit_answer(self, error: str = "") -> str:
+        snippets = []
+        for message in self.messages[-16:]:
+            if message.get("role") != "tool":
+                continue
+            name = message.get("name", "tool")
+            content = " ".join(str(message.get("content", "")).split())
+            if content:
+                snippets.append(f"- {name}: {content[:500]}")
+        body = "\n".join(snippets) or "- No tool output was captured before the step limit."
+        suffix = f"\n\nFinal synthesis failed: {error}" if error else ""
+        return (
+            f"Reached the {self.config.max_steps}-step tool budget. Here is the best answer I can "
+            f"provide from the information already gathered:\n\n{body}{suffix}"
+        )
 
     def _assistant_tool_message(self, turn: ProviderTurn) -> dict[str, Any]:
         return {
