@@ -241,7 +241,7 @@ def _compact_json(value: object, limit: int = 220) -> str:
 
 
 def _clip_line(value: str, limit: int = TRACE_OUTPUT_MAX_LINE_CHARS) -> str:
-    value = value.replace("\t", "    ")
+    value = value.replace("\r", "").replace("\t", "    ")
     if len(value) <= limit:
         return value
     return value[: max(0, limit - 1)] + "…"
@@ -444,11 +444,12 @@ class DashboardUI:
         elif isinstance(event, ToolStarted):
             self.tool_count += 1
             stamp = datetime.now().strftime("%H%M%S")
-            args = _compact_json(event.arguments)
+            arg_limit = 120 if event.name == "bash" else 220
+            args = _compact_json(event.arguments, arg_limit)
             self.work_items = [
                 f"step {self.tool_count}",
                 f"tool  {event.name}",
-                f"args  {_compact_json(event.arguments, 150)}",
+                f"args  {_compact_json(event.arguments, 90 if event.name == 'bash' else 150)}",
             ]
             self._append("")
             self._append(f"╭─ ▷ run {stamp}-{self.tool_count:02d}  {event.name}")
@@ -476,7 +477,10 @@ class DashboardUI:
         self.work_items = ["waiting for permission", "type y/a/n/d in Composer"]
         self._append("")
         self._append("### Permission required")
-        self._append(label)
+        display_label = _clip_line(label, 180)
+        self._append(display_label)
+        if display_label != label:
+            self._append("permission text shortened for display; full command remains in the tool request.")
         self._append("Type `y` allow once, `a` always allow, `n` deny once, or `d` always deny.")
         try:
             self.app.layout.focus(self.input)
