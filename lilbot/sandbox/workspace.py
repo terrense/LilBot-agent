@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import locale
 import os
 import subprocess
 from dataclasses import dataclass
@@ -16,6 +17,20 @@ class CommandResult:
     ok: bool
     output: str
     returncode: int
+
+
+def _decode_process_output(value: bytes | str | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    encodings = ["utf-8", locale.getpreferredencoding(False), "gbk"]
+    for encoding in dict.fromkeys(encodings):
+        try:
+            return value.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return value.decode("utf-8", errors="replace")
 
 
 class Sandbox:
@@ -97,12 +112,11 @@ class Sandbox:
                 argv,
                 cwd=self.root,
                 shell=shell,
-                text=True,
                 capture_output=True,
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired as exc:
-            out = (exc.stdout or "") + (exc.stderr or "")
+            out = _decode_process_output(exc.stdout) + _decode_process_output(exc.stderr)
             return CommandResult(False, out + f"\nTimed out after {timeout}s", 124)
-        output = (proc.stdout or "") + (proc.stderr or "")
+        output = _decode_process_output(proc.stdout) + _decode_process_output(proc.stderr)
         return CommandResult(proc.returncode == 0, output.strip(), proc.returncode)
