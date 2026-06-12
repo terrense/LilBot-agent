@@ -6,6 +6,7 @@ from lilbot.tui.dashboard import (
     LILBOT_AGENT_LOGO_COMPACT_ROWS,
     LILBOT_AGENT_LOGO_ROWS,
     _clip_line,
+    _format_markdown_tables,
     _highlight_trace_line,
     _summarize_interim_text,
     _summarize_tool_output,
@@ -50,9 +51,28 @@ class DashboardTraceTests(unittest.TestCase):
     def test_lilbot_logo_rows_are_fixed_banner_art(self):
         art = "\n".join(LILBOT_AGENT_LOGO_ROWS)
         self.assertIn("██████", art)
-        self.assertIn("AGENT", art)
+        self.assertIn("-", LILBOT_AGENT_LOGO_ROWS[0])
+        self.assertGreaterEqual(max(len(row) for row in LILBOT_AGENT_LOGO_ROWS), 86)
         self.assertEqual(len(LILBOT_AGENT_LOGO_COMPACT_ROWS), 3)
         self.assertLessEqual(len(_clip_line(LILBOT_AGENT_LOGO_ROWS[0], 30)), 30)
+
+    def test_markdown_tables_render_as_aligned_box_tables(self):
+        source = "\n".join(
+            [
+                "| 项目 | 估算 (USD) |",
+                "| --- | --- |",
+                "| 国际机票（往返） | $1,200-1,800 |",
+                "| 总计 | $3,500-5,000 |",
+            ]
+        )
+
+        rendered = _format_markdown_tables(source)
+        lines = rendered.splitlines()
+
+        self.assertTrue(lines[0].startswith("┌"))
+        self.assertTrue(lines[-1].startswith("└"))
+        self.assertIn("│ 项目", rendered)
+        self.assertEqual({line.count("│") for line in lines if line.startswith("│")}, {3})
 
     def test_line_start_offset_for_scroll_cursor(self):
         from lilbot.tui.dashboard import DashboardUI

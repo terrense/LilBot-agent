@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import threading
+import unicodedata
 from datetime import datetime
 from time import monotonic
 from typing import Iterable
@@ -83,12 +84,14 @@ NOISY_PATH_MARKERS = (
 )
 
 LILBOT_AGENT_LOGO_ROWS = [
-    "██╗     ██╗██╗     ██████╗  ██████╗ ████████╗  -   █████╗  ██████╗ ███████╗███╗   ██╗████████╗",
-    "██║     ██║██║     ██╔══██╗██╔═══██╗╚══██╔══╝  -  ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝",
-    "██║     ██║██║     ██████╔╝██║   ██║   ██║     -  ███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║",
-    "██║     ██║██║     ██╔══██╗██║   ██║   ██║     -  ██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║",
-    "███████╗██║███████╗██████╔╝╚██████╔╝   ██║     -  ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║",
-    "╚══════╝╚═╝╚══════╝╚═════╝  ╚═════╝    ╚═╝     -  ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝",
+    "██╗     ██╗██╗     ██████╗  ██████╗ ████████╗- █████╗  ██████╗ ███████╗███╗   ██╗████████╗",
+    "██╗     ██╗██╗     ██████╗  ██████╗ ████████╗- █████╗  ██████╗ ███████╗███╗   ██╗████████╗",
+    "██║     ██║██║     ██╔══██╗██╔═══██╗╚══██╔══╝-██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝",
+    "██║     ██║██║     ██████╔╝██║   ██║   ██║   -███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║",
+    "██║     ██║██║     ██████╔╝██║   ██║   ██║   -███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║",
+    "██║     ██║██║     ██╔══██╗██║   ██║   ██║   -██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║",
+    "███████╗██║███████╗██████╔╝╚██████╔╝   ██║   -██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║",
+    "╚══════╝╚═╝╚══════╝╚═════╝  ╚═════╝    ╚═╝   -╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝",
 ]
 LILBOT_AGENT_LOGO_COMPACT_ROWS = [
     "╦  ╦╦  ╔╗ ╔═╗╔╦╗ ─ ╔═╗╔═╗╔═╗╔╗╔╔╦╗",
@@ -114,10 +117,10 @@ LILBOT_LOGO_STYLES = [
 
 STYLE = Style.from_dict(
     {
-        "root": "bg:#12091f #f8d8ec",
+        "root": "bg:#12091f #f8d8ec bold",
         "topbar": "bg:#211234 #ffd6ea bold",
         "topbar.dim": "bg:#211234 #bda4df",
-        "frame": "bg:#170d29 #f8d8ec",
+        "frame": "bg:#170d29 #f8d8ec bold",
         "frame.border": "#d8b4fe",
         "frame.label": "#f9a8d4 bold",
         "logo": "#f9a8d4 bold",
@@ -129,21 +132,21 @@ STYLE = Style.from_dict(
         "accent": "#d8b4fe bold",
         "panel.title": "#fde68a bold",
         "panel.label": "#f9a8d4 bold",
-        "panel.value": "#f8d8ec",
+        "panel.value": "#f8d8ec bold",
         "panel.count": "#86efac bold",
-        "muted": "#b8a6d9",
-        "deep": "#93c5fd",
+        "muted": "#b8a6d9 bold",
+        "deep": "#93c5fd bold",
         "ok": "#86efac bold",
         "warn": "#fde68a bold",
         "error": "#fca5a5 bold",
-        "composer": "bg:#211234 #ffe4f1",
+        "composer": "bg:#211234 #ffe4f1 bold",
         "composer.prompt": "bg:#211234 #f9a8d4 bold",
-        "toolbar": "bg:#211234 #c4b5fd",
+        "toolbar": "bg:#211234 #c4b5fd bold",
         "hotkey": "bg:#211234 #f9a8d4 bold",
         "wave": "bg:#211234 #f9a8d4 bold",
-        "trace": "bg:#0f1226 #f8d8ec",
+        "trace": "bg:#0f1226 #f8d8ec bold",
         "trace.user": "bg:#0f1226 #f9a8d4 bold",
-        "trace.agent": "bg:#0f1226 #f8d8ec",
+        "trace.agent": "bg:#0f1226 #f8d8ec bold",
         "trace.agent.label": "bg:#0f1226 #93c5fd bold",
         "trace.heading": "bg:#0f1226 #93c5fd bold",
         "trace.bold": "bg:#0f1226 #ffffff bold",
@@ -151,7 +154,7 @@ STYLE = Style.from_dict(
         "trace.code": "bg:#1e1530 #c4b5fd italic",
         "trace.code.inline": "bg:#26304a #fde68a",
         "trace.bullet": "bg:#0f1226 #93c5fd",
-        "trace.table": "bg:#0f1226 #c4b5fd",
+        "trace.table": "bg:#0f1226 #c4b5fd bold",
         "trace.tool": "bg:#0f1226 #d8b4fe",
         "trace.tool.rail": "bg:#0f1226 #8b5cf6 bold",
         "trace.tool.ok": "bg:#0f1226 #86efac bold",
@@ -201,7 +204,7 @@ def _highlight_trace_line(line: str):
     if re.match(r"^\s*[-*]\s+", line) or re.match(r"^\s*\d+\.\s+", line):
         marker, rest = line.split(" ", 1)
         return [("class:trace.bullet", marker + " "), *_inline_fragments(rest, "class:trace.agent")]
-    if stripped.startswith("|") or " | " in line:
+    if stripped.startswith("|") or " | " in line or stripped[:1] in {"┌", "┬", "┐", "├", "┼", "┤", "└", "┴", "┘", "│"}:
         return _inline_fragments(line, "class:trace.table")
     if stripped.startswith("```") or line.startswith("    "):
         return [("class:trace.code", line)]
@@ -226,6 +229,70 @@ def _inline_fragments(text: str, base_style: str):
     if pos < len(text):
         fragments.append((base_style, text[pos:]))
     return fragments or [(base_style, "")]
+
+
+def _display_width(text: str) -> int:
+    width = 0
+    for char in text:
+        if unicodedata.combining(char):
+            continue
+        width += 2 if unicodedata.east_asian_width(char) in {"F", "W"} else 1
+    return width
+
+
+def _pad_display(text: str, width: int) -> str:
+    return text + " " * max(0, width - _display_width(text))
+
+
+def _table_cells(line: str) -> list[str] | None:
+    stripped = line.strip()
+    if not stripped.startswith("|") or "|" not in stripped[1:]:
+        return None
+    return [cell.strip() for cell in stripped.strip("|").split("|")]
+
+
+def _is_table_separator(cells: list[str] | None) -> bool:
+    if not cells:
+        return False
+    return all(re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in cells)
+
+
+def _render_table(rows: list[list[str]]) -> list[str]:
+    columns = max(len(row) for row in rows)
+    normalized = [row + [""] * (columns - len(row)) for row in rows]
+    widths = [max(_display_width(row[index]) for row in normalized) for index in range(columns)]
+
+    def border(left: str, middle: str, right: str) -> str:
+        return left + middle.join("─" * (width + 2) for width in widths) + right
+
+    rendered = [border("┌", "┬", "┐")]
+    for index, row in enumerate(normalized):
+        rendered.append("│ " + " │ ".join(_pad_display(cell, widths[col]) for col, cell in enumerate(row)) + " │")
+        rendered.append(border("├" if index == 0 else "├", "┼", "┤") if index < len(normalized) - 1 else border("└", "┴", "┘"))
+    return rendered
+
+
+def _format_markdown_tables(text: str) -> str:
+    lines = text.splitlines()
+    out: list[str] = []
+    index = 0
+    while index < len(lines):
+        first = _table_cells(lines[index])
+        second = _table_cells(lines[index + 1]) if index + 1 < len(lines) else None
+        if first and _is_table_separator(second):
+            rows = [first]
+            index += 2
+            while index < len(lines):
+                cells = _table_cells(lines[index])
+                if not cells or _is_table_separator(cells):
+                    break
+                rows.append(cells)
+                index += 1
+            out.extend(_render_table(rows))
+            continue
+        out.append(lines[index])
+        index += 1
+    return "\n".join(out)
 
 
 def _compact_json(value: object, limit: int = 220) -> str:
@@ -433,7 +500,7 @@ class DashboardUI:
             else:
                 self._append("")
                 self._append("LILBOT")
-                self._append(event.text)
+                self._append(_format_markdown_tables(event.text))
         elif isinstance(event, ToolStarted):
             self.tool_count += 1
             stamp = datetime.now().strftime("%H%M%S")
@@ -849,7 +916,7 @@ class DashboardUI:
                     height=Dimension(min=14, preferred=22, weight=3),
                 ),
             ],
-            width=Dimension(weight=5),
+            width=Dimension(weight=17),
         )
 
         main_area = VSplit(
@@ -859,7 +926,7 @@ class DashboardUI:
                     self.trace,
                     title="  Trace  ",
                     style="class:frame",
-                    width=Dimension(weight=5),
+                    width=Dimension(weight=23),
                 ),
             ],
             height=Dimension(weight=1),
@@ -919,9 +986,9 @@ class DashboardUI:
 
     def _agent_panel(self):
         width = self._width()
-        left_width = max(96, int(width * 0.48) - 6)
+        left_width = max(44, int(width * 0.425) - 6)
         fragments = []
-        logo_rows = LILBOT_AGENT_LOGO_ROWS if left_width >= 94 else LILBOT_AGENT_LOGO_COMPACT_ROWS
+        logo_rows = LILBOT_AGENT_LOGO_ROWS if left_width >= 90 else LILBOT_AGENT_LOGO_COMPACT_ROWS
         for idx, row in enumerate(logo_rows):
             style = LILBOT_LOGO_STYLES[min(idx, len(LILBOT_LOGO_STYLES) - 1)]
             fragments.append((style, _clip_line(row, left_width) + "\n"))
