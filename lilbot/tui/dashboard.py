@@ -478,6 +478,7 @@ class DashboardUI:
             ("/memory list|search|save|delete", "manage memory"),
             ("/agents", "list subagents"),
             ("/permissions MODE", "ask / accept-all / deny-all"),
+            ("/display", "show terminal and font diagnostics"),
             ("/exit", "quit"),
         ]
         self.table("Command deck", ["Command", "Purpose"], rows)

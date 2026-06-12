@@ -8,6 +8,7 @@ from typing import Any
 
 
 DEFAULT_MAX_STEPS = 10
+DEFAULT_TUI_FONT_SIZE = 18
 
 
 @dataclass
@@ -19,6 +20,7 @@ class LilBotConfig:
     api_key: str = ""
     permission_mode: str = "ask"
     max_steps: int = DEFAULT_MAX_STEPS
+    font_size: int = DEFAULT_TUI_FONT_SIZE
     compact_after_messages: int = 28
     verbose: bool = False
 
@@ -83,6 +85,7 @@ def default_config(workspace: Path | None = None) -> LilBotConfig:
         base_url=base_url.rstrip("/"),
         api_key=api_key,
         permission_mode=_env("LILBOT_PERMISSION_MODE", "ask"),
+        font_size=max(0, _env_int("LILBOT_FONT_SIZE", DEFAULT_TUI_FONT_SIZE)),
     )
 
 
@@ -107,6 +110,8 @@ def apply_env_overrides(cfg: LilBotConfig) -> LilBotConfig:
 
     if _env("LILBOT_PERMISSION_MODE"):
         cfg.permission_mode = _env("LILBOT_PERMISSION_MODE")
+    if _env("LILBOT_FONT_SIZE"):
+        cfg.font_size = max(0, _env_int("LILBOT_FONT_SIZE", cfg.font_size))
     if _env("LILBOT_MAX_STEPS"):
         cfg.max_steps = max(1, _env_int("LILBOT_MAX_STEPS", cfg.max_steps))
     elif cfg.max_steps == 8:
