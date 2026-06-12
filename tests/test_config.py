@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from lilbot.cli import normalize_model_name, switch_runtime_model
+from lilbot.cli import normalize_model_name, slash_commands_matching, switch_runtime_model
 from lilbot.config import DEFAULT_TUI_FONT_SIZE, load_config
 from lilbot.config import LilBotConfig
 from lilbot.tui.windows_console import set_windows_console_font_size
@@ -60,6 +60,14 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(normalize_model_name("flash"), "deepseek-v4-flash")
         self.assertEqual(normalize_model_name("deepseek-v4-pro"), "deepseek-v4-pro")
         self.assertIsNone(normalize_model_name("unknown-model"))
+
+    def test_slash_command_registry_matches_prefix_and_alias(self):
+        names = [command.name for command in slash_commands_matching("/mo")]
+        self.assertIn("model", names)
+        self.assertIn("models", names)
+
+        alias_names = [command.name for command in slash_commands_matching("moxing")]
+        self.assertIn("model", alias_names)
 
     def test_switch_runtime_model_updates_config_and_subagents(self):
         with tempfile.TemporaryDirectory() as tmp:
