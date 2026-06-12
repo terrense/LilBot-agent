@@ -52,6 +52,14 @@ class DashboardTraceTests(unittest.TestCase):
         self.assertEqual(len(LILBOT_LOGO_COMPACT_ROWS), 3)
         self.assertLessEqual(len(_clip_line(LILBOT_LOGO_ROWS[0], 30)), 30)
 
+    def test_line_start_offset_for_scroll_cursor(self):
+        from lilbot.tui.dashboard import DashboardUI
+
+        text = "alpha\nbeta\r\ngamma"
+        self.assertEqual(DashboardUI._line_start_offset(None, text, 0), 0)
+        self.assertEqual(DashboardUI._line_start_offset(None, text, 1), len("alpha\n"))
+        self.assertEqual(DashboardUI._line_start_offset(None, text, 2), len("alpha\nbeta\r\n"))
+
 
 if __name__ == "__main__":
     unittest.main()
