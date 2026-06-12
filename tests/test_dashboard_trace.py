@@ -93,6 +93,35 @@ class DashboardTraceTests(unittest.TestCase):
         self.assertIn("always deny", plain)
         self.assertIn("Display shortened", plain)
 
+    def test_slash_suggestion_popup_renders_model_commands(self):
+        ui = object.__new__(DashboardUI)
+        ui.input = SimpleNamespace(text="/mo")
+        ui.slash_hidden_for_text = ""
+        ui.slash_selection = 0
+        ui.pending_permission = None
+
+        fragments = ui._slash_suggestions_popup()
+        plain = "".join(text for _style, text in fragments)
+
+        self.assertIn("COMMAND DECK", plain)
+        self.assertIn("/model", plain)
+        self.assertIn("/models", plain)
+        self.assertIn("Tab accept", plain)
+
+    def test_slash_table_routes_to_command_popup(self):
+        ui = object.__new__(DashboardUI)
+        ui.route_slash_to_popup = True
+        ui.command_popup_title = ""
+        ui.command_popup_lines = []
+        ui.command_popup_error = False
+        ui._refresh = lambda: None
+
+        ui.table("Models", ["Model", "Status"], [("deepseek-v4-flash", "current")])
+
+        self.assertEqual(ui.command_popup_title, "Models")
+        self.assertTrue(any("deepseek-v4-flash" in line for line in ui.command_popup_lines))
+        self.assertFalse(ui.command_popup_error)
+
 
 if __name__ == "__main__":
     unittest.main()

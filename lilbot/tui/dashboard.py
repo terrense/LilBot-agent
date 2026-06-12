@@ -12,7 +12,7 @@ from time import monotonic
 from typing import Iterable
 
 from ..core.agent import Agent
-from ..cli import handle_slash, run_prompt
+from ..cli import handle_slash, run_prompt, slash_commands_matching
 from ..core.events import TextDelta, ToolFinished, ToolStarted, TurnFinished
 from ..tools import ToolContext, ToolRegistry
 
@@ -171,6 +171,20 @@ STYLE = Style.from_dict(
         "permission.dim": "bg:#1b0f2e #c4b5fd bold",
         "permission.option": "bg:#3b1b55 #fde68a bold",
         "permission.alert": "bg:#1b0f2e #93c5fd bold",
+        "slash.frame": "bg:#111f38 #eaf2ff bold",
+        "slash.title": "bg:#111f38 #93c5fd bold",
+        "slash.match": "bg:#334966 #ffffff bold",
+        "slash.name": "bg:#111f38 #f8d8ec bold",
+        "slash.name.selected": "bg:#334966 #ffffff bold",
+        "slash.desc": "bg:#111f38 #b8c7e0 bold",
+        "slash.desc.selected": "bg:#334966 #ffffff bold",
+        "slash.footer": "bg:#111f38 #d8b4fe bold",
+        "command.frame": "bg:#111f38 #eaf2ff bold",
+        "command.title": "bg:#111f38 #fde68a bold",
+        "command.text": "bg:#111f38 #f8d8ec bold",
+        "command.dim": "bg:#111f38 #b8c7e0 bold",
+        "command.ok": "bg:#111f38 #86efac bold",
+        "command.error": "bg:#111f38 #fca5a5 bold",
     }
 )
 
@@ -406,6 +420,12 @@ class DashboardUI:
         self.quit_armed_until = 0.0
         self.drag_target: str | None = None
         self.drag_last_y = 0
+        self.slash_selection = 0
+        self.slash_hidden_for_text = ""
+        self.command_popup_title = ""
+        self.command_popup_lines: list[str] = []
+        self.command_popup_error = False
+        self.route_slash_to_popup = False
         self.ctx.permissions.quiet = True
         self.ctx.permissions.prompt = self.permission_prompt
 
@@ -455,17 +475,50 @@ class DashboardUI:
         return 0
 
     def print(self, value: str = "", style: str | None = None) -> None:
+        if self.route_slash_to_popup:
+            self._show_command_popup("Command", str(value).splitlines() or [""])
+            return
         self._append(value)
 
     def error(self, message: str) -> None:
+        if self.route_slash_to_popup:
+            self._show_command_popup("Command error", [message], is_error=True)
+            return
         self._append(f"ERROR: {message}")
 
     def table(self, title: str, columns: list[str], rows: Iterable[Iterable[str]]) -> None:
+        if self.route_slash_to_popup:
+            self._show_command_popup(title, self._table_lines(columns, rows))
+            return
         self._append(title)
         self._append(" | ".join(columns))
         self._append("-" * min(96, max(8, len(title) + 20)))
         for row in rows:
             self._append(" | ".join(str(item) for item in row))
+
+    def _table_lines(self, columns: list[str], rows: Iterable[Iterable[str]]) -> list[str]:
+        data = [[str(cell) for cell in columns], *[[str(cell) for cell in row] for row in rows]]
+        if not data:
+            return []
+        width_count = max(len(row) for row in data)
+        normalized = [row + [""] * (width_count - len(row)) for row in data]
+        widths = [max(_display_width(row[index]) for row in normalized) for index in range(width_count)]
+        lines = [" | ".join(_pad_display(cell, widths[index]) for index, cell in enumerate(normalized[0]))]
+        lines.append("-+-".join("-" * width for width in widths))
+        for row in normalized[1:]:
+            lines.append(" | ".join(_pad_display(cell, widths[index]) for index, cell in enumerate(row)))
+        return lines
+
+    def _show_command_popup(self, title: str, lines: list[str], is_error: bool = False) -> None:
+        self.command_popup_title = title
+        self.command_popup_lines = lines[:18] or ["(no output)"]
+        self.command_popup_error = is_error
+        self._refresh()
+
+    def _clear_command_popup(self) -> None:
+        self.command_popup_title = ""
+        self.command_popup_lines = []
+        self.command_popup_error = False
 
     def help(self, compact: bool = False) -> None:
         rows = [
@@ -484,6 +537,22 @@ class DashboardUI:
         self.table("Command deck", ["Command", "Purpose"], rows)
 
     def theme_demo(self) -> None:
+        if self.route_slash_to_popup:
+            self._show_command_popup(
+                "Theme deck",
+                [
+                    "1  nebula blush      selected",
+                    "2  pale violet       soon",
+                    "3  soft midnight     soon",
+                    "4  ansi compatible   soon",
+                    "",
+                    '  1  function greet() {',
+                    '- 2    console.log("Hello, World!");',
+                    '+ 2    console.log("Hello, LilBot!");',
+                    "  3  }",
+                ],
+            )
+            return
         self._append("Theme deck")
         self._append("1  nebula blush      selected")
         self._append("2  pale violet       soon")
@@ -580,6 +649,7 @@ class DashboardUI:
     def _accept(self, buffer) -> bool:
         line = buffer.text.strip()
         buffer.text = ""
+        self.slash_hidden_for_text = ""
         if not line:
             return False
         if self._answer_permission(line):
@@ -593,6 +663,11 @@ class DashboardUI:
         if self.busy:
             self._append("Agent is still working. Wait for completion before sending another prompt.")
             return False
+        if self._is_popup_slash_command(line):
+            self._clear_command_popup()
+            threading.Thread(target=self._process_line, args=(line,), daemon=True).start()
+            return False
+        self._clear_command_popup()
         self._force_trace_autoscroll()
         self._append(f"> {line}")
         threading.Thread(target=self._process_line, args=(line,), daemon=True).start()
@@ -609,6 +684,23 @@ class DashboardUI:
         return True
 
     def _process_line(self, line: str) -> None:
+        if self._is_popup_slash_command(line):
+            self.work_items = ["command palette", line, "routing output to popup"]
+            self.route_slash_to_popup = True
+            self._refresh()
+            try:
+                if not handle_slash(line, self.agent, self.registry, self.ctx, self):
+                    self._show_command_popup("Command", [f"Unknown command: {line}"], is_error=True)
+            except KeyboardInterrupt:
+                self.app.exit(result=0)
+            except Exception as exc:  # pragma: no cover - interactive guard
+                self._show_command_popup("Command error", [f"{type(exc).__name__}: {exc}"], is_error=True)
+            finally:
+                self.route_slash_to_popup = False
+                self.work_items = ["No active work."]
+                self._refresh()
+            return
+
         self.busy = True
         self.work_items = ["thinking", "LLM turn in progress", "watch the wave strip below"]
         self._refresh()
@@ -622,6 +714,12 @@ class DashboardUI:
         finally:
             self.busy = False
             self._refresh()
+
+    def _is_popup_slash_command(self, line: str) -> bool:
+        if not line.startswith("/"):
+            return False
+        command = line[1:].split(maxsplit=1)[0].lower()
+        return command not in {"skill"}
 
     def _append(self, text: str) -> None:
         for line in str(text).splitlines() or [""]:
@@ -663,6 +761,81 @@ class DashboardUI:
     def _trace_text(self) -> str:
         return "\n".join(self.lines)
 
+    def _slash_query(self) -> str | None:
+        text = self.input.text.strip()
+        if not text.startswith("/") or "\n" in text:
+            return None
+        if " " in text:
+            return None
+        if text == self.slash_hidden_for_text:
+            return None
+        return text[1:]
+
+    def _slash_matches(self):
+        query = self._slash_query()
+        if query is None:
+            return []
+        matches = slash_commands_matching(query)[:7]
+        if self.slash_selection >= len(matches):
+            self.slash_selection = 0
+        return matches
+
+    def _slash_suggestions_visible(self) -> bool:
+        return bool(self._slash_matches()) and not self.pending_permission
+
+    def _slash_suggestions_popup(self):
+        matches = self._slash_matches()
+        fragments = [("class:slash.title", "  COMMAND DECK\n")]
+        if not matches:
+            fragments.append(("class:slash.desc", "  No slash commands match.\n"))
+        for index, command in enumerate(matches):
+            selected = index == self.slash_selection
+            name_style = "class:slash.name.selected" if selected else "class:slash.name"
+            desc_style = "class:slash.desc.selected" if selected else "class:slash.desc"
+            prefix_style = "class:slash.match" if selected else "class:slash.title"
+            aliases = f"  aliases: {', '.join('/' + alias for alias in command.aliases)}" if command.aliases else ""
+            marker = "  > " if selected else "    "
+            fragments.extend(
+                [
+                    (prefix_style, marker),
+                    (name_style, _pad_display(command.usage, 34)),
+                    (desc_style, f" {command.description}{aliases}\n"),
+                ]
+            )
+        fragments.append(("class:slash.footer", "  Up/Down move   Tab accept   Esc close"))
+        return FormattedText(fragments)
+
+    def _accept_slash_suggestion(self) -> bool:
+        matches = self._slash_matches()
+        if not matches:
+            return False
+        command = matches[self.slash_selection]
+        self.input.buffer.text = command.palette_text
+        self.input.buffer.cursor_position = len(self.input.buffer.text)
+        self.slash_hidden_for_text = self.input.buffer.text.strip()
+        self.app.layout.focus(self.input)
+        self._refresh()
+        return True
+
+    def _move_slash_selection(self, delta: int) -> bool:
+        matches = self._slash_matches()
+        if not matches:
+            return False
+        self.slash_selection = (self.slash_selection + delta) % len(matches)
+        self._refresh()
+        return True
+
+    def _command_popup_visible(self) -> bool:
+        return bool(self.command_popup_lines) and not self.input.text.strip() and not self._slash_suggestions_visible()
+
+    def _command_popup(self):
+        style = "class:command.error" if self.command_popup_error else "class:command.text"
+        fragments = [("class:command.title", f"  {self.command_popup_title or 'Command'}\n")]
+        for line in self.command_popup_lines:
+            fragments.append((style, f"  {line}\n"))
+        fragments.append(("class:command.dim", "  Esc close"))
+        return FormattedText(fragments)
+
     def _keys(self) -> KeyBindings:
         kb = KeyBindings()
 
@@ -677,7 +850,27 @@ class DashboardUI:
 
         @kb.add("escape")
         def _focus_input(event) -> None:
+            if self._slash_suggestions_visible():
+                self.slash_hidden_for_text = self.input.text.strip()
+                self._refresh()
+                return
+            if self.command_popup_lines:
+                self._clear_command_popup()
+                self._refresh()
+                return
             event.app.layout.focus(self.input)
+
+        @kb.add("down", filter=Condition(lambda: self._slash_suggestions_visible()))
+        def _slash_down(event) -> None:
+            self._move_slash_selection(1)
+
+        @kb.add("up", filter=Condition(lambda: self._slash_suggestions_visible()))
+        def _slash_up(event) -> None:
+            self._move_slash_selection(-1)
+
+        @kb.add("tab", filter=Condition(lambda: self._slash_suggestions_visible()))
+        def _slash_accept(event) -> None:
+            self._accept_slash_suggestion()
 
         @kb.add("c-v")
         def _paste(event) -> None:
@@ -1008,6 +1201,51 @@ class DashboardUI:
                     left=8,
                     right=8,
                     top=3,
+                    z_index=20,
+                ),
+                Float(
+                    content=ConditionalContainer(
+                        Frame(
+                            Box(
+                                Window(
+                                    FormattedTextControl(self._slash_suggestions_popup),
+                                    height=9,
+                                    wrap_lines=False,
+                                    style="class:slash.frame",
+                                ),
+                                padding=0,
+                            ),
+                            title="  Slash Commands  ",
+                            style="class:slash.frame",
+                        ),
+                        filter=Condition(lambda: self._slash_suggestions_visible()),
+                    ),
+                    left=0,
+                    right=0,
+                    bottom=9,
+                    z_index=12,
+                ),
+                Float(
+                    content=ConditionalContainer(
+                        Frame(
+                            Box(
+                                Window(
+                                    FormattedTextControl(self._command_popup),
+                                    height=12,
+                                    wrap_lines=True,
+                                    style="class:command.text",
+                                ),
+                                padding=1,
+                            ),
+                            title="  Command Output  ",
+                            style="class:command.frame",
+                        ),
+                        filter=Condition(lambda: self._command_popup_visible()),
+                    ),
+                    left=6,
+                    right=6,
+                    bottom=9,
+                    z_index=11,
                 )
             ],
         )

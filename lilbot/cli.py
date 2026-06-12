@@ -4,6 +4,7 @@ import argparse
 import shutil
 import shlex
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
@@ -38,6 +39,51 @@ MODEL_ALIASES = {
     for model, spec in SUPPORTED_MODELS.items()
     for alias in (model, *spec["aliases"])  # type: ignore[misc]
 }
+
+
+@dataclass(frozen=True)
+class SlashCommandInfo:
+    name: str
+    usage: str
+    description: str
+    aliases: tuple[str, ...] = ()
+
+    @property
+    def palette_text(self) -> str:
+        return f"/{self.name} " if any(token in self.usage for token in ("[", "<")) else f"/{self.name}"
+
+
+SLASH_COMMANDS: tuple[SlashCommandInfo, ...] = (
+    SlashCommandInfo("help", "/help [command]", "Show commands and short help.", ("?", "h")),
+    SlashCommandInfo("theme", "/theme", "Show the current visual theme preview."),
+    SlashCommandInfo("model", "/model [flash|pro]", "Switch or view the current DeepSeek model.", ("moxing",)),
+    SlashCommandInfo("models", "/models", "List available models.", ("moxingliebiao",)),
+    SlashCommandInfo("tools", "/tools", "List registered tools grouped by capability."),
+    SlashCommandInfo("skills", "/skills", "List bundled and installed skills."),
+    SlashCommandInfo("skill", "/skill NAME ARGS", "Render and run a skill prompt."),
+    SlashCommandInfo("memory", "/memory list|search|save|delete", "Manage project memory."),
+    SlashCommandInfo("agents", "/agents", "List sub-agent types and tasks."),
+    SlashCommandInfo("agent", "/agent TYPE PROMPT", "Run a sub-agent task."),
+    SlashCommandInfo("mcp", "/mcp", "List MCP-style external servers."),
+    SlashCommandInfo("permissions", "/permissions ask|accept-all|deny-all", "Change permission mode."),
+    SlashCommandInfo("compact", "/compact", "Compact conversation context."),
+    SlashCommandInfo("status", "/status", "Show session status."),
+    SlashCommandInfo("display", "/display", "Show terminal and font diagnostics."),
+    SlashCommandInfo("copy", "/copy", "Copy Trace to clipboard."),
+    SlashCommandInfo("exit", "/exit", "Quit LilBot.", ("quit", "q")),
+)
+
+
+def slash_commands_matching(prefix: str) -> list[SlashCommandInfo]:
+    query = prefix.strip().lstrip("/").lower()
+    matches = [
+        command
+        for command in SLASH_COMMANDS
+        if not query
+        or command.name.startswith(query)
+        or any(alias.startswith(query) for alias in command.aliases)
+    ]
+    return sorted(matches, key=lambda command: (not command.name.startswith(query), command.name))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -148,7 +194,7 @@ def handle_slash(line: str, agent: Agent, registry: ToolRegistry, ctx: ToolConte
     if cmd == "theme":
         ui.theme_demo()
         return True
-    if cmd == "model":
+    if cmd in {"model", "models"}:
         if not args:
             ui.table("Models", ["Model", "Aliases", "Status"], model_rows(ctx.config.model))
             return True
