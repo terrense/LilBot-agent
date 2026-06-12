@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Any
 
 
+DEFAULT_MAX_STEPS = 10
+
+
 @dataclass
 class LilBotConfig:
     workspace: Path
@@ -15,7 +18,7 @@ class LilBotConfig:
     base_url: str = "https://api.openai.com/v1"
     api_key: str = ""
     permission_mode: str = "ask"
-    max_steps: int = 8
+    max_steps: int = DEFAULT_MAX_STEPS
     compact_after_messages: int = 28
     verbose: bool = False
 
@@ -30,6 +33,16 @@ class LilBotConfig:
 
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
+
+
+def _env_int(name: str, default: int) -> int:
+    value = _env(name)
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
 
 
 def load_dotenv(workspace: Path) -> None:
@@ -94,6 +107,10 @@ def apply_env_overrides(cfg: LilBotConfig) -> LilBotConfig:
 
     if _env("LILBOT_PERMISSION_MODE"):
         cfg.permission_mode = _env("LILBOT_PERMISSION_MODE")
+    if _env("LILBOT_MAX_STEPS"):
+        cfg.max_steps = max(1, _env_int("LILBOT_MAX_STEPS", cfg.max_steps))
+    elif cfg.max_steps == 8:
+        cfg.max_steps = DEFAULT_MAX_STEPS
     return cfg
 
 
