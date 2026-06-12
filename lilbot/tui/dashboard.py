@@ -804,6 +804,7 @@ class DashboardUI:
                 Window(FormattedTextControl(self._topbar), height=1, style="class:topbar"),
                 main_area,
                 Frame(self.input, title="  Composer  ", style="class:frame", height=5),
+                Window(FormattedTextControl(self._status_strip), height=1, style="class:toolbar"),
                 Window(FormattedTextControl(self._toolbar), height=1, style="class:toolbar"),
             ],
             style="class:root",
@@ -964,8 +965,6 @@ class DashboardUI:
         return "\n".join(rows)
 
     def _toolbar(self):
-        if self.busy:
-            return self._busy_toolbar()
         return FormattedText(
             [
                 ("class:hotkey", "/help"),
@@ -985,14 +984,29 @@ class DashboardUI:
             ]
         )
 
-    def _busy_toolbar(self):
+    def _status_strip(self):
+        if self.busy:
+            return self._busy_status_strip()
+        model = self._model_badge()
+        context_pct = self._context_percent()
+        return FormattedText(
+            [
+                ("class:toolbar", " "),
+                ("class:hotkey", model),
+                ("class:toolbar", f" ready   ctx {context_pct:02d}%   "),
+                ("class:wave", "▁▁▁▁▁▁▁▁▁▁"),
+            ]
+        )
+
+    def _busy_status_strip(self):
         frame = WAVE_FRAMES[self.wave_index % len(WAVE_FRAMES)]
         self.wave_index += 1
-        left = " thinking "
-        right = " running  F2 copy  F4 trace  F5 work  Ctrl+C x2 exit "
+        model = self._model_badge()
+        left = f" {model}  thinking "
+        right = f" ctx {self._context_percent():02d}% "
         width = self._width()
         if width < len(left) + len(right) + 8:
-            right = " running  F2 copy  Ctrl+C x2 exit "
+            right = ""
         if width < len(left) + len(right) + 4:
             right = _clip_line(right, max(0, width - len(left)))
         wave_width = max(0, width - len(left) - len(right))
@@ -1004,3 +1018,14 @@ class DashboardUI:
                 ("class:toolbar", right),
             ]
         )
+
+    def _model_badge(self) -> str:
+        model = self.ctx.config.model
+        lower = model.lower()
+        if "deepseek" in lower and "pro" in lower:
+            return "deepseek-pro"
+        if "deepseek" in lower and "flash" in lower:
+            return "deepseek-flash"
+        if len(model) > 28:
+            return model[:25] + "..."
+        return model
