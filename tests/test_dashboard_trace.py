@@ -3,8 +3,8 @@ from __future__ import annotations
 import unittest
 
 from lilbot.tui.dashboard import (
-    LILBOT_LOGO_COMPACT_ROWS,
-    LILBOT_LOGO_ROWS,
+    LILBOT_AGENT_LOGO_COMPACT_ROWS,
+    LILBOT_AGENT_LOGO_ROWS,
     _clip_line,
     _highlight_trace_line,
     _summarize_interim_text,
@@ -48,9 +48,11 @@ class DashboardTraceTests(unittest.TestCase):
         self.assertTrue(summary[-1].startswith("... hidden"))
 
     def test_lilbot_logo_rows_are_fixed_banner_art(self):
-        self.assertIn("██████", "\n".join(LILBOT_LOGO_ROWS))
-        self.assertEqual(len(LILBOT_LOGO_COMPACT_ROWS), 3)
-        self.assertLessEqual(len(_clip_line(LILBOT_LOGO_ROWS[0], 30)), 30)
+        art = "\n".join(LILBOT_AGENT_LOGO_ROWS)
+        self.assertIn("██████", art)
+        self.assertIn("AGENT", art)
+        self.assertEqual(len(LILBOT_AGENT_LOGO_COMPACT_ROWS), 3)
+        self.assertLessEqual(len(_clip_line(LILBOT_AGENT_LOGO_ROWS[0], 30)), 30)
 
     def test_line_start_offset_for_scroll_cursor(self):
         from lilbot.tui.dashboard import DashboardUI

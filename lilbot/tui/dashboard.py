@@ -18,6 +18,7 @@ from ..tools import ToolContext, ToolRegistry
 try:
     from prompt_toolkit import Application
     from prompt_toolkit.application.current import get_app
+    from prompt_toolkit.cursor_shapes import CursorShape
     from prompt_toolkit.formatted_text import FormattedText
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
@@ -78,20 +79,34 @@ NOISY_PATH_MARKERS = (
     ".mypy_cache/",
 )
 
-LILBOT_LOGO_ROWS = [
+LILBOT_AGENT_LOGO_ROWS = [
     "██╗     ██╗██╗     ██████╗  ██████╗ ████████╗",
     "██║     ██║██║     ██╔══██╗██╔═══██╗╚══██╔══╝",
     "██║     ██║██║     ██████╔╝██║   ██║   ██║",
     "██║     ██║██║     ██╔══██╗██║   ██║   ██║",
     "███████╗██║███████╗██████╔╝╚██████╔╝   ██║",
     "╚══════╝╚═╝╚══════╝╚═════╝  ╚═════╝    ╚═╝",
+    "                 ─────── AGENT ───────",
+    " █████╗  ██████╗ ███████╗███╗   ██╗████████╗",
+    "██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝",
+    "███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║",
+    "██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║",
+    "██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║",
+    "╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝",
 ]
-LILBOT_LOGO_COMPACT_ROWS = [
-    "╦  ╦╦  ╔╗ ╔═╗╔╦╗",
-    "║  ║║  ╠╩╗║ ║ ║ ",
-    "╩═╝╩╩═╝╚═╝╚═╝ ╩ ",
+LILBOT_AGENT_LOGO_COMPACT_ROWS = [
+    "╦  ╦╦  ╔╗ ╔═╗╔╦╗ ─ ╔═╗╔═╗╔═╗╔╗╔╔╦╗",
+    "║  ║║  ╠╩╗║ ║ ║  ─ ╠═╣║ ╦║╣ ║║║ ║ ",
+    "╩═╝╩╩═╝╚═╝╚═╝ ╩  ─ ╩ ╩╚═╝╚═╝╝╚╝ ╩ ",
 ]
 LILBOT_LOGO_STYLES = [
+    "class:logo.hot",
+    "class:logo.hot",
+    "class:logo.mid",
+    "class:logo.mid",
+    "class:logo.cool",
+    "class:logo.shadow",
+    "class:logo.mid",
     "class:logo.hot",
     "class:logo.hot",
     "class:logo.mid",
@@ -345,8 +360,8 @@ class DashboardUI:
             style="class:trace",
         )
         self.input = TextArea(
-            height=4,
-            multiline=False,
+            height=5,
+            multiline=True,
             focusable=True,
             focus_on_click=True,
             wrap_lines=True,
@@ -361,6 +376,7 @@ class DashboardUI:
             full_screen=True,
             mouse_support=True,
             refresh_interval=0.16,
+            cursor=CursorShape.BLINKING_BEAM,
         )
         self._install_mouse_handlers()
 
@@ -557,6 +573,21 @@ class DashboardUI:
             event.app.layout.focus(self.input)
             self.input.buffer.insert_text(self._read_clipboard())
 
+        @kb.add("enter")
+        def _submit(event) -> None:
+            event.app.layout.focus(self.input)
+            self._accept(self.input.buffer)
+
+        @kb.add("c-j")
+        def _composer_newline(event) -> None:
+            event.app.layout.focus(self.input)
+            self.input.buffer.insert_text("\n")
+
+        @kb.add("escape", "enter")
+        def _composer_alt_enter(event) -> None:
+            event.app.layout.focus(self.input)
+            self.input.buffer.insert_text("\n")
+
         @kb.add("f2")
         def _copy(event) -> None:
             self._copy_trace(selection_first=True)
@@ -669,6 +700,13 @@ class DashboardUI:
         self.drag_target = None
         return True
 
+    def _is_scrollbar_zone(self, area: TextArea, x: int) -> bool:
+        render_info = area.window.render_info
+        width = getattr(render_info, "window_width", 0) if render_info is not None else 0
+        if width <= 0:
+            return False
+        return x >= max(0, width - 2)
+
     def _copy_trace(self, selection_first: bool = True) -> None:
         text = self._selected_trace_text() if selection_first else ""
         label = "selection" if text else "Trace"
@@ -711,7 +749,11 @@ class DashboardUI:
             if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
                 self._scroll_trace(3)
                 return None
-            if mouse_event.button == MouseButton.LEFT and mouse_event.event_type == MouseEventType.MOUSE_DOWN:
+            if (
+                mouse_event.button == MouseButton.LEFT
+                and mouse_event.event_type == MouseEventType.MOUSE_DOWN
+                and self._is_scrollbar_zone(self.trace, mouse_event.position.x)
+            ):
                 self._begin_drag_scroll("trace", mouse_event.position.y)
                 return None
             if mouse_event.event_type == MouseEventType.MOUSE_MOVE and self._drag_scroll("trace", mouse_event.position.y):
@@ -732,7 +774,11 @@ class DashboardUI:
             if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
                 self._scroll_work(2)
                 return None
-            if mouse_event.button == MouseButton.LEFT and mouse_event.event_type == MouseEventType.MOUSE_DOWN:
+            if (
+                mouse_event.button == MouseButton.LEFT
+                and mouse_event.event_type == MouseEventType.MOUSE_DOWN
+                and self._is_scrollbar_zone(self.work, mouse_event.position.x)
+            ):
                 self._begin_drag_scroll("work", mouse_event.position.y)
                 return None
             if mouse_event.event_type == MouseEventType.MOUSE_MOVE and self._drag_scroll("work", mouse_event.position.y):
@@ -793,13 +839,13 @@ class DashboardUI:
                     Box(Window(FormattedTextControl(self._agent_panel), wrap_lines=False), padding=1),
                     title="  LilBot Agent  ",
                     style="class:frame",
-                    height=Dimension(min=22, preferred=30, max=34, weight=3),
+                    height=Dimension(min=26, preferred=34, max=38, weight=3),
                 ),
                 Frame(
                     self.work,
                     title="  Work  ",
                     style="class:frame",
-                    height=Dimension(min=11, preferred=16, max=22, weight=2),
+                    height=Dimension(min=14, preferred=22, weight=3),
                 ),
             ],
             width=Dimension(weight=3),
@@ -822,7 +868,7 @@ class DashboardUI:
             [
                 Window(FormattedTextControl(self._topbar), height=1, style="class:topbar"),
                 main_area,
-                Frame(self.input, title="  Composer  ", style="class:frame", height=5),
+                Frame(self.input, title="  Composer  ", style="class:frame", height=7),
                 Window(FormattedTextControl(self._status_strip), height=1, style="class:toolbar"),
                 Window(FormattedTextControl(self._toolbar), height=1, style="class:toolbar"),
             ],
@@ -874,7 +920,7 @@ class DashboardUI:
         width = self._width()
         left_width = max(44, int(width * 0.375) - 6)
         fragments = []
-        logo_rows = LILBOT_LOGO_ROWS if left_width >= 54 else LILBOT_LOGO_COMPACT_ROWS
+        logo_rows = LILBOT_AGENT_LOGO_ROWS if left_width >= 54 else LILBOT_AGENT_LOGO_COMPACT_ROWS
         for idx, row in enumerate(logo_rows):
             style = LILBOT_LOGO_STYLES[min(idx, len(LILBOT_LOGO_STYLES) - 1)]
             fragments.append((style, _clip_line(row, left_width) + "\n"))
