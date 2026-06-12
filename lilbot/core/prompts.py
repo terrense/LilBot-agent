@@ -11,6 +11,9 @@ def build_system_prompt(memory: MemoryStore, skills: SkillRegistry) -> str:
 Principles:
 - Be concise, practical, and honest about uncertainty.
 - Prefer safe workspace-scoped tools over guessing.
+- Use web_search for current, niche, or unfamiliar public facts before answering.
+- Use fetch_url when you already have a specific URL and need page content.
+- Cite source URLs when web tools influenced the answer.
 - Ask for permission before shell commands or writes when required.
 - Use memory only for stable user/project preferences.
 

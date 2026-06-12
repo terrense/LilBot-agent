@@ -19,6 +19,26 @@ from .tui.classic import LilBotUI
 from .tui.windows_console import configure_windows_console
 
 
+SUPPORTED_MODELS: dict[str, dict[str, str | tuple[str, ...]]] = {
+    "deepseek-v4-flash": {
+        "provider": "deepseek",
+        "base_url": "https://api.deepseek.com",
+        "aliases": ("flash", "deepseek-flash", "v4-flash"),
+    },
+    "deepseek-v4-pro": {
+        "provider": "deepseek",
+        "base_url": "https://api.deepseek.com",
+        "aliases": ("pro", "deepseek-pro", "v4-pro"),
+    },
+}
+
+MODEL_ALIASES = {
+    alias: model
+    for model, spec in SUPPORTED_MODELS.items()
+    for alias in (model, *spec["aliases"])  # type: ignore[misc]
+}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="LilBot local agent")
     parser.add_argument("prompt", nargs="*", help="Prompt for non-interactive use.")
@@ -52,6 +72,36 @@ def build_runtime(cfg: LilBotConfig, ui: LilBotUI, interactive: bool = True) -> 
     register_builtins(registry)
     ctx = ToolContext(sandbox, permissions, memory, skills, subagents, mcp, cfg)
     return Agent(cfg, provider, registry, ctx), registry, ctx
+
+
+def normalize_model_name(value: str) -> str | None:
+    key = value.strip().lower()
+    return MODEL_ALIASES.get(key)
+
+
+def model_rows(current_model: str) -> list[tuple[str, str, str]]:
+    rows = []
+    for model, spec in SUPPORTED_MODELS.items():
+        aliases = ", ".join(spec["aliases"])  # type: ignore[arg-type]
+        status = "current" if model == current_model else ""
+        rows.append((model, aliases, status))
+    return rows
+
+
+def switch_runtime_model(agent: Agent, ctx: ToolContext, requested: str) -> str:
+    model = normalize_model_name(requested)
+    if not model:
+        choices = ", ".join(SUPPORTED_MODELS)
+        raise ValueError(f"Unknown model `{requested}`. Available: {choices}")
+    spec = SUPPORTED_MODELS[model]
+    ctx.config.provider = str(spec["provider"])
+    ctx.config.model = model
+    ctx.config.base_url = str(spec["base_url"]).rstrip("/")
+    save_config(ctx.config)
+    agent.config = ctx.config
+    agent.provider = choose_provider(ctx.config)
+    ctx.subagents.provider = lambda messages, tools: agent.provider.complete(messages, tools)
+    return model
 
 
 def apply_args(cfg: LilBotConfig, args: argparse.Namespace) -> LilBotConfig:
@@ -93,6 +143,17 @@ def handle_slash(line: str, agent: Agent, registry: ToolRegistry, ctx: ToolConte
         return True
     if cmd == "theme":
         ui.theme_demo()
+        return True
+    if cmd == "model":
+        if not args:
+            ui.table("Models", ["Model", "Aliases", "Status"], model_rows(ctx.config.model))
+            return True
+        try:
+            model = switch_runtime_model(agent, ctx, args)
+        except ValueError as exc:
+            ui.error(str(exc))
+            return True
+        ui.print(f"Model switched to {model}", "green")
         return True
     if cmd == "tools":
         ui.table("Tools", ["Name", "Description"], [(t.name, t.description) for t in registry.list()])

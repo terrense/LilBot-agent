@@ -202,6 +202,7 @@ class LilBotUI:
         rows = [
             ("/help", "show commands"),
             ("/theme", "show theme preview"),
+            ("/model [flash|pro]", "switch DeepSeek model"),
             ("/tools", "list tools"),
             ("/skills", "list skills"),
             ("/skill NAME ARGS", "render and run a skill"),

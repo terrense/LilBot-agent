@@ -39,6 +39,30 @@ def _extract_path(text: str) -> str:
     return "."
 
 
+def _looks_like_web_query(text: str) -> bool:
+    terms = [
+        "openclaw",
+        "latest",
+        "current",
+        "today",
+        "news",
+        "website",
+        "web",
+        "internet",
+        "最新",
+        "今天",
+        "新闻",
+        "网页",
+        "网站",
+        "网上",
+        "联网",
+        "搜索网络",
+        "检索网页",
+    ]
+    lower = text.lower()
+    return any(term in lower for term in terms)
+
+
 class RuleBasedProvider(BaseProvider):
     """Offline provider for testing the agent shell without API keys."""
 
@@ -59,6 +83,8 @@ class RuleBasedProvider(BaseProvider):
             return ProviderTurn(tool_calls=[ToolCall("list_dir", {"path": _extract_path(content), "max_depth": 1})])
         if any(word in lower for word in ["read", "show file", "读取", "查看文件"]):
             return ProviderTurn(tool_calls=[ToolCall("read_file", {"path": _extract_path(content)})])
+        if _looks_like_web_query(content):
+            return ProviderTurn(tool_calls=[ToolCall("web_search", {"query": content, "max_results": 5})])
         if any(word in lower for word in ["grep", "search", "搜索", "查找"]):
             words = [w for w in re.split(r"\s+", content.strip()) if w]
             query = words[-1] if words else content
