@@ -1,3 +1,3 @@
-from .manager import AgentDefinition, SubAgentManager, SubAgentTask
+from .manager import AgentDefinition, SubAgentGateError, SubAgentManager, SubAgentTask
 
-__all__ = ["AgentDefinition", "SubAgentManager", "SubAgentTask"]
+__all__ = ["AgentDefinition", "SubAgentGateError", "SubAgentManager", "SubAgentTask"]

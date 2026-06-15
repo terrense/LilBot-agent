@@ -17,6 +17,42 @@
 
 ---
 
+## Current Status
+
+LilBot is now past the empty-shell stage. The project has a working local agent
+loop, OpenAI-compatible provider layer, tool registry, workspace sandbox,
+permission manager, durable memory, markdown skills, subagents, MCP-style
+adapters, a Windows-first TUI, and a growing compatibility surface inspired by
+CodeWhale and Claude Code.
+
+The main quality focus has shifted from adding more compatible names to making
+core capabilities enforceable and durable:
+
+- Subagent `allowed_tools` are enforced at runtime, including explicit empty
+  allowlists and Claude-style tool names such as `Read` and `Grep`.
+- Custom subagents now use a five-gate allowed-tool flow: gates 1-3 reject
+  unsafe creation, while gates 4-5 deny unsafe runtime tool calls and record
+  transcript evidence.
+- Forked skills now execute through the subagent runtime instead of only
+  rendering prompt text back into the parent conversation.
+- Subagent transcripts are persisted under `.lilbot/subagent-transcripts/` and
+  exposed through `transcript_handle`.
+- `EnterPlanMode` and `ExitPlanMode` persist plan lifecycle and approval state.
+- Pending plan approval now blocks write and execution tools through the central
+  tool registry until the plan is approved or rejected.
+- `EnterWorktree` and `ExitWorktree` probe git worktree support and return an
+  honest unsupported result when worktrees cannot be used.
+- The current test suite covers these enforcement and lifecycle paths.
+
+Current verified baseline:
+
+```text
+python -m pytest
+66 passed
+```
+
+---
+
 ## Whole Architecture
 
 now we only have the CLI version, in the future, I will find some guy to coorperate with me to develop a coller software version like this:
@@ -128,6 +164,38 @@ flowchart TB
     classDef mcp fill:#4C0519,stroke:#fb7185,color:#ffffff,stroke-width:2px
     classDef data fill:#0F172A,stroke:#94a3b8,color:#ffffff,stroke-width:2px
 ```
+
+---
+
+## Implementation Map
+
+| Layer | Main Files | Current State |
+|---|---|---|
+| CLI and runtime wiring | `lilbot/cli.py`, `lilbot/__main__.py` | Builds config, provider, registry, sandbox, memory, skills, subagents, MCP, and TUI. |
+| Agent loop | `lilbot/core/agent.py`, `lilbot/core/events.py`, `lilbot/core/prompts.py` | Runs provider turns, executes tools, tracks usage, compacts history, and auto-delegates broad tasks to explorer/research/planner subagents. |
+| Provider layer | `lilbot/llm/providers.py` | Supports the local rule model and OpenAI-compatible providers such as DeepSeek. |
+| Tool bus | `lilbot/tools/registry.py`, `lilbot/tools/builtin.py` | Registers schemas and handlers for workspace, git, shell, memory, skills, subagents, tasks, automation, MCP, web, document/media probes, compatibility aliases, and central plan-approval gating. |
+| Safety boundary | `lilbot/sandbox/workspace.py`, `lilbot/sandbox/permissions.py` | Enforces workspace path boundaries and ask/accept-all/deny-all permission modes. |
+| Memory | `lilbot/memory/store.py` | Persists project memory as JSONL with list/search/delete helpers. |
+| Skills | `lilbot/skills/registry.py`, `lilbot/skills/bundled/` | Loads inline and forked markdown skills, Claude-style frontmatter, aliases, companion files, allowed tools, agent hints, and model hints. |
+| Subagents | `lilbot/subagents/manager.py` | Provides built-in and custom agents, five-gate custom allowed-tool validation, runtime tool allowlists, structured final reports, cancellation, and transcript handles. |
+| MCP adapter | `lilbot/mcp/manager.py` | Reads `.lilbot/mcp.json` and provides phase-1 server/tool/resource integration. |
+| TUI | `lilbot/tui/classic.py`, `lilbot/tui/dashboard.py`, `lilbot/tui/windows_console.py` | Provides Rich classic fallback and a prompt_toolkit dashboard for Windows-first operation. |
+
+---
+
+## Capability Progress
+
+| Area | Done | Next Gap |
+|---|---|---|
+| Workspace tools | File reads, directory listing, search, git status/diff/log/show/blame, bounded handles, diagnostics. | Pure-Python patch fallback, richer `run_tests` classification, better `project_map`. |
+| Skill ecosystem | Bundled skills, `SKILL.md` folders, metadata parsing, `load_skill`, inline skills, forked skill execution through subagents. | Source precedence, hooks, path-filtered skills, safer shell expansion. |
+| Subagents | Built-in roles, custom agents, five-gate allowed-tool protection, Claude tool-name compatibility, durable transcript handles. | Configurable concurrency caps, persisted task recovery, progress events in the UI. |
+| Planning lifecycle | `update_plan`, checklists, goals, `EnterPlanMode`, `ExitPlanMode`, persisted approval state, write/execute gating while approval is pending. | Better approval UX and plan review surfaces in the TUI. |
+| Worktree lifecycle | `EnterWorktree` / `ExitWorktree` with explicit unsupported fallback. | Stronger branch naming, cleanup/remove flow, per-subagent worktree isolation. |
+| Shell and PowerShell | Permission-gated shell execution and background jobs. | Claude-grade PowerShell parser, destructive command classifier, safer command segments. |
+| External integrations | Web search/fetch, GitHub via `gh`, MCP phase-1 adapter, automation records. | Deeper MCP resource discovery, stronger GitHub workflows, real automation scheduler. |
+| Analysis/media/docs | RLM Python sessions, pandoc/OCR/image probes. | Artifact handles, richer document/spreadsheet/presentation workflows. |
 
 ---
 
@@ -363,6 +431,39 @@ Dashboard interaction notes:
 - Right-click paste and `Ctrl+V` are supported in the Composer.
 - The top bar shows approximate context usage, for example `ctx 03%`.
 - During model work, the footer switches to a wave animation.
+
+---
+
+## Next Development Focus
+
+Recommended next batch:
+
+1. PowerShell safety.
+   - Add a dedicated PowerShell command analyzer for Windows.
+   - Classify destructive commands, command separators, redirection,
+     subprocess boundaries, path deletes/moves, and background launches.
+   - Return structured safety metadata before permission prompts.
+
+2. Subagent lifecycle hardening.
+   - Add configurable concurrency limits.
+   - Persist task records strongly enough to recover after restart.
+   - Surface transcript/progress events in the dashboard.
+   - Prepare per-subagent worktree isolation.
+
+3. Worktree isolation.
+   - Extend `EnterWorktree` / `ExitWorktree` into a subagent-aware workflow.
+   - Add cleanup/remove behavior with explicit permissions.
+   - Keep unsupported states honest on systems without git worktree support.
+
+4. LSP phase 1.
+   - Add an `LSP` tool that can report symbols/definitions when a local
+     language server is available.
+   - Fall back cleanly to grep/project-map evidence when LSP is unavailable.
+
+5. Batch 1 cleanup.
+   - Add pure-Python `apply_patch` fallback for non-git workspaces.
+   - Store test logs/artifact handles.
+   - Improve `project_map` from file listing into framework-aware summaries.
 
 ---
 
