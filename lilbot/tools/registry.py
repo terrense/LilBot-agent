@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from time import perf_counter
 from typing import Any, Callable
 
@@ -41,7 +42,25 @@ class ToolRegistry:
         self._tools[tool.name] = tool
 
     def get(self, name: str) -> ToolDef | None:
-        return self._tools.get(name)
+        return self._tools.get(name) or self._tools.get(self.resolve(name) or "")
+
+    def resolve(self, requested: str) -> str | None:
+        if requested in self._tools:
+            return requested
+        lower = requested.lower()
+        for name in self._tools:
+            if name.lower() == lower:
+                return name
+        snaked = lower.replace("-", "_").replace(" ", "_")
+        if snaked in self._tools:
+            return snaked
+        camel = re.sub(r"(?<!^)(?=[A-Z])", "_", requested).lower()
+        if camel in self._tools:
+            return camel
+        for suffix in ("_tool", "-tool"):
+            if snaked.endswith(suffix) and snaked[: -len(suffix)] in self._tools:
+                return snaked[: -len(suffix)]
+        return None
 
     def list(self) -> list[ToolDef]:
         return sorted(self._tools.values(), key=lambda tool: tool.name)
@@ -57,7 +76,8 @@ class ToolRegistry:
         ]
 
     def execute(self, name: str, arguments: dict[str, Any], ctx: ToolContext) -> tuple[ToolResult, int]:
-        tool = self.get(name)
+        resolved_name = self.resolve(name) or name
+        tool = self.get(resolved_name)
         if not tool:
             return ToolResult(False, f"Unknown tool: {name}"), 0
         started = perf_counter()
@@ -72,4 +92,3 @@ class ToolRegistry:
             result.output = result.output[:12000] + "\n... truncated ..."
             result.metadata["truncated"] = True
         return result, elapsed_ms
-
