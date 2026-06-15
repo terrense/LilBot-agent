@@ -18,11 +18,30 @@ class BaseProvider:
         raise NotImplementedError
 
 
-def _last_message(messages: list[dict[str, Any]], role: str | None = None) -> dict[str, Any] | None:
-    for message in reversed(messages):
-        if role is None or message.get("role") == role:
-            return message
-    return None
+def _truncate(text: str, limit: int = 2000) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "... truncated ..."
+
+
+def _response_error_detail(response: Any) -> str:
+    try:
+        data = response.json()
+    except Exception:
+        text = str(getattr(response, "text", "")).strip()
+        return _truncate(text) if text else "empty response body"
+
+    if isinstance(data, dict):
+        error = data.get("error")
+        if isinstance(error, dict):
+            parts = []
+            for key in ("message", "type", "code", "param"):
+                value = error.get(key)
+                if value:
+                    parts.append(f"{key}={value}")
+            if parts:
+                return "; ".join(parts)
+    return _truncate(json.dumps(data, ensure_ascii=False))
 
 
 def _extract_path(text: str) -> str:
@@ -32,7 +51,7 @@ def _extract_path(text: str) -> str:
         if value:
             return value
     tokens = re.findall(r"[\w./\\-]+\.[A-Za-z0-9]+|[\w./\\-]+", text)
-    skip = {"read", "list", "show", "file", "files", "读取", "列出", "查看", "文件"}
+    skip = {"read", "list", "show", "file", "files"}
     for token in reversed(tokens):
         if token.lower() not in skip:
             return token
@@ -40,7 +59,7 @@ def _extract_path(text: str) -> str:
 
 
 def _looks_like_web_query(text: str) -> bool:
-    terms = [
+    terms = {
         "openclaw",
         "latest",
         "current",
@@ -49,16 +68,7 @@ def _looks_like_web_query(text: str) -> bool:
         "website",
         "web",
         "internet",
-        "最新",
-        "今天",
-        "新闻",
-        "网页",
-        "网站",
-        "网上",
-        "联网",
-        "搜索网络",
-        "检索网页",
-    ]
+    }
     lower = text.lower()
     return any(term in lower for term in terms)
 
@@ -78,22 +88,22 @@ class RuleBasedProvider(BaseProvider):
 
         lower = content.lower()
         if lower.strip().startswith("!"):
-            return ProviderTurn(tool_calls=[ToolCall("bash", {"command": content.strip()[1:].strip()})])
-        if any(word in lower for word in ["list files", "list dir", "列出", "目录"]) and "tool" not in lower:
+            return ProviderTurn(tool_calls=[ToolCall("exec_shell", {"command": content.strip()[1:].strip()})])
+        if any(word in lower for word in ["list files", "list dir"]) and "tool" not in lower:
             return ProviderTurn(tool_calls=[ToolCall("list_dir", {"path": _extract_path(content), "max_depth": 1})])
-        if any(word in lower for word in ["read", "show file", "读取", "查看文件"]):
+        if any(word in lower for word in ["read", "show file"]):
             return ProviderTurn(tool_calls=[ToolCall("read_file", {"path": _extract_path(content)})])
         if _looks_like_web_query(content):
             return ProviderTurn(tool_calls=[ToolCall("web_search", {"query": content, "max_results": 5})])
-        if any(word in lower for word in ["grep", "search", "搜索", "查找"]):
+        if any(word in lower for word in ["grep", "search"]):
             words = [w for w in re.split(r"\s+", content.strip()) if w]
             query = words[-1] if words else content
-            return ProviderTurn(tool_calls=[ToolCall("grep", {"pattern": query, "path": "."})])
-        if any(word in lower for word in ["remember", "记住"]):
+            return ProviderTurn(tool_calls=[ToolCall("grep_files", {"pattern": query, "path": "."})])
+        if "remember" in lower:
             return ProviderTurn(tool_calls=[ToolCall("memory_save", {"name": "note", "text": content})])
-        if "skill" in lower or "技能" in lower:
+        if "skill" in lower:
             return ProviderTurn(tool_calls=[ToolCall("skill_list", {})])
-        if "agent" in lower or "子agent" in lower or "子 agent" in lower:
+        if "agent" in lower:
             return ProviderTurn(tool_calls=[ToolCall("agent_list", {})])
         return ProviderTurn(
             content=(
@@ -105,9 +115,9 @@ class RuleBasedProvider(BaseProvider):
         )
 
     def _small_answer(self, prompt: str) -> str:
-        if "review" in prompt.lower() or "审查" in prompt:
+        if "review" in prompt.lower():
             return "Review focus: input boundaries, error handling, permissions, tests, and user-visible behavior."
-        if "plan" in prompt.lower() or "计划" in prompt:
+        if "plan" in prompt.lower():
             return "Plan in three steps: confirm constraints, build the smallest runnable version, then verify and document."
         return f"Received: {prompt}\n\nThis is a short response from LilBot's offline provider."
 
@@ -135,10 +145,18 @@ class OpenAICompatibleProvider(BaseProvider):
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
         }
-        url = f"{self.config.base_url}/chat/completions"
+        url = f"{self.config.base_url.rstrip('/')}/chat/completions"
         with httpx.Client(timeout=120) as client:
             response = client.post(url, headers=headers, json=body)
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                detail = _response_error_detail(exc.response)
+                raise ProviderError(
+                    f"{self.config.provider} chat request failed: "
+                    f"{exc.response.status_code} {exc.response.reason_phrase} "
+                    f"for {exc.request.url} (model={self.config.model}). {detail}"
+                ) from exc
         data = response.json()
         message = data["choices"][0]["message"]
         calls: list[ToolCall] = []
@@ -150,22 +168,85 @@ class OpenAICompatibleProvider(BaseProvider):
                 args = {"raw": fn.get("arguments", "")}
             calls.append(ToolCall(fn.get("name", ""), args, call.get("id") or "tool"))
         usage = data.get("usage") or {}
-        return ProviderTurn(message.get("content") or "", calls, usage)
+        return ProviderTurn(
+            message.get("content") or "",
+            calls,
+            usage,
+            str(message.get("reasoning_content") or ""),
+        )
 
     def _messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         clean: list[dict[str, Any]] = []
+        pending_tool_ids: set[str] = set()
+        pending_start: int | None = None
+
+        def drop_incomplete_tool_block() -> None:
+            nonlocal pending_tool_ids, pending_start
+            if pending_tool_ids and pending_start is not None:
+                del clean[pending_start:]
+            pending_tool_ids = set()
+            pending_start = None
+
         for message in messages:
             role = message.get("role")
             if role == "tool":
-                clean.append({
-                    "role": "tool",
-                    "tool_call_id": message.get("tool_call_id", "tool"),
-                    "content": str(message.get("content", "")),
-                })
-            elif role == "assistant" and message.get("tool_calls"):
-                clean.append(message)
+                tool_call_id = str(message.get("tool_call_id") or "")
+                if pending_tool_ids and tool_call_id in pending_tool_ids:
+                    clean.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": str(message.get("content", "")),
+                    })
+                    pending_tool_ids.remove(tool_call_id)
+                    if not pending_tool_ids:
+                        pending_start = None
+                continue
+
+            if pending_tool_ids:
+                drop_incomplete_tool_block()
+
+            if role == "assistant" and message.get("tool_calls"):
+                tool_calls = []
+                ids = []
+                for call in message.get("tool_calls") or []:
+                    if not isinstance(call, dict):
+                        continue
+                    call_id = str(call.get("id") or "")
+                    fn = call.get("function") or {}
+                    if not call_id or not isinstance(fn, dict) or not fn.get("name"):
+                        continue
+                    arguments = fn.get("arguments") or "{}"
+                    if not isinstance(arguments, str):
+                        arguments = json.dumps(arguments, ensure_ascii=False)
+                    tool_calls.append({
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": str(fn.get("name")),
+                            "arguments": arguments,
+                        },
+                    })
+                    ids.append(call_id)
+                if tool_calls:
+                    pending_start = len(clean)
+                    pending_tool_ids = set(ids)
+                    assistant_message = {
+                        "role": "assistant",
+                        "content": str(message.get("content") or ""),
+                        "tool_calls": tool_calls,
+                    }
+                    reasoning_content = str(message.get("reasoning_content") or "")
+                    if reasoning_content:
+                        assistant_message["reasoning_content"] = reasoning_content
+                    clean.append(assistant_message)
             elif role in {"system", "user", "assistant"}:
-                clean.append({"role": role, "content": str(message.get("content", ""))})
+                clean_message = {"role": role, "content": str(message.get("content", ""))}
+                reasoning_content = str(message.get("reasoning_content") or "")
+                if role == "assistant" and reasoning_content:
+                    clean_message["reasoning_content"] = reasoning_content
+                clean.append(clean_message)
+        if pending_tool_ids:
+            drop_incomplete_tool_block()
         return clean
 
     def _tool_schema(self, tool: dict[str, Any]) -> dict[str, Any]:

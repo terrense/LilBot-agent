@@ -20,14 +20,16 @@ try:
     from prompt_toolkit import Application
     from prompt_toolkit.application.current import get_app
     from prompt_toolkit.cursor_shapes import CursorShape
+    from prompt_toolkit.data_structures import Point
     from prompt_toolkit.filters import Condition
     from prompt_toolkit.formatted_text import FormattedText
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.layout import ConditionalContainer, Float, FloatContainer, HSplit, Layout, VSplit, Window
     from prompt_toolkit.layout.controls import FormattedTextControl
     from prompt_toolkit.layout.dimension import Dimension
+    from prompt_toolkit.layout.margins import Margin
     from prompt_toolkit.lexers import Lexer
-    from prompt_toolkit.mouse_events import MouseButton, MouseEventType
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
     from prompt_toolkit.styles import Style
     from prompt_toolkit.widgets import Box, Frame, TextArea
 except ImportError:  # pragma: no cover - optional dependency fallback
@@ -162,9 +164,11 @@ STYLE = Style.from_dict(
         "trace.tool.error": "bg:#0f1226 #fca5a5 bold",
         "trace.separator": "bg:#0f1226 #6d5c85",
         "selected": "bg:#5b2c78 #fff5fb",
-        "scrollbar.background": "bg:#1a1230",
-        "scrollbar.button": "bg:#d8b4fe",
-        "scrollbar.arrow": "#f9a8d4 bold",
+        "scrollbar.track": "bg:#0f1226 #8b5cf6",
+        "scrollbar.thumb": "bg:#0f1226 #d8b4fe bold",
+        "scrollbar.background": "bg:#0f1226 #0f1226",
+        "scrollbar.button": "bg:#0f1226 #d8b4fe bold",
+        "scrollbar.arrow": "bg:#0f1226 #8b5cf6",
         "permission.frame": "bg:#1b0f2e #ffe4f1 bold",
         "permission.title": "bg:#1b0f2e #f9a8d4 bold",
         "permission.text": "bg:#1b0f2e #fff5fb bold",
@@ -199,6 +203,25 @@ class TraceLexer(Lexer):
             return _highlight_trace_line(line)
 
         return get_line
+
+
+class TraceScrollbarMargin(Margin):
+    def __init__(self, owner: "DashboardUI", target: str):
+        self.owner = owner
+        self.target = target
+
+    def get_width(self, get_ui_content) -> int:
+        return 2
+
+    def create_margin(self, window_render_info, width: int, height: int):
+        render_height = max(1, int(height or 1))
+        self.owner._remember_scrollbar_height(self.target, render_height)
+        result = []
+        for row in range(render_height):
+            result.extend(self.owner._scrollbar_line_fragments(self.target, row, render_height))
+            if row < render_height - 1:
+                result.append(("", "\n"))
+        return result
 
 
 def _highlight_trace_line(line: str):
@@ -420,6 +443,7 @@ class DashboardUI:
         self.quit_armed_until = 0.0
         self.drag_target: str | None = None
         self.drag_last_y = 0
+        self.scrollbar_render_heights = {"trace": 1, "work": 1}
         self.slash_selection = 0
         self.slash_hidden_for_text = ""
         self.command_popup_title = ""
@@ -434,7 +458,7 @@ class DashboardUI:
             read_only=True,
             focusable=True,
             focus_on_click=True,
-            scrollbar=True,
+            scrollbar=False,
             lexer=TraceLexer(),
             wrap_lines=True,
             style="class:trace",
@@ -444,11 +468,15 @@ class DashboardUI:
             read_only=True,
             focusable=True,
             focus_on_click=True,
-            scrollbar=True,
+            scrollbar=False,
             lexer=TraceLexer(),
             wrap_lines=True,
             style="class:trace",
         )
+        self.trace.window.right_margins = [TraceScrollbarMargin(self, "trace")]
+        self.work.window.right_margins = [TraceScrollbarMargin(self, "work")]
+        self._install_scrollbar_margin_mouse_handler(self.trace, "trace")
+        self._install_scrollbar_margin_mouse_handler(self.work, "work")
         self.input = TextArea(
             height=5,
             multiline=True,
@@ -736,23 +764,37 @@ class DashboardUI:
         self._scroll_trace_to_bottom(self.trace.text)
 
     def _scroll_trace_to_bottom(self, text: str) -> None:
-        self.trace.buffer.cursor_position = len(text)
-        render_info = self.trace.window.render_info
-        height = int(getattr(render_info, "window_height", 0) or 0) if render_info is not None else 0
-        if height > 0:
-            self.trace.window.vertical_scroll = max(0, len(text.splitlines()) - height)
-        self.trace.window.vertical_scroll_2 = 0
+        self._scroll_text_area_to_bottom(self.trace, text)
+
+    def _scroll_text_area_to_bottom(self, area: TextArea, text: str) -> None:
+        area.buffer.cursor_position = len(text)
+        area.window.vertical_scroll = self._max_scroll_for_area(area)
+        area.window.vertical_scroll_2 = 0
+
+    def _sync_text_area_text(self, area: TextArea, text: str, auto_scroll: bool) -> None:
+        if area.text == text:
+            if auto_scroll:
+                self._scroll_text_area_to_bottom(area, text)
+            return
+
+        previous_scroll = int(getattr(area.window, "vertical_scroll", 0) or 0)
+        previous_scroll_2 = int(getattr(area.window, "vertical_scroll_2", 0) or 0)
+        previous_cursor = min(int(getattr(area.buffer, "cursor_position", 0) or 0), len(text))
+
+        area.text = text
+        if auto_scroll:
+            self._scroll_text_area_to_bottom(area, text)
+            return
+
+        area.window.vertical_scroll = self._clamp_scroll(area, previous_scroll)
+        area.window.vertical_scroll_2 = previous_scroll_2
+        area.buffer.cursor_position = previous_cursor
 
     def _refresh(self) -> None:
         text = self._trace_text()
-        self.trace.text = text
-        if self.auto_scroll:
-            self._scroll_trace_to_bottom(text)
+        self._sync_text_area_text(self.trace, text, self.auto_scroll)
         work_text = self._work_text()
-        if self.work.text != work_text:
-            self.work.text = work_text
-            if self.work_auto_scroll:
-                self.work.buffer.cursor_position = len(work_text)
+        self._sync_text_area_text(self.work, work_text, self.work_auto_scroll)
         try:
             self.app.invalidate()
         except Exception:
@@ -956,17 +998,9 @@ class DashboardUI:
 
     def _scroll_text_area(self, area: TextArea, lines: int) -> bool:
         area.buffer.exit_selection()
-        logical_lines = area.text.splitlines() or [""]
-        max_scroll = max(0, len(logical_lines) - 1)
         current = int(getattr(area.window, "vertical_scroll", 0) or 0)
-        target = max(0, min(max_scroll, current + lines))
-        area.window.vertical_scroll = target
-        area.window.vertical_scroll_2 = 0
-        area.buffer.cursor_position = self._line_start_offset(area.text, target)
-        try:
-            self.app.invalidate()
-        except Exception:
-            pass
+        target = self._set_scroll_position(area, current + lines)
+        max_scroll = self._max_scroll_for_area(area)
         return target >= max_scroll
 
     def _line_start_offset(self, text: str, line_index: int) -> int:
@@ -979,37 +1013,231 @@ class DashboardUI:
             offset += len(line)
         return min(offset, len(text))
 
-    def _begin_drag_scroll(self, target: str, y: int) -> None:
-        self.drag_target = target
-        self.drag_last_y = y
+    def _visible_line_count(self, area: TextArea) -> int:
+        render_info = area.window.render_info
+        if render_info is None:
+            return 1
+        displayed = getattr(render_info, "displayed_lines", None)
+        if displayed:
+            return max(1, len(displayed))
+        height = int(getattr(render_info, "window_height", 0) or 0)
+        return max(1, height)
+
+    def _content_line_count(self, area: TextArea) -> int:
+        render_info = area.window.render_info
+        content_height = int(getattr(render_info, "content_height", 0) or 0) if render_info is not None else 0
+        if content_height > 0:
+            return content_height
+        return max(1, len(area.text.splitlines()) or 1)
+
+    def _max_scroll_for_area(self, area: TextArea) -> int:
+        return max(0, self._content_line_count(area) - self._visible_line_count(area))
+
+    def _clamp_scroll(self, area: TextArea, value: int) -> int:
+        return max(0, min(self._max_scroll_for_area(area), int(value)))
+
+    def _set_scroll_position(self, area: TextArea, value: int) -> int:
+        target = self._clamp_scroll(area, value)
+        area.window.vertical_scroll = target
+        area.window.vertical_scroll_2 = 0
+        area.buffer.cursor_position = self._line_start_offset(area.text, target)
+        try:
+            self.app.invalidate()
+        except Exception:
+            pass
+        return target
+
+    def _scroll_area_for_target(self, target: str) -> TextArea:
+        return self.trace if target == "trace" else self.work
+
+    def _focus_scroll_target(self, target: str) -> None:
+        area = self._scroll_area_for_target(target)
         self.auto_scroll = False if target == "trace" else self.auto_scroll
         self.work_auto_scroll = False if target == "work" else self.work_auto_scroll
-        self.app.layout.focus(self.trace if target == "trace" else self.work)
+        self.app.layout.focus(area)
 
-    def _drag_scroll(self, target: str, y: int) -> bool:
+    def _install_scrollbar_margin_mouse_handler(self, area: TextArea, target: str) -> None:
+        window = area.window
+        if getattr(window, "_lilbot_scrollbar_margin_mouse", False):
+            return
+
+        original_write = window._write_to_screen_at_index
+
+        def write_with_scrollbar_margin_mouse(screen, mouse_handlers, write_position, parent_style, erase_bg):
+            original_write(screen, mouse_handlers, write_position, parent_style, erase_bg)
+            right_width = sum(window._get_margin_width(margin) for margin in window.right_margins)
+            if right_width <= 0 or write_position.width <= 0 or write_position.height <= 0:
+                return
+
+            x_min = write_position.xpos + max(0, write_position.width - right_width)
+            x_max = write_position.xpos + write_position.width
+            y_min = write_position.ypos
+            y_max = write_position.ypos + write_position.height
+
+            def margin_mouse_handler(mouse_event):
+                local_x = max(0, min(right_width - 1, mouse_event.position.x - x_min))
+                local_y = max(0, min(write_position.height - 1, mouse_event.position.y - y_min))
+                local_event = MouseEvent(
+                    position=Point(x=local_x, y=local_y),
+                    event_type=mouse_event.event_type,
+                    button=mouse_event.button,
+                    modifiers=mouse_event.modifiers,
+                )
+                return self._handle_scrollbar_mouse(target, local_event)
+
+            mouse_handlers.set_mouse_handler_for_range(
+                x_min=x_min,
+                x_max=x_max,
+                y_min=y_min,
+                y_max=y_max,
+                handler=margin_mouse_handler,
+            )
+
+        window._write_to_screen_at_index = write_with_scrollbar_margin_mouse
+        window._lilbot_scrollbar_margin_mouse = True
+
+    def _remember_scrollbar_height(self, target: str, height: int) -> None:
+        if not hasattr(self, "scrollbar_render_heights"):
+            self.scrollbar_render_heights = {}
+        self.scrollbar_render_heights[target] = max(1, int(height or 1))
+
+    def _scrollbar_height(self, target: str) -> int:
+        height = int(getattr(self, "scrollbar_render_heights", {}).get(target, 0) or 0)
+        if height > 0:
+            return height
+        area = self._scroll_area_for_target(target)
+        render_info = area.window.render_info
+        height = int(getattr(render_info, "window_height", 0) or 0) if render_info is not None else 0
+        return max(1, height)
+
+    def _scrollbar_geometry(self, target: str, height: int | None = None) -> dict[str, int]:
+        area = self._scroll_area_for_target(target)
+        height = max(1, int(height or self._scrollbar_height(target)))
+        track_top = 0
+        track_height = height
+        content_height = self._content_line_count(area)
+        visible_height = min(content_height, self._visible_line_count(area))
+        max_scroll = self._max_scroll_for_area(area)
+
+        if max_scroll <= 0:
+            thumb_height = track_height
+            thumb_top = track_top
+        else:
+            thumb_height = max(1, min(track_height, int(track_height * visible_height / max(1, content_height))))
+            thumb_travel = max(1, track_height - thumb_height)
+            current = self._clamp_scroll(area, int(getattr(area.window, "vertical_scroll", 0) or 0))
+            thumb_top = track_top + round((current / max_scroll) * thumb_travel)
+
+        return {
+            "height": height,
+            "track_top": track_top,
+            "track_height": track_height,
+            "thumb_top": thumb_top,
+            "thumb_height": thumb_height,
+            "max_scroll": max_scroll,
+        }
+
+    def _scrollbar_line_fragments(self, target: str, row: int, height: int | None = None):
+        geometry = self._scrollbar_geometry(target, height)
+        row = max(0, min(geometry["height"] - 1, int(row or 0)))
+        if geometry["max_scroll"] <= 0:
+            return [("class:scrollbar.background", "  ")]
+        if geometry["thumb_top"] <= row < geometry["thumb_top"] + geometry["thumb_height"]:
+            return [("class:scrollbar.thumb", "\u2588\u2588")]
+        return [("class:scrollbar.track", "\u2502\u2502")]
+
+    def _begin_scrollbar_drag(self, target: str, y: int) -> None:
+        self.drag_target = target
+        self.drag_last_y = y
+        self._focus_scroll_target(target)
+
+    def _drag_scrollbar(self, target: str, y: int) -> bool:
         if self.drag_target != target:
             return False
-        delta = y - self.drag_last_y
-        if delta:
-            if target == "trace":
-                self._scroll_trace(delta)
-            else:
-                self._scroll_work(delta)
+        if y != self.drag_last_y:
+            self._jump_scrollbar_to_row(target, y)
             self.drag_last_y = y
         return True
 
-    def _end_drag_scroll(self, target: str) -> bool:
+    def _end_scrollbar_drag(self, target: str) -> bool:
         if self.drag_target != target:
             return False
         self.drag_target = None
+        self.drag_last_y = 0
         return True
 
-    def _is_scrollbar_zone(self, area: TextArea, x: int) -> bool:
+    def _jump_scrollbar_to_row(self, target: str, y: int) -> int:
+        area = self._scroll_area_for_target(target)
+        geometry = self._scrollbar_geometry(target)
+        max_scroll = geometry["max_scroll"]
+        if max_scroll <= 0:
+            target_scroll = self._set_scroll_position(area, 0)
+            if target == "trace":
+                self.auto_scroll = True
+            else:
+                self.work_auto_scroll = True
+            return target_scroll
+
+        track_top = geometry["track_top"]
+        max_row = max(0, geometry["track_height"] - 1)
+        relative_row = max(0, min(max_row, int(y or 0) - track_top))
+        if max_row <= 0:
+            next_scroll = 0
+        else:
+            next_scroll = (relative_row * max_scroll + max_row // 2) // max_row
+        target_scroll = self._set_scroll_position(area, next_scroll)
+        at_bottom = target_scroll >= max_scroll
+        if target == "trace":
+            self.auto_scroll = at_bottom
+        else:
+            self.work_auto_scroll = at_bottom
+        return target_scroll
+
+    def _visible_scrollbar_y_from_area_event(self, target: str, mouse_event) -> int:
+        area = self._scroll_area_for_target(target)
+        raw_y = int(getattr(getattr(mouse_event, "position", None), "y", 0) or 0)
+        height = self._scrollbar_height(target)
+        visible_y = None
         render_info = area.window.render_info
-        width = getattr(render_info, "window_width", 0) if render_info is not None else 0
-        if width <= 0:
-            return False
-        return x >= max(0, width - 2)
+        if render_info is not None:
+            mapping = getattr(render_info, "input_line_to_visible_line", None)
+            try:
+                visible_y = mapping.get(raw_y) if mapping is not None else None
+            except Exception:
+                visible_y = None
+            if visible_y is None:
+                displayed = getattr(render_info, "displayed_lines", None)
+                try:
+                    displayed_list = list(displayed or [])
+                    if raw_y in displayed_list:
+                        visible_y = displayed_list.index(raw_y)
+                except Exception:
+                    visible_y = None
+        if visible_y is None:
+            if 0 <= raw_y < height:
+                visible_y = raw_y
+            else:
+                current = int(getattr(area.window, "vertical_scroll", 0) or 0)
+                visible_y = raw_y - current
+        return max(0, min(height - 1, int(visible_y or 0)))
+
+    def _handle_scrollbar_mouse(self, target: str, mouse_event) -> object:
+        if mouse_event.event_type == MouseEventType.SCROLL_UP:
+            self._scroll_trace(-3) if target == "trace" else self._scroll_work(-2)
+            return None
+        if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
+            self._scroll_trace(3) if target == "trace" else self._scroll_work(2)
+            return None
+
+        y = int(getattr(mouse_event.position, "y", 0) or 0)
+        if mouse_event.button == MouseButton.LEFT and mouse_event.event_type == MouseEventType.MOUSE_DOWN:
+            self._begin_scrollbar_drag(target, y)
+            return None
+        if mouse_event.event_type == MouseEventType.MOUSE_MOVE and self._drag_scrollbar(target, y):
+            return None
+        if mouse_event.event_type == MouseEventType.MOUSE_UP and self._end_scrollbar_drag(target):
+            return None
+        return None
 
     def _copy_trace(self, selection_first: bool = True) -> None:
         text = self._selected_trace_text() if selection_first else ""
@@ -1053,16 +1281,11 @@ class DashboardUI:
             if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
                 self._scroll_trace(3)
                 return None
-            if (
-                mouse_event.button == MouseButton.LEFT
-                and mouse_event.event_type == MouseEventType.MOUSE_DOWN
-                and self._is_scrollbar_zone(self.trace, mouse_event.position.x)
-            ):
-                self._begin_drag_scroll("trace", mouse_event.position.y)
+            if mouse_event.event_type == MouseEventType.MOUSE_MOVE and self.drag_target == "trace":
+                y = self._visible_scrollbar_y_from_area_event("trace", mouse_event)
+                self._drag_scrollbar("trace", y)
                 return None
-            if mouse_event.event_type == MouseEventType.MOUSE_MOVE and self._drag_scroll("trace", mouse_event.position.y):
-                return None
-            if mouse_event.event_type == MouseEventType.MOUSE_UP and self._end_drag_scroll("trace"):
+            if mouse_event.event_type == MouseEventType.MOUSE_UP and self._end_scrollbar_drag("trace"):
                 return None
             if mouse_event.event_type == MouseEventType.MOUSE_UP:
                 self.auto_scroll = False
@@ -1078,16 +1301,11 @@ class DashboardUI:
             if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
                 self._scroll_work(2)
                 return None
-            if (
-                mouse_event.button == MouseButton.LEFT
-                and mouse_event.event_type == MouseEventType.MOUSE_DOWN
-                and self._is_scrollbar_zone(self.work, mouse_event.position.x)
-            ):
-                self._begin_drag_scroll("work", mouse_event.position.y)
+            if mouse_event.event_type == MouseEventType.MOUSE_MOVE and self.drag_target == "work":
+                y = self._visible_scrollbar_y_from_area_event("work", mouse_event)
+                self._drag_scrollbar("work", y)
                 return None
-            if mouse_event.event_type == MouseEventType.MOUSE_MOVE and self._drag_scroll("work", mouse_event.position.y):
-                return None
-            if mouse_event.event_type == MouseEventType.MOUSE_UP and self._end_drag_scroll("work"):
+            if mouse_event.event_type == MouseEventType.MOUSE_UP and self._end_scrollbar_drag("work"):
                 return None
             if mouse_event.event_type == MouseEventType.MOUSE_UP:
                 self.work_auto_scroll = False

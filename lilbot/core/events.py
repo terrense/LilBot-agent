@@ -18,6 +18,7 @@ class ProviderTurn:
     content: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     usage: dict[str, int] = field(default_factory=dict)
+    reasoning_content: str = ""
 
 
 @dataclass

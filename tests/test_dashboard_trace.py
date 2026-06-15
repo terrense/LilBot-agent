@@ -3,6 +3,9 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
+from prompt_toolkit.mouse_events import MouseButton, MouseEventType
+from prompt_toolkit.widgets import TextArea
+
 from lilbot.tui.dashboard import (
     LILBOT_AGENT_LOGO_COMPACT_ROWS,
     LILBOT_AGENT_LOGO_ROWS,
@@ -121,6 +124,131 @@ class DashboardTraceTests(unittest.TestCase):
         self.assertEqual(ui.command_popup_title, "Models")
         self.assertTrue(any("deepseek-v4-flash" in line for line in ui.command_popup_lines))
         self.assertFalse(ui.command_popup_error)
+
+    def test_refresh_preserves_trace_scroll_for_permission_popup(self):
+        ui = object.__new__(DashboardUI)
+        ui.lines = ["one", "two", "three", "four"]
+        ui.work_items = ["No active work."]
+        ui.trace = TextArea(text=ui._trace_text(), read_only=True)
+        ui.work = TextArea(text=ui._work_text(), read_only=True)
+        ui.auto_scroll = False
+        ui.work_auto_scroll = False
+        ui.app = SimpleNamespace(invalidate=lambda: None)
+
+        ui.trace.window.vertical_scroll = 2
+        ui.trace.buffer.cursor_position = ui._line_start_offset(ui.trace.text, 2)
+        expected_cursor = ui.trace.buffer.cursor_position
+
+        ui.pending_permission = "run shell command: pytest"
+        ui._refresh()
+
+        self.assertEqual(ui.trace.window.vertical_scroll, 2)
+        self.assertEqual(ui.trace.buffer.cursor_position, expected_cursor)
+
+        ui.lines.append("five")
+        ui._refresh()
+
+        self.assertEqual(ui.trace.window.vertical_scroll, 2)
+        self.assertEqual(ui.trace.buffer.cursor_position, expected_cursor)
+
+    def test_custom_scrollbar_uses_wide_track_and_thumb_glyphs(self):
+        ui = object.__new__(DashboardUI)
+        ui.trace = TextArea(text="\n".join(f"line {idx}" for idx in range(30)), read_only=True)
+        ui.work = TextArea(text="work", read_only=True)
+        ui.scrollbar_render_heights = {"trace": 8, "work": 1}
+        ui.trace.window.render_info = SimpleNamespace(
+            window_height=8,
+            content_height=30,
+            displayed_lines=list(range(8)),
+        )
+        ui.trace.window.vertical_scroll = 10
+
+        lines = [ui._scrollbar_line_fragments("trace", row, height=8)[0] for row in range(8)]
+        plain = "".join(text for _style, text in lines)
+        styles = [style for style, _text in lines]
+
+        self.assertTrue(all(len(text) == 2 for _style, text in lines))
+        self.assertIn("\u2502\u2502", plain)
+        self.assertIn("\u2588\u2588", plain)
+        self.assertIn("class:scrollbar.track", styles)
+        self.assertIn("class:scrollbar.thumb", styles)
+
+    def test_trace_drag_converts_buffer_line_to_visible_scrollbar_row(self):
+        ui = object.__new__(DashboardUI)
+        ui.trace = TextArea(text="\n".join(f"line {idx}" for idx in range(100)), read_only=True)
+        ui.work = TextArea(text="work", read_only=True)
+        ui.scrollbar_render_heights = {"trace": 10, "work": 1}
+        ui.trace.window.vertical_scroll = 50
+        ui.trace.window.render_info = SimpleNamespace(
+            window_height=10,
+            content_height=100,
+            displayed_lines=list(range(50, 60)),
+            input_line_to_visible_line={line: line - 50 for line in range(50, 60)},
+        )
+
+        event = SimpleNamespace(position=SimpleNamespace(y=55))
+
+        self.assertEqual(ui._visible_scrollbar_y_from_area_event("trace", event), 5)
+
+    def test_scrollbar_drag_updates_trace_scroll(self):
+        ui = object.__new__(DashboardUI)
+        ui.trace = TextArea(text="\n".join(f"line {idx}" for idx in range(100)), read_only=True)
+        ui.work = TextArea(text="work", read_only=True)
+        ui.auto_scroll = True
+        ui.work_auto_scroll = True
+        ui.drag_target = None
+        ui.drag_last_y = 0
+        ui.scrollbar_render_heights = {"trace": 10, "work": 1}
+        ui.app = SimpleNamespace(
+            layout=SimpleNamespace(focus=lambda _area: None),
+            invalidate=lambda: None,
+        )
+        ui.trace.window.render_info = SimpleNamespace(
+            window_height=10,
+            content_height=100,
+            displayed_lines=list(range(10)),
+        )
+
+        ui._begin_scrollbar_drag("trace", 5)
+        ui._drag_scrollbar("trace", 8)
+        ui._end_scrollbar_drag("trace")
+
+        self.assertGreater(ui.trace.window.vertical_scroll, 0)
+        self.assertFalse(ui.auto_scroll)
+
+    def test_scrollbar_mouseup_only_releases_drag_without_jump(self):
+        ui = object.__new__(DashboardUI)
+        ui.trace = TextArea(text="\n".join(f"line {idx}" for idx in range(100)), read_only=True)
+        ui.work = TextArea(text="work", read_only=True)
+        ui.auto_scroll = True
+        ui.work_auto_scroll = True
+        ui.drag_target = None
+        ui.drag_last_y = 0
+        ui.scrollbar_render_heights = {"trace": 10, "work": 1}
+        ui.app = SimpleNamespace(
+            layout=SimpleNamespace(focus=lambda _area: None),
+            invalidate=lambda: None,
+        )
+        ui.trace.window.render_info = SimpleNamespace(
+            window_height=10,
+            content_height=100,
+            displayed_lines=list(range(10)),
+        )
+
+        ui._begin_scrollbar_drag("trace", 5)
+        ui._drag_scrollbar("trace", 3)
+        before = ui.trace.window.vertical_scroll
+        ui._handle_scrollbar_mouse(
+            "trace",
+            SimpleNamespace(
+                event_type=MouseEventType.MOUSE_UP,
+                button=MouseButton.LEFT,
+                position=SimpleNamespace(y=9),
+            ),
+        )
+
+        self.assertEqual(ui.trace.window.vertical_scroll, before)
+        self.assertIsNone(ui.drag_target)
 
 
 if __name__ == "__main__":

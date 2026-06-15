@@ -10,6 +10,41 @@ has a broad agent surface, but the core pattern is simple:
 3. Subagents run as managed tasks with status, result retrieval, and cancellation.
 4. The TUI renders only useful milestones, while noisy tool output is summarized.
 
+## Subagent Roles Found
+
+CodeWhale exposes persistent child sessions through `agent_open`,
+`agent_eval`, and `agent_close`. The role taxonomy found in docs and source is:
+
+- `general`: default worker for multi-step tasks.
+- `explore`: read-only explorer for mapping code quickly.
+- `plan`: strategy and decomposition, minimal writes.
+- `review`: read-only bug/risk review.
+- `implementer`: scoped code changes with quick verification.
+- `verifier`: run validation and report pass/fail evidence.
+- `tool_agent`: source-only fast execution lane, also aliased as `fin`,
+  `executor`, and `tool-agent`.
+- `custom`: explicit tool allowlist supplied by the caller.
+
+Legacy aliases still exist in source for older sessions (`agent_spawn`,
+`agent_result`, `agent_cancel`, `agent_list`, `resume_agent`,
+`delegate_to_agent`), but the active surface is the three-tool API above.
+
+## Built-In Skills Found
+
+CodeWhale bundles 11 skills under `crates/tui/assets/skills/*/SKILL.md`:
+
+- `delegate`
+- `documents`
+- `feishu`
+- `mcp-builder`
+- `pdf`
+- `plugin-creator`
+- `presentations`
+- `skill-creator`
+- `skill-installer`
+- `spreadsheets`
+- `v4-best-practices`
+
 ## Tool Families Found
 
 Workspace and code:
@@ -57,6 +92,14 @@ Next high-value targets:
 - `git` and `github`: status, diff, commit, PR/issue helpers
 - `web_run`: richer browse workflow after `web_search`/`fetch_url`
 - `parallel`: safe parallel tool execution for read-only work
+
+Current parity target for LilBot:
+- Use exact CodeWhale-style names where OpenAI-compatible function naming
+  allows them.
+- Keep old LilBot names as compatibility aliases (`bash`, `grep`, `glob`,
+  `agent_spawn`, `agent_status`).
+- Implement advanced external tools with honest local probes and structured
+  fallback results when a dependency is not installed.
 
 ## Design Notes To Preserve
 

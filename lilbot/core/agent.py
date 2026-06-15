@@ -5,7 +5,8 @@ from collections.abc import Iterator
 from typing import Any
 
 from ..config import LilBotConfig
-from .events import ProviderTurn, TextDelta, ToolFinished, ToolStarted, TurnFinished
+from .delegation import plan_auto_delegation
+from .events import ProviderTurn, TextDelta, ToolCall, ToolFinished, ToolStarted, TurnFinished
 from .prompts import build_system_prompt
 from ..llm.providers import BaseProvider
 from ..tools import ToolContext, ToolRegistry
@@ -31,20 +32,22 @@ class Agent:
     def run_turn(self, user_text: str) -> Iterator[object]:
         self.messages.append({"role": "user", "content": user_text})
         self._maybe_compact()
-        steps = 0
+        steps = yield from self._auto_delegate(user_text)
         while steps < self.config.max_steps:
             turn = self.provider.complete(self.messages, self.registry.schemas())
             self._add_usage(turn)
             if turn.content:
                 yield TextDelta(turn.content, interim=bool(turn.tool_calls))
             if not turn.tool_calls:
-                self.messages.append({"role": "assistant", "content": turn.content})
+                self.messages.append(self._assistant_content_message(turn.content, turn.reasoning_content))
                 yield TurnFinished(steps, dict(self.usage))
                 return
 
             remaining_steps = self.config.max_steps - steps
             calls_to_run = turn.tool_calls[:remaining_steps]
-            self.messages.append(self._assistant_tool_message(ProviderTurn(turn.content, calls_to_run)))
+            self.messages.append(self._assistant_tool_message(
+                ProviderTurn(turn.content, calls_to_run, turn.usage, turn.reasoning_content)
+            ))
             for call in calls_to_run:
                 steps += 1
                 yield ToolStarted(call.name, call.arguments)
@@ -60,15 +63,64 @@ class Agent:
                     break
 
         final = self._synthesize_after_step_limit()
-        self.messages.append({"role": "assistant", "content": final})
-        yield TextDelta(final)
+        self.messages.append(self._assistant_content_message(final.content, final.reasoning_content))
+        yield TextDelta(final.content)
         yield TurnFinished(steps, dict(self.usage))
+
+    def _auto_delegate(self, user_text: str) -> Iterator[object]:
+        max_agents = max(0, min(3, (self.config.max_steps - 1) // 2))
+        plan = plan_auto_delegation(user_text, max_agents=max_agents)
+        if not plan or not self.registry.get("agent_open") or not self.registry.get("agent_eval"):
+            return 0
+
+        opened: list[tuple[str, int]] = []
+        steps = 0
+        yield TextDelta(f"Auto-delegating: {plan.reason}.", interim=True)
+        for probe in plan.probes:
+            result = yield from self._run_scheduled_tool(
+                "agent_open",
+                {
+                    "type": probe.agent_type,
+                    "name": probe.name,
+                    "prompt": probe.prompt,
+                    "background": True,
+                },
+            )
+            steps += 1
+            if result.ok:
+                opened.append((probe.name, probe.timeout_ms))
+
+        for name, timeout_ms in opened:
+            result = yield from self._run_scheduled_tool(
+                "agent_eval",
+                {
+                    "name": name,
+                    "block": True,
+                    "timeout_ms": timeout_ms,
+                },
+            )
+            steps += 1
+            if not result.ok:
+                break
+        return steps
+
+    def _run_scheduled_tool(self, name: str, arguments: dict[str, Any]) -> Iterator[object]:
+        call = ToolCall(name, arguments)
+        yield ToolStarted(call.name, call.arguments)
+        result, elapsed_ms = self.registry.execute(call.name, call.arguments, self.ctx)
+        yield ToolFinished(call.name, result.ok, result.output, elapsed_ms, result.metadata)
+        if name == "agent_eval":
+            self.messages.append(self._internal_observation_message(name, arguments, result.output))
+        return result
 
     def compact(self) -> str:
         if len(self.messages) <= 8:
             return "Nothing to compact yet."
-        keep = self.messages[-8:]
-        older = self.messages[1:-8]
+        tail_start = self._compaction_tail_start(8)
+        if tail_start <= 1:
+            return "Nothing to compact safely yet."
+        keep = self.messages[tail_start:]
+        older = self.messages[1:tail_start]
         summary_lines = []
         for message in older[-12:]:
             role = message.get("role", "?")
@@ -79,6 +131,13 @@ class Agent:
         self.messages = [self.messages[0], {"role": "system", "content": summary}, *keep]
         return f"Compacted context. Messages now: {len(self.messages)}"
 
+    def _compaction_tail_start(self, target_tail: int) -> int:
+        start = max(1, len(self.messages) - target_tail)
+        # Tool messages are only valid immediately after their assistant tool_calls message.
+        while start > 1 and self.messages[start].get("role") == "tool":
+            start -= 1
+        return start
+
     def _maybe_compact(self) -> None:
         if len(self.messages) > self.config.compact_after_messages:
             self.compact()
@@ -88,7 +147,7 @@ class Agent:
             if isinstance(value, int):
                 self.usage[key] = self.usage.get(key, 0) + value
 
-    def _synthesize_after_step_limit(self) -> str:
+    def _synthesize_after_step_limit(self) -> ProviderTurn:
         prompt = (
             f"Tool step budget reached after {self.config.max_steps} executed tool step(s). "
             "Do not call any more tools. Use only the conversation and existing tool results above "
@@ -99,10 +158,11 @@ class Agent:
             turn = self.provider.complete([*self.messages, {"role": "user", "content": prompt}], [])
             self._add_usage(turn)
             if turn.content.strip():
-                return turn.content.strip()
+                turn.content = turn.content.strip()
+                return turn
         except Exception as exc:  # pragma: no cover - final safety net
-            return self._fallback_step_limit_answer(str(exc))
-        return self._fallback_step_limit_answer()
+            return ProviderTurn(content=self._fallback_step_limit_answer(str(exc)))
+        return ProviderTurn(content=self._fallback_step_limit_answer())
 
     def _fallback_step_limit_answer(self, error: str = "") -> str:
         snippets = []
@@ -120,8 +180,25 @@ class Agent:
             f"provide from the information already gathered:\n\n{body}{suffix}"
         )
 
+    def _assistant_content_message(self, content: str, reasoning_content: str = "") -> dict[str, Any]:
+        message = {"role": "assistant", "content": content}
+        if reasoning_content:
+            message["reasoning_content"] = reasoning_content
+        return message
+
+    def _internal_observation_message(self, name: str, arguments: dict[str, Any], output: str) -> dict[str, str]:
+        args = json.dumps(arguments, ensure_ascii=False, default=str)
+        content = (
+            "Internal LilBot orchestration result for the previous user request. "
+            "Do not treat this as a new user request; use it only as evidence.\n"
+            f"Tool: {name}\n"
+            f"Arguments: {args}\n"
+            f"Result:\n{output[:12000]}"
+        )
+        return {"role": "user", "content": content}
+
     def _assistant_tool_message(self, turn: ProviderTurn) -> dict[str, Any]:
-        return {
+        message = {
             "role": "assistant",
             "content": turn.content or "",
             "tool_calls": [
@@ -136,3 +213,6 @@ class Agent:
                 for call in turn.tool_calls
             ],
         }
+        if turn.reasoning_content:
+            message["reasoning_content"] = turn.reasoning_content
+        return message

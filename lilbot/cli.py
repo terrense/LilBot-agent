@@ -114,11 +114,12 @@ def build_runtime(cfg: LilBotConfig, ui: LilBotUI, interactive: bool = True) -> 
     memory = MemoryStore(cfg.state_dir)
     skills = SkillRegistry(cfg.state_dir)
     provider = choose_provider(cfg)
-    subagents = SubAgentManager(lambda messages, tools: provider.complete(messages, tools))
+    subagents = SubAgentManager(lambda messages, tools: provider.complete(messages, tools), cfg.state_dir / "agents")
     mcp = MCPManager(cfg.state_dir, cfg.workspace)
     registry = ToolRegistry()
     register_builtins(registry)
     ctx = ToolContext(sandbox, permissions, memory, skills, subagents, mcp, cfg)
+    subagents.configure_tools(registry, ctx)
     return Agent(cfg, provider, registry, ctx), registry, ctx
 
 
