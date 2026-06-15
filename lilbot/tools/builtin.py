@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from ..subagents import SubAgentGateError
 from .registry import ToolContext, ToolDef, ToolRegistry, ToolResult
 
 
@@ -632,6 +633,106 @@ def _git_blame(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     return ToolResult(result.ok, result.output, {"path": rel, "start": start, "end": end, "rows": rows, "returncode": result.returncode})
 
 
+def _git_worktree_support(ctx: ToolContext) -> tuple[bool, dict[str, Any]]:
+    if not shutil.which("git"):
+        return False, {"supported": False, "status": "unsupported", "reason": "git is not installed or not on PATH"}
+    root = ctx.sandbox.run("git rev-parse --show-toplevel", 10)
+    if not root.ok:
+        return False, {
+            "supported": False,
+            "status": "unsupported",
+            "reason": "workspace is not a git repository",
+            "returncode": root.returncode,
+            "output": root.output,
+        }
+    worktree = ctx.sandbox.run("git worktree list --porcelain", 10)
+    if not worktree.ok:
+        return False, {
+            "supported": False,
+            "status": "unsupported",
+            "reason": "git worktree is unavailable or failed",
+            "returncode": worktree.returncode,
+            "output": worktree.output,
+        }
+    return True, {
+        "supported": True,
+        "status": "supported",
+        "git_root": root.output.splitlines()[0] if root.output else "",
+        "worktrees": worktree.output,
+    }
+
+
+def _enter_worktree(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    supported, support = _git_worktree_support(ctx)
+    if not supported:
+        return ToolResult(False, _json(support), support)
+    name = str(args.get("name") or f"worktree_{uuid4().hex[:8]}")
+    rel_path = str(args.get("path") or f".lilbot/worktrees/{name}")
+    branch = str(args.get("branch") or args.get("ref") or "").strip()
+    try:
+        target = ctx.sandbox.resolve(rel_path)
+    except Exception as exc:
+        data = {"supported": True, "status": "error", "reason": str(exc), "path": rel_path}
+        return ToolResult(False, _json(data), data)
+    create = _optional_bool(args.get("create"))
+    should_create = (create is not False) and not target.exists()
+    if should_create:
+        command = f"git worktree add {_quote_ps(str(target))}"
+        if branch:
+            command += " " + _quote_ps(branch)
+        if not _permission(ctx, f"worktree:add:{target}", f"create git worktree at {target}"):
+            return ToolResult(False, "Permission denied.")
+        result = ctx.sandbox.run(command, int(args.get("timeout", 120)))
+        if not result.ok:
+            data = {
+                "supported": True,
+                "status": "error",
+                "reason": "git worktree add failed",
+                "command": command,
+                "returncode": result.returncode,
+                "output": result.output,
+            }
+            return ToolResult(False, _json(data), data)
+    if not target.exists() or not target.is_dir():
+        data = {"supported": True, "status": "error", "reason": "worktree path does not exist", "path": str(target)}
+        return ToolResult(False, _json(data), data)
+    previous_root = ctx.sandbox.root
+    ctx.sandbox.root = target.resolve()
+    data = {
+        "supported": True,
+        "status": "active",
+        "name": name,
+        "path": str(ctx.sandbox.root),
+        "previous_root": str(previous_root),
+        "created": should_create,
+        "branch": branch or None,
+        "entered_at": time.time(),
+    }
+    _save_state(ctx, "worktree.json", data)
+    return ToolResult(True, _json(data), data)
+
+
+def _exit_worktree(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    data = _load_state(ctx, "worktree.json", {})
+    if not isinstance(data, dict) or data.get("status") != "active":
+        return ToolResult(False, "No active worktree.", {"status": "inactive"})
+    previous_root = Path(str(data.get("previous_root") or ""))
+    if not previous_root.exists():
+        data.update({"status": "error", "reason": "previous root no longer exists", "updated_at": time.time()})
+        _save_state(ctx, "worktree.json", data)
+        return ToolResult(False, _json(data), data)
+    ctx.sandbox.root = previous_root.resolve()
+    data.update({
+        "status": "exited",
+        "path": str(data.get("path") or ""),
+        "restored_root": str(ctx.sandbox.root),
+        "exited_at": time.time(),
+        "updated_at": time.time(),
+    })
+    _save_state(ctx, "worktree.json", data)
+    return ToolResult(True, _json(data), data)
+
+
 def _github_issue_context(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     issue = str(args.get("issue") or args.get("number") or args.get("url") or "")
     if not issue:
@@ -993,6 +1094,64 @@ def _update_plan(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     return ToolResult(True, _json(data), {"path": str(path)})
 
 
+def _enter_plan_mode(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    data = {
+        "active": True,
+        "approval_state": "planning",
+        "approved": False,
+        "reason": str(args.get("reason") or args.get("description") or ""),
+        "plan": args.get("plan"),
+        "entered_at": time.time(),
+        "updated_at": time.time(),
+    }
+    path = _save_state(ctx, "plan_mode.json", data)
+    data["path"] = str(path)
+    return ToolResult(True, _json(data), data)
+
+
+def _exit_plan_mode(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    current = _load_state(ctx, "plan_mode.json", {})
+    approved = _optional_bool(args.get("approved"))
+    requested_state = str(args.get("approval_state") or args.get("state") or "").strip().lower()
+    if requested_state in {"approved", "approve"}:
+        approval_state = "approved"
+    elif requested_state in {"rejected", "reject", "denied", "deny"}:
+        approval_state = "rejected"
+    elif approved is True:
+        approval_state = "approved"
+    elif approved is False:
+        approval_state = "rejected"
+    else:
+        approval_state = "pending_approval"
+    data = dict(current) if isinstance(current, dict) else {}
+    data.update({
+        "active": False,
+        "approval_state": approval_state,
+        "approved": approval_state == "approved",
+        "requires_approval": approval_state == "pending_approval",
+        "plan": args.get("plan", data.get("plan")),
+        "summary": str(args.get("summary") or args.get("message") or ""),
+        "exited_at": time.time(),
+        "updated_at": time.time(),
+    })
+    path = _save_state(ctx, "plan_mode.json", data)
+    data["path"] = str(path)
+    return ToolResult(True, _json(data), data)
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    lowered = str(value).strip().lower()
+    if lowered in {"1", "true", "yes", "y", "approved", "approve"}:
+        return True
+    if lowered in {"0", "false", "no", "n", "rejected", "reject", "denied", "deny"}:
+        return False
+    return None
+
+
 def _checklist_state(ctx: ToolContext) -> list[dict[str, Any]]:
     return _load_state(ctx, "checklist.json", [])
 
@@ -1308,9 +1467,44 @@ def _skill_list(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
 
 def _skill_run(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     name = str(args.get("name") or args.get("skill") or "")
-    rendered = ctx.skills.render(name, args.get("args", ""))
     skill = ctx.skills.get(name)
-    return ToolResult(True, rendered, {"name": skill.name if skill else name})
+    if not skill:
+        known = ", ".join(s.name for s in ctx.skills.list()) or "none"
+        return ToolResult(False, f"Unknown skill '{name}'. Known skills: {known}")
+    if skill.disable_model_invocation:
+        return ToolResult(False, f"skill '{skill.name}' cannot be invoked by the model")
+    rendered = skill.render(args.get("args", ""))
+    metadata = {
+        "name": skill.name,
+        "mode": skill.mode,
+        "allowed_tools": skill.allowed_tools or [],
+        "agent": skill.agent,
+    }
+    if skill.mode.lower() != "fork":
+        return ToolResult(True, rendered, metadata)
+    if ctx.subagents is None:
+        return ToolResult(False, "Forked skill execution requires subagent support.", metadata)
+    try:
+        task = ctx.subagents.open(
+            agent_type=skill.agent or "custom",
+            prompt=rendered,
+            name=f"skill_{skill.name}_{uuid4().hex[:8]}",
+            background=bool(args.get("background", False)),
+            allowed_tools=skill.allowed_tools or [],
+            model=skill.model,
+            fork_context=True,
+        )
+    except SubAgentGateError as exc:
+        data = exc.to_dict()
+        metadata.update({"gate": "subagent_creation", "gates": exc.failures})
+        return ToolResult(False, _json(data), metadata)
+    projection = ctx.subagents.projection(task)
+    metadata.update({
+        "agent_id": task.id,
+        "status": task.status,
+        "transcript_handle": task.transcript_handle or None,
+    })
+    return ToolResult(task.status not in {"failed", "error"}, _json(projection), metadata)
 
 
 def _load_skill(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -1351,12 +1545,15 @@ def _load_skill(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
 
 
 def _agent_spawn(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-    task = ctx.subagents.open(
-        agent_type=args.get("agent_type", "planner"),
-        prompt=args["prompt"],
-        background=bool(args.get("background", False)),
-        allowed_tools=_tool_list_arg(args),
-    )
+    try:
+        task = ctx.subagents.open(
+            agent_type=args.get("agent_type", "planner"),
+            prompt=args["prompt"],
+            background=bool(args.get("background", False)),
+            allowed_tools=_tool_list_arg(args),
+        )
+    except SubAgentGateError as exc:
+        return ToolResult(False, _json(exc.to_dict()), {"gate": "subagent_creation", "gates": exc.failures})
     if task.status in {"completed", "done"}:
         return ToolResult(True, f"{task.id} done:\n{task.result}", {"task_id": task.id})
     return ToolResult(True, f"{task.id} {task.status}", {"task_id": task.id})
@@ -1380,15 +1577,18 @@ def _agent_open(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     prompt = str(args.get("prompt") or args.get("message") or args.get("objective") or "")
     if not prompt:
         return ToolResult(False, "Missing prompt.")
-    task = ctx.subagents.open(
-        args.get("type") or args.get("agent_type") or args.get("subagent_type") or args.get("role"),
-        prompt,
-        name=args.get("name") or args.get("session_name"),
-        background=bool(args.get("background", args.get("run_in_background", True))),
-        allowed_tools=_tool_list_arg(args),
-        model=args.get("model"),
-        fork_context=bool(args.get("fork_context", False)),
-    )
+    try:
+        task = ctx.subagents.open(
+            args.get("type") or args.get("agent_type") or args.get("subagent_type") or args.get("role"),
+            prompt,
+            name=args.get("name") or args.get("session_name"),
+            background=bool(args.get("background", args.get("run_in_background", True))),
+            allowed_tools=_tool_list_arg(args),
+            model=args.get("model"),
+            fork_context=bool(args.get("fork_context", False)),
+        )
+    except SubAgentGateError as exc:
+        return ToolResult(False, _json(exc.to_dict()), {"gate": "subagent_creation", "gates": exc.failures})
     projection = ctx.subagents.projection(task)
     return ToolResult(True, _json(projection), projection)
 
@@ -1885,10 +2085,12 @@ def register_builtins(registry: ToolRegistry) -> None:
     registry.register(ToolDef("skill_run", "Render a skill template.", _schema({
         "name": _string("Skill name."),
         "args": _string("Arguments injected into {{args}}."),
+        "background": _bool("For forked skills, run in background and return immediately.", False),
     }, ["name"]), _skill_run))
     registry.register(ToolDef("Skill", "Execute a skill within the main conversation, Claude Code style.", _schema({
         "skill": _string("Skill name."),
         "args": _string("Optional skill arguments."),
+        "background": _bool("For forked skills, run in background and return immediately.", False),
     }, ["skill"]), _skill_run))
     registry.register(ToolDef("agent_spawn", "Spawn a lightweight sub-agent.", _schema({
         "agent_type": _string("general, explore, researcher, plan, writer, critic, review, implementer, verifier, or tool_agent."),
@@ -1979,6 +2181,14 @@ def register_builtins(registry: ToolRegistry) -> None:
         "start": _integer("Start line.", 1),
         "end": _integer("End line.", 80),
     }, ["path"]), _git_blame))
+    registry.register(ToolDef("EnterWorktree", "Enter a git worktree or report an honest unsupported state.", _schema({
+        "name": _string("Worktree name used for default path."),
+        "path": _string("Existing or new worktree path inside the workspace sandbox."),
+        "branch": _string("Optional branch or ref for git worktree add."),
+        "create": _bool("Create the worktree when path does not exist.", True),
+        "timeout": _integer("Timeout in seconds.", 120),
+    }), _enter_worktree))
+    registry.register(ToolDef("ExitWorktree", "Exit the active worktree and restore the previous sandbox root.", _schema({}), _exit_worktree))
     registry.register(ToolDef("github_issue_context", "Read GitHub issue context through gh.", _schema({
         "issue": _string("Issue number or URL."),
         "number": _string("Issue number alias."),
@@ -2058,6 +2268,16 @@ def register_builtins(registry: ToolRegistry) -> None:
         "explanation": _string("Plan explanation."),
         "plan": _schema_array("Plan items with step/status."),
     }, ["plan"]), _update_plan))
+    registry.register(ToolDef("EnterPlanMode", "Enter planning mode and persist plan lifecycle state.", _schema({
+        "reason": _string("Why planning mode is being entered."),
+        "plan": _string("Optional initial plan text."),
+    }), _enter_plan_mode))
+    registry.register(ToolDef("ExitPlanMode", "Exit planning mode and persist approval state.", _schema({
+        "plan": _string("Plan text to present for approval."),
+        "summary": _string("Short summary of the plan."),
+        "approved": _bool("Whether the plan has been approved."),
+        "approval_state": _string("pending_approval, approved, or rejected."),
+    }), _exit_plan_mode))
     registry.register(ToolDef("checklist_write", "Replace the active checklist.", _schema({
         "items": _schema_array("Checklist items."),
     }, ["items"]), _checklist_write))

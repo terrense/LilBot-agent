@@ -34,6 +34,16 @@ DIAGNOSTIC_TOOLS = ["diagnostics", "run_tests", "task_gate_run"]
 WRITE_TOOLS = ["write_file", "edit_file", "apply_patch"]
 WEB_TOOLS = ["web_search", "fetch_url", "web_fetch", "web_run"]
 AGENT_TOOLS = ["agent_open", "agent_eval", "agent_close", "agent_spawn", "agent_status", "tool_agent", "Agent", "Task"]
+SUBAGENT_ALWAYS_DISALLOWED_TOOLS = [
+    *AGENT_TOOLS,
+    "EnterPlanMode",
+    "ExitPlanMode",
+    "request_user_input",
+    "TaskOutputTool",
+    "TaskStop",
+    "WorkflowTool",
+    "multi_tool_use.parallel",
+]
 WRITE_AND_EXECUTION_TOOLS = [
     *WRITE_TOOLS,
     "bash",
@@ -64,6 +74,50 @@ WRITE_AND_EXECUTION_TOOLS = [
     "github_close_pr",
 ]
 
+TOOL_COMPATIBILITY_GROUPS = {
+    "read": ["read_file", "handle_read", "retrieve_tool_result"],
+    "grep": ["grep", "grep_files"],
+    "glob": ["glob", "file_search"],
+    "write": ["write_file"],
+    "edit": ["edit_file"],
+    "multiedit": ["edit_file", "apply_patch"],
+    "bash": [
+        "bash",
+        "exec_shell",
+        "exec_shell_wait",
+        "exec_wait",
+        "exec_shell_interact",
+        "exec_interact",
+        "exec_shell_cancel",
+        "task_shell_start",
+        "task_shell_wait",
+    ],
+    "task": ["Agent", "Task", "agent_open", "agent_eval", "agent_close", "tool_agent"],
+    "websearch": ["web_search", "web_run"],
+    "webfetch": ["fetch_url", "web_fetch", "web_run"],
+    "todowrite": [
+        "todo_write",
+        "todo_add",
+        "todo_update",
+        "todo_list",
+        "checklist_write",
+        "checklist_add",
+        "checklist_update",
+        "checklist_list",
+        "update_plan",
+    ],
+}
+
+
+class SubAgentGateError(ValueError):
+    def __init__(self, failures: list[dict[str, Any]]):
+        self.failures = failures
+        first = failures[0] if failures else {"gate": "unknown", "message": "Subagent gate failed."}
+        super().__init__(str(first.get("message") or "Subagent gate failed."))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"error": str(self), "gates": self.failures}
+
 
 @dataclass
 class AgentDefinition:
@@ -90,9 +144,12 @@ class SubAgentTask:
     allowed_tools: list[str] = field(default_factory=list)
     model: str | None = None
     fork_context: bool = False
+    gate_results: list[dict[str, Any]] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     finished_at: float | None = None
     messages: list[str] = field(default_factory=list)
+    transcript_handle: str = ""
+    transcript_path: str = ""
 
     @property
     def terminal(self) -> bool:
@@ -280,9 +337,18 @@ ROLE_ALIASES = {
 
 
 class SubAgentManager:
-    def __init__(self, provider: ProviderCallable, agents_dir: Path | None = None):
+    def __init__(
+        self,
+        provider: ProviderCallable,
+        agents_dir: Path | None = None,
+        transcripts_dir: Path | None = None,
+    ):
         self.provider = provider
         self.agents_dir = agents_dir
+        self.state_dir = agents_dir.parent if agents_dir is not None else None
+        self.transcripts_dir = transcripts_dir or (
+            self.state_dir / "subagent-transcripts" if self.state_dir is not None else None
+        )
         self.registry: Any | None = None
         self.ctx: Any | None = None
         self.definitions = {d.name: d for d in DEFAULT_AGENT_TYPES}
@@ -367,18 +433,30 @@ class SubAgentManager:
     ) -> SubAgentTask:
         canonical = self.resolve_type(agent_type)
         definition = self.definitions[canonical]
+        effective_allowed_tools = _dedupe_tools(definition.allowed_tools if allowed_tools is None else allowed_tools)
+        creation_gates = self._validate_creation_gates(
+            canonical,
+            definition,
+            effective_allowed_tools,
+            explicit_allowed_tools=allowed_tools is not None or bool(definition.allowed_tools),
+        )
+        failures = [gate for gate in creation_gates if gate.get("status") == "failed" and int(gate.get("gate_number", 0)) <= 3]
+        if failures:
+            raise SubAgentGateError(failures)
         task_id = f"sub_{uuid4().hex[:10]}"
         task = SubAgentTask(
             id=task_id,
             name=name or task_id,
             agent_type=canonical,
             prompt=prompt,
-            allowed_tools=_dedupe_tools(allowed_tools or definition.allowed_tools),
+            allowed_tools=effective_allowed_tools,
             model=model,
             fork_context=fork_context,
+            gate_results=creation_gates,
         )
         with self._lock:
             self.tasks[task.id] = task
+        self._append_transcript(task, "queued", {"agent_type": canonical, "name": task.name, "prompt": prompt})
         if background:
             thread = threading.Thread(target=self._run, args=(task,), daemon=True)
             thread.start()
@@ -402,6 +480,7 @@ class SubAgentManager:
                 task.messages.append(message)
                 if task.status == "queued":
                     task.prompt = f"{task.prompt}\n\nFollow-up:\n{message}"
+            self._append_transcript(task, "follow_up", {"message": message})
         if block:
             deadline = time.time() + max(0.1, timeout)
             while time.time() < deadline:
@@ -414,11 +493,15 @@ class SubAgentManager:
         task = self.get(task_ref)
         if not task:
             return None
+        cancelled = False
         with self._lock:
             if not task.terminal:
                 task.status = "cancelled"
                 task.error = "Cancelled by parent."
                 task.finished_at = time.time()
+                cancelled = True
+        if cancelled:
+            self._append_transcript(task, "cancelled", {"error": task.error})
         return task
 
     def projection(self, task: SubAgentTask) -> dict[str, object]:
@@ -433,6 +516,8 @@ class SubAgentManager:
             "allowed_tools": task.allowed_tools,
             "model": task.model,
             "fork_context": task.fork_context,
+            "gate_results": task.gate_results,
+            "transcript_handle": task.transcript_handle or None,
             "duration_ms": duration_ms,
             "result": task.result if task.terminal else None,
             "error": task.error or None,
@@ -444,6 +529,7 @@ class SubAgentManager:
             if task.status == "cancelled":
                 return
             task.status = "running"
+        self._append_transcript(task, "running", {"agent_type": task.agent_type})
         messages = [
             {"role": "system", "content": f"{definition.system_hint}\n\n{self._tool_policy_hint(definition, task)}\n\n{OUTPUT_CONTRACT}"},
             {"role": "user", "content": task.prompt},
@@ -455,6 +541,18 @@ class SubAgentManager:
             steps = 0
             while steps <= SUBAGENT_MAX_TOOL_STEPS:
                 turn = self.provider(messages, tool_schemas)
+                self._append_transcript(
+                    task,
+                    "provider_turn",
+                    {
+                        "content": turn.content,
+                        "tool_calls": [
+                            {"name": call.name, "arguments": call.arguments, "call_id": call.call_id}
+                            for call in turn.tool_calls
+                        ],
+                        "usage": turn.usage,
+                    },
+                )
                 if turn.content.strip():
                     content = turn.content.strip()
                     transcript.append(content)
@@ -465,9 +563,19 @@ class SubAgentManager:
                     break
                 messages.append(_assistant_tool_message(turn))
                 for call in turn.tool_calls[: max(0, SUBAGENT_MAX_TOOL_STEPS - steps)]:
+                    self._append_transcript(
+                        task,
+                        "tool_started",
+                        {"name": call.name, "arguments": call.arguments, "call_id": call.call_id},
+                    )
                     tool_output = self._execute_tool_call(definition, task, call.name, call.arguments)
                     steps += 1
                     transcript.append(f"{call.name}: {tool_output[:1000]}")
+                    self._append_transcript(
+                        task,
+                        "tool_finished",
+                        {"name": call.name, "call_id": call.call_id, "output": tool_output},
+                    )
                     messages.append({
                         "role": "tool",
                         "tool_call_id": call.call_id,
@@ -478,14 +586,22 @@ class SubAgentManager:
                         break
             content = content or "(subagent returned no text)"
             task.result = self._ensure_output_contract(content)
+            completed = False
             with self._lock:
                 if task.status != "cancelled":
                     task.status = "completed"
+                    completed = True
+            if completed:
+                self._append_transcript(task, "completed", {"result": task.result})
         except Exception as exc:  # pragma: no cover - defensive boundary
+            failed = False
             with self._lock:
                 if task.status != "cancelled":
                     task.error = str(exc)
                     task.status = "failed"
+                    failed = True
+            if failed:
+                self._append_transcript(task, "failed", {"error": str(exc)})
         finally:
             with self._lock:
                 task.finished_at = task.finished_at or time.time()
@@ -516,7 +632,82 @@ class SubAgentManager:
         return "\n".join(lines) or "No additional tool policy."
 
     def _effective_allowed_tools(self, definition: AgentDefinition, task: SubAgentTask) -> list[str]:
-        return _dedupe_tools(task.allowed_tools or definition.allowed_tools)
+        return _dedupe_tools(task.allowed_tools)
+
+    def _validate_creation_gates(
+        self,
+        canonical: str,
+        definition: AgentDefinition,
+        allowed_tools: list[str],
+        *,
+        explicit_allowed_tools: bool,
+    ) -> list[dict[str, Any]]:
+        if not self._uses_custom_tool_gates(canonical, definition):
+            return []
+        gates = []
+        gates.append({
+            "gate_number": 1,
+            "gate": "custom_allowed_tools_shape",
+            "status": "passed" if explicit_allowed_tools else "failed",
+            "message": (
+                "Custom subagents require an explicit allowed_tools list. "
+                "Use [] for a no-tool custom agent or provide concrete tool names."
+            ),
+        })
+
+        invalid_tools = [
+            tool for tool in allowed_tools
+            if _tool_spec_name(tool) != "*" and not self._tool_spec_resolves(tool)
+        ]
+        gates.append({
+            "gate_number": 2,
+            "gate": "custom_allowed_tools_resolve",
+            "status": "failed" if invalid_tools else "passed",
+            "invalid_tools": invalid_tools,
+            "message": (
+                "Custom subagent allowed_tools contains unknown tools: " + ", ".join(invalid_tools)
+                if invalid_tools
+                else "All custom subagent allowed_tools entries resolve to known tools or compatibility aliases."
+            ),
+        })
+
+        denied_tools = [
+            tool for tool in allowed_tools
+            if _tool_spec_name(tool) != "*" and self._tool_denied_by_specs(tool, SUBAGENT_ALWAYS_DISALLOWED_TOOLS)
+        ]
+        gates.append({
+            "gate_number": 3,
+            "gate": "custom_allowed_tools_disallowed",
+            "status": "failed" if denied_tools else "passed",
+            "denied_tools": denied_tools,
+            "message": (
+                "Custom subagent allowed_tools includes tools that subagents may not receive: "
+                + ", ".join(denied_tools)
+                if denied_tools
+                else "Custom subagent allowed_tools does not include subagent lifecycle or plan-control tools."
+            ),
+        })
+        return gates
+
+    def _uses_custom_tool_gates(self, canonical: str, definition: AgentDefinition) -> bool:
+        return canonical == "custom" or definition.source != "built-in"
+
+    def _tool_spec_resolves(self, spec: str) -> bool:
+        name = _tool_spec_name(spec)
+        if not name:
+            return False
+        if name.startswith("mcp__"):
+            return True
+        if self.registry is None:
+            return True
+        registered = {str(schema.get("name") or "") for schema in self.registry.schemas()}
+        for candidate in self._resolve_tool_family(name):
+            if candidate in registered:
+                return True
+            resolved = self._resolve_tool_name(candidate)
+            if resolved in registered:
+                return True
+        return False
 
     def _tool_schemas_for_task(self, definition: AgentDefinition, task: SubAgentTask) -> list[dict[str, Any]]:
         if self.registry is None:
@@ -524,11 +715,12 @@ class SubAgentManager:
         allowed = self._effective_allowed_tools(definition, task)
         if not allowed:
             return []
-        disallowed = {self._resolve_tool_name(name) or name for name in definition.disallowed_tools}
         schemas = []
         for schema in self.registry.schemas():
             name = str(schema.get("name") or "")
-            if name in disallowed:
+            if self._tool_denied_by_specs(name, SUBAGENT_ALWAYS_DISALLOWED_TOOLS):
+                continue
+            if self._tool_denied_by_specs(name, definition.disallowed_tools):
                 continue
             if self._tool_allowed(name, allowed):
                 schemas.append(schema)
@@ -538,7 +730,9 @@ class SubAgentManager:
         if "*" in allowed:
             return True
         resolved = self._resolve_tool_name(name) or name
-        allowed_resolved = {self._resolve_tool_name(item) or item for item in allowed}
+        allowed_resolved = set()
+        for item in allowed:
+            allowed_resolved.update(self._resolve_tool_family(item))
         return resolved in allowed_resolved or name in allowed
 
     def _resolve_tool_name(self, name: str) -> str | None:
@@ -549,19 +743,107 @@ class SubAgentManager:
         except Exception:
             return name
 
+    def _resolve_tool_family(self, name: str) -> set[str]:
+        spec_name = _tool_spec_name(name)
+        normalized = _normalize_tool_key(spec_name)
+        candidates = TOOL_COMPATIBILITY_GROUPS.get(normalized, [spec_name])
+        resolved: set[str] = set()
+        for candidate in candidates:
+            resolved.add(candidate)
+            resolved_name = self._resolve_tool_name(candidate)
+            if resolved_name:
+                resolved.add(resolved_name)
+        return resolved
+
+    def _tool_denied_by_specs(self, name: str, specs: list[str]) -> bool:
+        if not specs:
+            return False
+        resolved_name = self._resolve_tool_name(_tool_spec_name(name)) or _tool_spec_name(name)
+        requested_family = self._resolve_tool_family(name)
+        requested_family.add(resolved_name)
+        for spec in specs:
+            denied_family = self._resolve_tool_family(spec)
+            denied_name = self._resolve_tool_name(_tool_spec_name(spec)) or _tool_spec_name(spec)
+            denied_family.add(denied_name)
+            if resolved_name in denied_family or requested_family.intersection(denied_family):
+                return True
+        return False
+
     def _execute_tool_call(self, definition: AgentDefinition, task: SubAgentTask, name: str, arguments: dict[str, Any]) -> str:
         if self.registry is None or self.ctx is None:
             return f"Tool unavailable in this subagent runtime: {name}"
         allowed = self._effective_allowed_tools(definition, task)
         if not self._tool_allowed(name, allowed):
-            return f"Tool denied for {task.agent_type}: {name}. Allowed tools: {', '.join(allowed) or '(none)'}"
-        resolved = self._resolve_tool_name(name) or name
-        disallowed = {self._resolve_tool_name(item) or item for item in definition.disallowed_tools}
-        if resolved in disallowed:
-            return f"Tool denied for {task.agent_type}: {name}. It is disallowed by the role preset."
+            return self._runtime_gate_message(
+                task,
+                4,
+                "runtime_allowed_tools",
+                name,
+                f"Allowed tools: {', '.join(allowed) or '(none)'}",
+            )
+        if self._tool_denied_by_specs(name, SUBAGENT_ALWAYS_DISALLOWED_TOOLS):
+            return self._runtime_gate_message(
+                task,
+                5,
+                "runtime_role_or_policy",
+                name,
+                "Subagent lifecycle and plan-control tools are blocked inside subagents.",
+            )
+        if self._tool_denied_by_specs(name, definition.disallowed_tools):
+            return self._runtime_gate_message(
+                task,
+                5,
+                "runtime_role_or_policy",
+                name,
+                "The role preset disallows this tool.",
+            )
         result, elapsed_ms = self.registry.execute(name, arguments or {}, self.ctx)
+        if not result.ok and result.metadata.get("gate"):
+            return self._runtime_gate_message(
+                task,
+                5,
+                str(result.metadata.get("gate") or "runtime_role_or_policy"),
+                name,
+                result.output,
+            )
         status = "ok" if result.ok else "error"
         return f"{status} {name} {elapsed_ms}ms\n{result.output}"
+
+    def _runtime_gate_message(self, task: SubAgentTask, gate_number: int, gate: str, tool_name: str, reason: str) -> str:
+        data = {
+            "gate_number": gate_number,
+            "gate": gate,
+            "status": "failed",
+            "agent_type": task.agent_type,
+            "tool": tool_name,
+            "message": reason,
+        }
+        self._append_transcript(task, "tool_denied", data)
+        return (
+            f"Tool denied for {task.agent_type}: {tool_name}. "
+            f"Gate {gate_number} ({gate}) failed. {reason}"
+        )
+
+    def _append_transcript(self, task: SubAgentTask, event: str, data: dict[str, Any]) -> None:
+        if self.transcripts_dir is None:
+            return
+        path = Path(task.transcript_path) if task.transcript_path else self.transcripts_dir / f"{task.id}.jsonl"
+        if not task.transcript_path:
+            task.transcript_path = str(path)
+            task.transcript_handle = self._transcript_handle(path)
+        record = {"ts": time.time(), "event": event, **data}
+        with self._lock:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+
+    def _transcript_handle(self, path: Path) -> str:
+        if self.state_dir is not None:
+            try:
+                return f"{self.state_dir.name}/{path.relative_to(self.state_dir).as_posix()}"
+            except ValueError:
+                pass
+        return str(path)
 
     def _step_limit_report(self, transcript: list[str]) -> str:
         evidence = "\n".join(f"- {item[:300]}" for item in transcript[-8:]) or "- no tool evidence collected"
@@ -644,6 +926,17 @@ def _dedupe_tools(tools: list[str]) -> list[str]:
         seen.add(name)
         result.append(name)
     return result
+
+
+def _normalize_tool_key(name: str) -> str:
+    return str(name).strip().replace("_", "").replace("-", "").replace(" ", "").lower()
+
+
+def _tool_spec_name(spec: str) -> str:
+    value = str(spec or "").strip()
+    if "(" in value:
+        value = value.split("(", 1)[0].strip()
+    return value
 
 
 def _as_bool(value: object, default: bool = False) -> bool:

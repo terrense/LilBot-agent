@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 import os
@@ -8,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from lilbot.memory import MemoryStore
-from lilbot.sandbox import Sandbox, SandboxError
+from lilbot.sandbox import PermissionManager, Sandbox, SandboxError
 from lilbot.sandbox.workspace import _decode_process_output
 from lilbot.skills import SkillRegistry
 from lilbot.tools import ToolContext, ToolDef, ToolRegistry, ToolResult, register_builtins
@@ -119,7 +120,91 @@ secret
         self.assertIn("load_skill", names)
         self.assertIn("Skill", names)
         self.assertIn("update_plan", names)
+        self.assertIn("EnterPlanMode", names)
+        self.assertIn("ExitPlanMode", names)
+        self.assertIn("EnterWorktree", names)
+        self.assertIn("ExitWorktree", names)
         self.assertIn("git_status", names)
+
+    def test_plan_mode_lifecycle_persists_approval_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / ".lilbot"
+            registry = ToolRegistry()
+            register_builtins(registry)
+            ctx = ToolContext(
+                Sandbox(root),
+                PermissionManager(state, "accept-all", interactive=False),
+                MemoryStore(state),
+                SkillRegistry(state),
+                SimpleNamespace(),
+                SimpleNamespace(),
+                SimpleNamespace(state_dir=state),
+            )
+
+            entered, _ = registry.execute("EnterPlanMode", {"reason": "needs design"}, ctx)
+            exited, _ = registry.execute("ExitPlanMode", {"plan": "1. inspect\n2. implement"}, ctx)
+            state_data = json.loads((state / "plan_mode.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(entered.ok)
+        self.assertTrue(exited.ok)
+        self.assertFalse(state_data["active"])
+        self.assertEqual(state_data["approval_state"], "pending_approval")
+        self.assertTrue(state_data["requires_approval"])
+
+    def test_pending_plan_blocks_write_and_execution_tools_until_approved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / ".lilbot"
+            registry = ToolRegistry()
+            register_builtins(registry)
+            ctx = ToolContext(
+                Sandbox(root),
+                PermissionManager(state, "accept-all", interactive=False),
+                MemoryStore(state),
+                SkillRegistry(state),
+                SimpleNamespace(),
+                SimpleNamespace(),
+                SimpleNamespace(state_dir=state),
+            )
+
+            registry.execute("ExitPlanMode", {"plan": "1. design\n2. implement"}, ctx)
+            blocked_write, _ = registry.execute("write_file", {"path": "blocked.txt", "content": "nope"}, ctx)
+            blocked_shell, _ = registry.execute("bash", {"command": "echo nope"}, ctx)
+            registry.execute("ExitPlanMode", {"plan": "approved", "approved": True}, ctx)
+            allowed_write, _ = registry.execute("write_file", {"path": "allowed.txt", "content": "ok"}, ctx)
+            blocked_file_exists = (root / "blocked.txt").exists()
+            allowed_file_content = (root / "allowed.txt").read_text(encoding="utf-8")
+
+        self.assertFalse(blocked_write.ok)
+        self.assertEqual(blocked_write.metadata["gate"], "plan_approval")
+        self.assertFalse(blocked_file_exists)
+        self.assertFalse(blocked_shell.ok)
+        self.assertEqual(blocked_shell.metadata["gate"], "plan_approval")
+        self.assertTrue(allowed_write.ok)
+        self.assertEqual(allowed_file_content, "ok")
+
+    def test_worktree_reports_unsupported_outside_git_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / ".lilbot"
+            registry = ToolRegistry()
+            register_builtins(registry)
+            ctx = ToolContext(
+                Sandbox(root),
+                PermissionManager(state, "accept-all", interactive=False),
+                MemoryStore(state),
+                SkillRegistry(state),
+                SimpleNamespace(),
+                SimpleNamespace(),
+                SimpleNamespace(state_dir=state),
+            )
+
+            result, _ = registry.execute("EnterWorktree", {"path": "wt"}, ctx)
+
+        self.assertFalse(result.ok)
+        self.assertFalse(result.metadata["supported"])
+        self.assertEqual(result.metadata["status"], "unsupported")
 
     def test_codewhale_style_subagent_lifecycle(self):
         from lilbot.core.events import ProviderTurn
@@ -219,6 +304,198 @@ secret
 
         self.assertIn("read_file", tool_names)
         self.assertNotIn("write_file", tool_names)
+
+    def test_explicit_empty_subagent_allowed_tools_means_no_tools(self):
+        from lilbot.core.events import ProviderTurn
+        from lilbot.subagents import SubAgentManager
+
+        registry = ToolRegistry()
+        registry.register(ToolDef("read_file", "Read a file.", {"type": "object"}, lambda args, ctx: ToolResult(True, "read")))
+        seen_tools = []
+
+        def provider(messages, tools):
+            seen_tools.append([tool["name"] for tool in tools])
+            return ProviderTurn(content="done")
+
+        manager = SubAgentManager(provider)
+        manager.configure_tools(registry, SimpleNamespace())
+        task = manager.open("explore", "inspect", allowed_tools=[], background=False)
+
+        self.assertEqual(task.allowed_tools, [])
+        self.assertEqual(seen_tools[0], [])
+
+    def test_claude_style_allowed_tool_names_expand_for_subagents(self):
+        from lilbot.core.events import ProviderTurn
+        from lilbot.subagents import SubAgentManager
+
+        registry = ToolRegistry()
+        registry.register(ToolDef("read_file", "Read a file.", {"type": "object"}, lambda args, ctx: ToolResult(True, "read")))
+        registry.register(ToolDef("grep_files", "Search files.", {"type": "object"}, lambda args, ctx: ToolResult(True, "grep")))
+        registry.register(ToolDef("write_file", "Write a file.", {"type": "object"}, lambda args, ctx: ToolResult(True, "wrote")))
+        seen_tools = []
+
+        def provider(messages, tools):
+            seen_tools.append([tool["name"] for tool in tools])
+            return ProviderTurn(content="done")
+
+        manager = SubAgentManager(provider)
+        manager.configure_tools(registry, SimpleNamespace())
+        manager.open("custom", "inspect", allowed_tools=["Read", "Grep"], background=False)
+
+        self.assertIn("read_file", seen_tools[0])
+        self.assertIn("grep_files", seen_tools[0])
+        self.assertNotIn("write_file", seen_tools[0])
+
+    def test_custom_subagent_creation_gates_reject_missing_unknown_and_control_tools(self):
+        from lilbot.core.events import ProviderTurn
+        from lilbot.subagents import SubAgentGateError, SubAgentManager
+
+        registry = ToolRegistry()
+        registry.register(ToolDef("read_file", "Read a file.", {"type": "object"}, lambda args, ctx: ToolResult(True, "read")))
+        registry.register(ToolDef("Agent", "Spawn an agent.", {"type": "object"}, lambda args, ctx: ToolResult(True, "spawned")))
+        manager = SubAgentManager(lambda messages, tools: ProviderTurn(content="done"))
+        manager.configure_tools(registry, SimpleNamespace())
+
+        with self.assertRaises(SubAgentGateError) as missing:
+            manager.open("custom", "inspect", background=False)
+        with self.assertRaises(SubAgentGateError) as unknown:
+            manager.open("custom", "inspect", allowed_tools=["read_file", "NoSuchTool"], background=False)
+        with self.assertRaises(SubAgentGateError) as control:
+            manager.open("custom", "inspect", allowed_tools=["read_file", "Agent(worker)"], background=False)
+
+        self.assertEqual(manager.list_tasks(), [])
+        self.assertEqual(missing.exception.failures[0]["gate_number"], 1)
+        self.assertTrue(any(gate["gate_number"] == 2 for gate in unknown.exception.failures))
+        self.assertTrue(any(gate["gate_number"] == 3 for gate in control.exception.failures))
+
+    def test_custom_subagent_runtime_gate_rejects_tool_outside_allowlist(self):
+        from lilbot.core.events import ProviderTurn, ToolCall
+        from lilbot.subagents import SubAgentManager
+
+        registry = ToolRegistry()
+        registry.register(ToolDef("read_file", "Read a file.", {"type": "object"}, lambda args, ctx: ToolResult(True, "read")))
+        registry.register(ToolDef("write_file", "Write a file.", {"type": "object"}, lambda args, ctx: ToolResult(True, "wrote")))
+
+        def provider(messages, tools):
+            if not any(message.get("role") == "tool" for message in messages):
+                return ProviderTurn(tool_calls=[ToolCall("write_file", {"path": "x.txt", "content": "x"})])
+            return ProviderTurn(
+                content=(
+                    "SUMMARY: denied.\n"
+                    "CHANGES: None.\n"
+                    f"EVIDENCE: {messages[-1]['content']}\n"
+                    "RISKS: None observed.\n"
+                    "BLOCKERS: None."
+                )
+            )
+
+        manager = SubAgentManager(provider)
+        manager.configure_tools(registry, SimpleNamespace())
+        task = manager.open("custom", "try write", allowed_tools=["read_file"], background=False)
+
+        self.assertEqual(task.status, "completed")
+        self.assertIn("Gate 4", task.result)
+        self.assertIn("runtime_allowed_tools", task.result)
+
+    def test_custom_subagent_runtime_gate_rejects_control_tool_even_with_wildcard(self):
+        from lilbot.core.events import ProviderTurn, ToolCall
+        from lilbot.subagents import SubAgentManager
+
+        registry = ToolRegistry()
+        registry.register(ToolDef("read_file", "Read a file.", {"type": "object"}, lambda args, ctx: ToolResult(True, "read")))
+        registry.register(ToolDef("Agent", "Spawn an agent.", {"type": "object"}, lambda args, ctx: ToolResult(True, "spawned")))
+
+        def provider(messages, tools):
+            if not any(message.get("role") == "tool" for message in messages):
+                return ProviderTurn(tool_calls=[ToolCall("Agent", {"prompt": "nested"})])
+            return ProviderTurn(
+                content=(
+                    "SUMMARY: denied.\n"
+                    "CHANGES: None.\n"
+                    f"EVIDENCE: {messages[-1]['content']}\n"
+                    "RISKS: None observed.\n"
+                    "BLOCKERS: None."
+                )
+            )
+
+        manager = SubAgentManager(provider)
+        manager.configure_tools(registry, SimpleNamespace())
+        task = manager.open("custom", "try nested agent", allowed_tools=["*"], background=False)
+        definition = manager.definitions[task.agent_type]
+        tool_names = [tool["name"] for tool in manager._tool_schemas_for_task(definition, task)]
+
+        self.assertNotIn("Agent", tool_names)
+        self.assertEqual(task.status, "completed")
+        self.assertIn("Gate 5", task.result)
+        self.assertIn("runtime_role_or_policy", task.result)
+
+    def test_subagent_transcript_is_persisted_and_exposed_as_handle(self):
+        from lilbot.core.events import ProviderTurn
+        from lilbot.subagents import SubAgentManager
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / ".lilbot"
+            manager = SubAgentManager(lambda messages, tools: ProviderTurn(content="done"), state / "agents")
+            task = manager.open("writer", "draft", background=False)
+            projection = manager.projection(task)
+
+            handle = projection["transcript_handle"]
+            self.assertIsNotNone(handle)
+            transcript = (root / str(handle)).read_text(encoding="utf-8")
+
+        self.assertIn('"event": "queued"', transcript)
+        self.assertIn('"event": "provider_turn"', transcript)
+        self.assertIn('"event": "completed"', transcript)
+
+    def test_forked_skill_executes_in_subagent_with_skill_allowed_tools(self):
+        from lilbot.core.events import ProviderTurn
+        from lilbot.subagents import SubAgentManager
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / ".lilbot"
+            skill_dir = state / "skills" / "deep-scan"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                """---
+name: deep-scan
+description: Deep scan a subsystem
+allowed-tools: Read, Grep
+context: fork
+agent: custom
+---
+Inspect {{args}}
+""",
+                encoding="utf-8",
+            )
+            seen_tools = []
+
+            def provider(messages, tools):
+                seen_tools.append([tool["name"] for tool in tools])
+                return ProviderTurn(content="fork done")
+
+            registry = ToolRegistry()
+            register_builtins(registry)
+            subagents = SubAgentManager(provider, state / "agents")
+            ctx = ToolContext(
+                Sandbox(root),
+                SimpleNamespace(),
+                MemoryStore(state),
+                SkillRegistry(state),
+                subagents,
+                SimpleNamespace(),
+                SimpleNamespace(state_dir=state),
+            )
+            subagents.configure_tools(registry, ctx)
+
+            result, _ = registry.execute("Skill", {"skill": "deep-scan", "args": "src"}, ctx)
+
+        self.assertTrue(result.ok)
+        self.assertIn("SUMMARY: fork done", result.output)
+        self.assertIn("read_file", seen_tools[0])
+        self.assertIn("grep_files", seen_tools[0])
+        self.assertNotIn("write_file", seen_tools[0])
 
     def test_custom_agent_definitions_load_from_markdown(self):
         from lilbot.core.events import ProviderTurn
