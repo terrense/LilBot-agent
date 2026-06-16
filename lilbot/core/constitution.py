@@ -174,6 +174,26 @@ optional — it is the default mode of operation for any non-trivial task.
 - **Concurrent sub-agent cap**: The dispatcher defaults to 8 concurrent
   sub-agents. When you need more, batch them: open up to 8, wait for
   completions, then open the next batch.
+
+### Tool Capability Routing
+
+Every tool schema now includes a `criteria` field listing its capabilities
+(read_only, network, executes_code, writes_files, requires_approval). Use
+these as routing signals:
+
+- **Tools with [network]**: web_search, fetch_url — delegate to `researcher`
+  sub-agents when you have 2+ independent search topics. One sub-agent per
+  topic, parallel agent_open calls, then agent_eval to collect.
+
+- **Tools with [executes_code, requires_approval]**: exec_shell, bash,
+  agent_open — these need user approval. Batch independent agent_open calls
+  in one turn to minimize approval prompts and maximize parallelism.
+
+- **Tools with [read_only]**: read_file, grep, list_dir — use for solo reads.
+  For multi-file exploration (3+ files), delegate to `explore` sub-agents
+  which have the same read-only tools.
+
+  Check each tool's `criteria` field in its schema to confirm.
 """
 
 REGULATIONS = """## REGULATIONS
@@ -240,7 +260,6 @@ Constitution, any Statute, any user directive, or any tool requirement.
 def build_constitution() -> str:
     """Return the full LilBot Constitution as a system prompt prefix."""
     return "\n\n".join([
-        USAGE_EXAMPLE,
         CONSTITUTION_PREAMBLE,
         STATUTES,
         REGULATIONS,

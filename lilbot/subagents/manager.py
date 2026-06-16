@@ -143,6 +143,7 @@ class AgentDefinition:
     disallowed_tools: list[str] = field(default_factory=list)
     model: str | None = None
     source: str = "built-in"
+    when_to_use: str = ""
 
 
 @dataclass
@@ -461,6 +462,13 @@ class SubAgentManager:
             disallowed_tools=_as_list(meta.get("disallowed-tools") or meta.get("disallowedtools")),
             model=str(meta.get("model") or "") or None,
             source=str(path),
+            when_to_use=str(
+                meta.get("when_to_use")
+                or meta.get("when-to-use")
+                or meta.get("whenToUse")
+                or meta.get("when")
+                or description
+            ).strip(),
         )
 
     def spawn(self, agent_type: str, prompt: str, background: bool = False) -> SubAgentTask:

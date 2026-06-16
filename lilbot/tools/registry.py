@@ -9,6 +9,35 @@ from typing import Any, Callable
 from ..sandbox import SandboxError
 
 
+# ── Direct port from CodeWhale's tools crate ──────────────────────────────
+# These enums are transplanted 1:1 from crates/tools/src/lib.rs
+
+class ToolCapability:
+    """Tool capability flags — exactly CodeWhale's enum (lines 19-32)."""
+    ReadOnly = "read_only"
+    WritesFiles = "writes_files"
+    ExecutesCode = "executes_code"
+    Network = "network"
+    Sandboxable = "sandboxable"
+    RequiresApproval = "requires_approval"
+
+    # Convenience sets for tool registration
+    NONE = frozenset()
+    READ = frozenset({ReadOnly})
+    READ_NETWORK = frozenset({ReadOnly, Network})
+    CODE = frozenset({ExecutesCode})
+    CODE_APPROVAL = frozenset({ExecutesCode, RequiresApproval})
+    WRITE = frozenset({WritesFiles})
+    WRITE_APPROVAL = frozenset({WritesFiles, RequiresApproval})
+
+
+class ApprovalRequirement:
+    """Tool approval mode — exactly CodeWhale's enum (lines 34-44)."""
+    Auto = "auto"           # Never needs approval: safe read-only operations
+    Suggest = "suggest"     # Suggest but allow skip
+    Required = "required"   # Always require explicit user approval
+
+
 PLAN_APPROVAL_GATED_TOOLS = {
     "write_file",
     "edit_file",
@@ -58,6 +87,8 @@ class ToolDef:
     description: str
     input_schema: dict[str, Any]
     handler: Callable[[dict[str, Any], "ToolContext"], ToolResult]
+    criteria: frozenset = ToolCapability.NONE
+    approval_requirement: str = ApprovalRequirement.Auto
 
 
 @dataclass
@@ -114,6 +145,7 @@ class ToolRegistry:
                 "name": tool.name,
                 "description": tool.description,
                 "input_schema": tool.input_schema,
+                "criteria": sorted(tool.criteria) if tool.criteria else [],
             }
             for tool in self.list()
         ]

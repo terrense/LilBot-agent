@@ -1619,7 +1619,7 @@ class DashboardUI:
             fragments.extend(
                 [
                     ("class:panel.label", f"{label}: "),
-                    ("class:panel.value", self._compact_names(names, 6)),
+                    ("class:panel.value", self._compact_names_for_width(names, max(18, left_width - len(label) - 3))),
                     ("class:muted", "\n"),
                 ]
             )
@@ -1635,7 +1635,7 @@ class DashboardUI:
         fragments.extend(
             [
                 ("class:panel.label", "bundled: "),
-                ("class:panel.value", self._compact_names(skill_names, 8)),
+                ("class:panel.value", self._compact_names_for_width(skill_names, max(18, left_width - len("bundled: ") - 2))),
                 ("class:muted", "\n\n"),
                 ("class:panel.title", "╭─ flow "),
                 ("class:muted", "memory -> skills -> subagents -> mcp\n"),
@@ -1649,32 +1649,62 @@ class DashboardUI:
         groups: list[tuple[str, list[str]]] = [
             ("workspace", []),
             ("search", []),
+            ("git", []),
+            ("lsp", []),
             ("web", []),
             ("shell", []),
             ("memory", []),
             ("skills", []),
             ("agents", []),
+            ("plan", []),
+            ("tasks", []),
+            ("worktree", []),
             ("mcp", []),
+            ("automation", []),
+            ("rlm", []),
+            ("media", []),
+            ("github", []),
+            ("misc", []),
         ]
         by_name = {label: names for label, names in groups}
         for tool in self.registry.list():
             name = tool.name
-            if name in {"list_dir", "read_file", "write_file", "edit_file"}:
+            if name in {"list_dir", "read_file", "write_file", "edit_file", "apply_patch", "handle_read", "retrieve_tool_result"}:
                 by_name["workspace"].append(name)
-            elif name in {"glob", "grep"}:
+            elif name in {"glob", "grep", "file_search", "grep_files", "project_map", "diagnostics"}:
                 by_name["search"].append(name)
-            elif name in {"web_search", "fetch_url", "web_fetch"}:
+            elif name.startswith("git_"):
+                by_name["git"].append(name)
+            elif name.startswith("lsp_") or name in {"symbols", "definition", "workspace_symbols", "references", "diagnostics_symbols", "rename_preview"}:
+                by_name["lsp"].append(name)
+            elif name in {"web_search", "fetch_url", "web_fetch"} or name.startswith("web_") or name in {"finance", "weather", "sports", "time"}:
                 by_name["web"].append(name)
-            elif name == "bash":
+            elif name == "bash" or name.startswith("exec_") or name.startswith("task_shell_") or name in {"code_execution", "js_execution"}:
                 by_name["shell"].append(name)
-            elif name.startswith("memory_"):
-                by_name["memory"].append(name.removeprefix("memory_"))
-            elif name.startswith("skill_"):
-                by_name["skills"].append(name.removeprefix("skill_"))
-            elif name.startswith("agent_"):
-                by_name["agents"].append(name.removeprefix("agent_"))
-            elif name.startswith("mcp_"):
-                by_name["mcp"].append(name.removeprefix("mcp_"))
+            elif name.startswith("memory_") or name in {"remember", "note"}:
+                by_name["memory"].append(name)
+            elif name.startswith("skill_") or name in {"Skill", "load_skill"}:
+                by_name["skills"].append(name)
+            elif name.startswith("agent_") or name in {"Agent", "Task", "tool_agent", "plan_delegation"}:
+                by_name["agents"].append(name)
+            elif name.startswith("checklist_") or name.startswith("todo_") or name in {"update_plan", "EnterPlanMode", "ExitPlanMode", "create_goal", "get_goal", "update_goal"}:
+                by_name["plan"].append(name)
+            elif name.startswith("task_") or name.startswith("pr_attempt_"):
+                by_name["tasks"].append(name)
+            elif name in {"EnterWorktree", "ExitWorktree", "WorktreeMergeBack", "worktree_merge_back"}:
+                by_name["worktree"].append(name)
+            elif name.startswith("mcp_") or name.startswith("list_mcp_") or name == "read_mcp_resource":
+                by_name["mcp"].append(name)
+            elif name.startswith("automation_"):
+                by_name["automation"].append(name)
+            elif name.startswith("rlm_"):
+                by_name["rlm"].append(name)
+            elif name.startswith("image_") or name.startswith("pandoc_"):
+                by_name["media"].append(name)
+            elif name.startswith("github_") or name.startswith("gh_"):
+                by_name["github"].append(name)
+            else:
+                by_name["misc"].append(name)
         return [(label, names) for label, names in groups if names]
 
     def _compact_names(self, names: list[str], limit: int) -> str:
@@ -1682,6 +1712,21 @@ class DashboardUI:
             return "(none)"
         shown = names[:limit]
         suffix = f", +{len(names) - limit}" if len(names) > limit else ""
+        return ", ".join(shown) + suffix
+
+    def _compact_names_for_width(self, names: list[str], width: int) -> str:
+        if not names:
+            return "(none)"
+        shown: list[str] = []
+        for name in names:
+            candidate = ", ".join([*shown, name])
+            remaining = len(names) - len(shown) - 1
+            suffix = f", +{remaining}" if remaining > 0 else ""
+            if shown and len(candidate + suffix) > width:
+                break
+            shown.append(name)
+        remaining = len(names) - len(shown)
+        suffix = f", +{remaining}" if remaining > 0 else ""
         return ", ".join(shown) + suffix
 
     def _shorten_path(self, value: str, limit: int) -> str:

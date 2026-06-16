@@ -69,8 +69,8 @@ def make_agent(tmp: str, provider: LoopingProvider, max_steps: int) -> tuple[Age
 
 
 class AgentLoopTests(unittest.TestCase):
-    def test_default_and_legacy_max_steps_are_ten(self):
-        self.assertEqual(LilBotConfig(Path(".")).max_steps, 10)
+    def test_default_and_legacy_max_steps_are_twenty(self):
+        self.assertEqual(LilBotConfig(Path(".")).max_steps, 20)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             state = root / ".lilbot"
@@ -81,7 +81,7 @@ class AgentLoopTests(unittest.TestCase):
             )
             with patch.dict(os.environ, {}, clear=True):
                 cfg = load_config(root)
-        self.assertEqual(cfg.max_steps, 10)
+        self.assertEqual(cfg.max_steps, 20)
 
     def test_step_limit_synthesizes_final_answer_without_stopped_message(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -329,6 +329,35 @@ secret
         self.assertEqual(critic.agent_type, "critic")
         self.assertEqual(critic.allowed_tools, [])
 
+    def test_agent_tool_schema_renders_when_to_use_and_full_tools(self):
+        from lilbot.core.events import ProviderTurn
+        from lilbot.subagents import SubAgentManager, SubAgentTask
+
+        registry = ToolRegistry()
+        registry.register(ToolDef("agent_open", "Open subagent.", {"type": "object"}, lambda args, ctx: ToolResult(True, "ok")))
+        registry.register(ToolDef("Agent", "Open subagent alias.", {"type": "object"}, lambda args, ctx: ToolResult(True, "ok")))
+        registry.register(ToolDef("agent_eval", "Eval subagent.", {"type": "object"}, lambda args, ctx: ToolResult(True, "ok")))
+        manager = SubAgentManager(lambda messages, tools: ProviderTurn(content="finished"))
+        manager.tasks["sub_1"] = SubAgentTask(
+            id="sub_1",
+            agent_type="researcher",
+            prompt="research three public facts",
+            name="facts",
+            status="running",
+        )
+
+        schemas = registry.schemas(manager.get_render_context())
+        descriptions = {schema["name"]: schema["description"] for schema in schemas}
+
+        self.assertIn("Available agent types and the tools they have access to:", descriptions["agent_open"])
+        self.assertIn("- **researcher**:", descriptions["agent_open"])
+        self.assertIn("Use for web research", descriptions["agent_open"])
+        self.assertIn("web_search", descriptions["agent_open"])
+        self.assertIn("Before launching a duplicate agent", descriptions["agent_open"])
+        self.assertIn("fetch_url", descriptions["Agent"])
+        self.assertIn("Active subagents", descriptions["agent_eval"])
+        self.assertIn("facts [researcher] running", descriptions["agent_eval"])
+
     def test_subagent_executes_allowed_tool_calls(self):
         from lilbot.core.events import ProviderTurn, ToolCall
         from lilbot.subagents import SubAgentManager

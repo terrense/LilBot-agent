@@ -26,7 +26,7 @@ from uuid import uuid4
 
 from ..sandbox import analyze_powershell_command
 from ..subagents import SubAgentGateError
-from .registry import ToolContext, ToolDef, ToolRegistry, ToolResult
+from .registry import ApprovalRequirement, ToolCapability, ToolContext, ToolDef, ToolRegistry, ToolResult
 
 
 def _schema(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
@@ -3320,7 +3320,7 @@ def register_builtins(registry: ToolRegistry) -> None:
         "after": _integer("Context lines after each match.", 0),
         "case_sensitive": _bool("Use case-sensitive matching.", False),
     }, ["pattern"]), _grep))
-    registry.register(ToolDef("web_search", "Search the public web and return ranked results with URLs and snippets.", _schema({
+    registry.register(ToolDef("web_search", "Search the web and return ranked results with URLs and snippets.", _schema({
         "query": _string("Search query."),
         "q": _string("Search query alias."),
         "search_query": {
