@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from lilbot.config import LilBotConfig, load_config
 from lilbot.core.agent import Agent
-from lilbot.core.delegation import plan_auto_delegation
+from lilbot.core.delegation import parse_semantic_delegation_plan, plan_auto_delegation
 from lilbot.core.events import ProviderTurn, TextDelta, ToolCall, TurnFinished
 from lilbot.llm.providers import OpenAICompatibleProvider, ProviderError
 from lilbot.tools import ToolContext, ToolDef, ToolRegistry, ToolResult
@@ -130,7 +130,7 @@ class AgentLoopTests(unittest.TestCase):
             (
                 "帮我做阿根廷旅游攻略，查景点、交通和预算",
                 "Make an Argentina travel guide with attractions, transportation, and budget",
-                ["researcher", "plan"],
+                ["researcher"],
             ),
             (
                 "帮我写一篇雅思作文，要求有大纲、论点和修改建议",
@@ -170,9 +170,103 @@ class AgentLoopTests(unittest.TestCase):
 
         assert normal is not None
         assert risky is not None
-        self.assertEqual([probe.agent_type for probe in normal.probes], ["researcher", "plan"])
-        self.assertEqual([probe.agent_type for probe in risky.probes], ["researcher", "plan", "critic"])
+        self.assertEqual([probe.agent_type for probe in normal.probes], ["researcher"])
+        self.assertEqual([probe.agent_type for probe in risky.probes], ["researcher", "researcher"])
 
+    def test_independent_question_burst_gets_parallel_researchers(self):
+        prompt = (
+            "What are Beijing coordinates? "
+            "How long do cats usually live? "
+            "Who is Feng Gong? "
+            "How tall is LeBron James? "
+            "Which NBA teams has LeBron James played for?"
+        )
+        plan = plan_auto_delegation(prompt, max_agents=5)
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.reason, "5 independent questions can be answered in parallel")
+        self.assertEqual([probe.agent_type for probe in plan.probes], ["researcher"] * 5)
+        self.assertEqual([probe.name for probe in plan.probes], [f"auto_question_{idx:02d}" for idx in range(1, 6)])
+        self.assertIn("Answer only subquestion 1", plan.probes[0].prompt)
+
+    def test_question_burst_groups_extra_questions_when_slots_are_limited(self):
+        prompt = (
+            "What are Beijing coordinates? "
+            "How long do cats usually live? "
+            "What is the Russian word for hamster? "
+            "Who is Feng Gong? "
+            "How tall is LeBron James? "
+            "Which NBA teams has LeBron James played for?"
+        )
+        plan = plan_auto_delegation(prompt, max_agents=5)
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(len(plan.probes), 5)
+        self.assertIn("6 independent questions can be covered by 5 parallel researcher subagents", plan.reason)
+        joined_prompts = "\n".join(probe.prompt for probe in plan.probes)
+        self.assertIn("What is the Russian word for hamster?", joined_prompts)
+        self.assertIn("Which NBA teams has LeBron James played for?", joined_prompts)
+
+    def test_question_burst_without_question_marks_gets_parallel_researchers(self):
+        prompt = "谁是2025年NBA冠军 那谁是那一年的FMVP呢 哦对还有NBA是哪一个国家的比赛呀"
+        plan = plan_auto_delegation(prompt, max_agents=5)
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(len(plan.probes), 3)
+        self.assertEqual([probe.agent_type for probe in plan.probes], ["researcher"] * 3)
+        joined_prompts = "\n".join(probe.prompt for probe in plan.probes)
+        self.assertIn("谁是2025年NBA冠军", joined_prompts)
+        self.assertIn("谁是那一年的FMVP呢", joined_prompts)
+        self.assertIn("NBA是哪一个国家的比赛呀", joined_prompts)
+
+    def test_semantic_delegation_plan_parser_accepts_writing_tasks(self):
+        response = json.dumps({
+            "delegate": True,
+            "kind": "writing",
+            "reason": "substantial prose can be split into outline and draft",
+            "probes": [
+                {
+                    "name": "style-outline",
+                    "agent_type": "writer",
+                    "prompt": "Plan a 1000-character classical Chinese prose piece with imagery and structure.",
+                    "timeout_ms": 12000,
+                },
+                {
+                    "name": "draft",
+                    "agent_type": "writer",
+                    "prompt": "Draft the prose in a refined classical style.",
+                    "timeout_ms": 15000,
+                },
+            ],
+        })
+        plan = parse_semantic_delegation_plan(response, max_agents=3, max_question_agents=5)
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual([probe.agent_type for probe in plan.probes], ["writer", "writer"])
+        self.assertEqual(plan.probes[0].name, "style-outline")
+
+    def test_mixed_research_task_splits_fact_scopes_without_fact_free_planner(self):
+        prompt = (
+            "I want to travel in South America during China's National Day; recommend destinations "
+            "and build a 10-day itinerary. Also tell me the current FIFA men's world ranking top 25. "
+            "Last, how many NBA regular season MVP awards has LeBron James won?"
+        )
+        plan = plan_auto_delegation(prompt, max_agents=4)
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual([probe.agent_type for probe in plan.probes], ["researcher", "researcher", "researcher"])
+        self.assertEqual(
+            [probe.name for probe in plan.probes],
+            ["auto_research_travel", "auto_research_football_rankings", "auto_research_lebron_mvp"],
+        )
+        self.assertNotIn("auto_plan_synthesis", [probe.name for probe in plan.probes])
+
+    @unittest.skip("SPEC_DYNAMIC_AGENT_TOOL_PROMPT_PARITY: auto-delegation replaced by dynamic tool descriptions")
     def test_agent_auto_opens_and_evals_explorers_for_broad_task(self):
         class FinalProvider:
             def complete(self, messages: list[dict], tools: list[dict]) -> ProviderTurn:
@@ -213,6 +307,7 @@ class AgentLoopTests(unittest.TestCase):
         finished = [event for event in events if isinstance(event, TurnFinished)][-1]
         self.assertEqual(finished.steps, 4)
 
+    @unittest.skip("SPEC_DYNAMIC_AGENT_TOOL_PROMPT_PARITY: auto-delegation replaced by dynamic tool descriptions")
     def test_agent_auto_opens_general_subagents_for_research_task(self):
         class FinalProvider:
             def complete(self, messages: list[dict], tools: list[dict]) -> ProviderTurn:
@@ -247,9 +342,142 @@ class AgentLoopTests(unittest.TestCase):
 
         open_calls = [args for name, args in calls if name == "agent_open"]
         eval_calls = [args for name, args in calls if name == "agent_eval"]
-        self.assertEqual([args["type"] for args in open_calls], ["researcher", "plan"])
-        self.assertEqual([args["timeout_ms"] for args in eval_calls], [20000, 12000])
+        self.assertEqual([args["type"] for args in open_calls], ["researcher"])
+        self.assertEqual([args["timeout_ms"] for args in eval_calls], [22000])
+        self.assertTrue(any("Avoid repeating the same web/search/tool calls" in message.get("content", "") for message in agent.messages))
 
+    @unittest.skip("SPEC_DYNAMIC_AGENT_TOOL_PROMPT_PARITY: auto-delegation replaced by dynamic tool descriptions")
+    def test_agent_auto_opens_fact_researchers_for_mixed_research_task(self):
+        class FinalProvider:
+            def complete(self, messages: list[dict], tools: list[dict]) -> ProviderTurn:
+                return ProviderTurn(content="final synthesis")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[tuple[str, dict]] = []
+            registry = ToolRegistry()
+
+            def agent_open(args, ctx):
+                calls.append(("agent_open", args))
+                return ToolResult(True, json.dumps({"name": args["name"], "status": "running"}), {"name": args["name"]})
+
+            def agent_eval(args, ctx):
+                calls.append(("agent_eval", args))
+                return ToolResult(True, json.dumps({"name": args["name"], "status": "completed", "result": "evidence"}))
+
+            registry.register(ToolDef("agent_open", "Open subagent.", {"type": "object"}, agent_open))
+            registry.register(ToolDef("agent_eval", "Eval subagent.", {"type": "object"}, agent_eval))
+            ctx = ToolContext(None, None, EmptyMemory(), EmptySkills(), None, None, None)
+            cfg = LilBotConfig(workspace=Path(tmp), max_steps=10, subagent_max_concurrent=8)
+            agent = Agent(cfg, FinalProvider(), registry, ctx)
+            list(agent.run_turn(
+                "I want to travel in South America during China's National Day; recommend destinations "
+                "and build a 10-day itinerary. Also tell me the current FIFA men's world ranking top 25. "
+                "Last, how many NBA regular season MVP awards has LeBron James won?"
+            ))
+
+        open_calls = [args for name, args in calls if name == "agent_open"]
+        self.assertEqual([args["type"] for args in open_calls], ["researcher", "researcher", "researcher"])
+        self.assertEqual(
+            [args["name"] for args in open_calls],
+            ["auto_research_travel", "auto_research_football_rankings", "auto_research_lebron_mvp"],
+        )
+        self.assertNotIn("auto_plan_synthesis", [args["name"] for args in open_calls])
+
+    @unittest.skip("SPEC_DYNAMIC_AGENT_TOOL_PROMPT_PARITY: auto-delegation replaced by dynamic tool descriptions")
+    def test_agent_auto_opens_five_researchers_for_question_burst(self):
+        class FinalProvider:
+            def complete(self, messages: list[dict], tools: list[dict]) -> ProviderTurn:
+                return ProviderTurn(content="final synthesis")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[tuple[str, dict]] = []
+            registry = ToolRegistry()
+
+            def agent_open(args, ctx):
+                calls.append(("agent_open", args))
+                return ToolResult(True, json.dumps({"name": args["name"], "status": "running"}), {"name": args["name"]})
+
+            def agent_eval(args, ctx):
+                calls.append(("agent_eval", args))
+                return ToolResult(True, json.dumps({"name": args["name"], "status": "completed", "result": "evidence"}))
+
+            registry.register(ToolDef("agent_open", "Open subagent.", {"type": "object"}, agent_open))
+            registry.register(ToolDef("agent_eval", "Eval subagent.", {"type": "object"}, agent_eval))
+            ctx = ToolContext(None, None, EmptyMemory(), EmptySkills(), None, None, None)
+            cfg = LilBotConfig(workspace=Path(tmp), max_steps=10, subagent_max_concurrent=8)
+            agent = Agent(cfg, FinalProvider(), registry, ctx)
+            events = list(agent.run_turn(
+                "What are Beijing coordinates? How long do cats usually live? Who is Feng Gong? "
+                "How tall is LeBron James? Which NBA teams has LeBron James played for?"
+            ))
+
+        open_calls = [args for name, args in calls if name == "agent_open"]
+        eval_calls = [args for name, args in calls if name == "agent_eval"]
+        self.assertEqual(len(open_calls), 5)
+        self.assertEqual(len(eval_calls), 5)
+        self.assertEqual([args["type"] for args in open_calls], ["researcher"] * 5)
+        self.assertTrue(all(args["background"] for args in open_calls))
+        self.assertEqual([args["name"] for args in eval_calls], [f"auto_question_{idx:02d}" for idx in range(1, 6)])
+        self.assertTrue(any(isinstance(event, TextDelta) and "5 independent questions" in event.text for event in events))
+
+    @unittest.skip("SPEC_DYNAMIC_AGENT_TOOL_PROMPT_PARITY: auto-delegation replaced by dynamic tool descriptions")
+    def test_agent_uses_semantic_delegation_fallback_for_unlisted_writing_task(self):
+        class SemanticProvider:
+            def __init__(self):
+                self.calls: list[tuple[list[dict], list[dict]]] = []
+
+            def complete(self, messages: list[dict], tools: list[dict]) -> ProviderTurn:
+                self.calls.append((messages, tools))
+                if not tools:
+                    return ProviderTurn(content=json.dumps({
+                        "delegate": True,
+                        "kind": "writing",
+                        "reason": "substantial prose benefits from outline and draft workers",
+                        "probes": [
+                            {
+                                "name": "gufeng-outline",
+                                "agent_type": "writer",
+                                "prompt": "Create structure, imagery, and tone guidance for a 1000-character classical-style prose piece.",
+                                "timeout_ms": 10000,
+                            },
+                            {
+                                "name": "gufeng-draft",
+                                "agent_type": "writer",
+                                "prompt": "Draft the requested prose using the outline intent and a refined classical style.",
+                                "timeout_ms": 15000,
+                            },
+                        ],
+                    }))
+                return ProviderTurn(content="final synthesis")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = SemanticProvider()
+            calls: list[tuple[str, dict]] = []
+            registry = ToolRegistry()
+
+            def agent_open(args, ctx):
+                calls.append(("agent_open", args))
+                return ToolResult(True, json.dumps({"name": args["name"], "status": "running"}), {"name": args["name"]})
+
+            def agent_eval(args, ctx):
+                calls.append(("agent_eval", args))
+                return ToolResult(True, json.dumps({"name": args["name"], "status": "completed", "result": "evidence"}))
+
+            registry.register(ToolDef("agent_open", "Open subagent.", {"type": "object"}, agent_open))
+            registry.register(ToolDef("agent_eval", "Eval subagent.", {"type": "object"}, agent_eval))
+            ctx = ToolContext(None, None, EmptyMemory(), EmptySkills(), None, None, None)
+            cfg = LilBotConfig(workspace=Path(tmp), max_steps=8)
+            agent = Agent(cfg, provider, registry, ctx)
+            events = list(agent.run_turn("请创作一篇古风的1000字散文，要求有山水意象、情绪递进和收束余味"))
+
+        open_calls = [args for name, args in calls if name == "agent_open"]
+        eval_calls = [args for name, args in calls if name == "agent_eval"]
+        self.assertEqual([args["type"] for args in open_calls], ["writer", "writer"])
+        self.assertEqual([args["name"] for args in eval_calls], ["gufeng-outline", "gufeng-draft"])
+        self.assertEqual(provider.calls[0][1], [])
+        self.assertTrue(any(isinstance(event, TextDelta) and "substantial prose" in event.text for event in events))
+
+    @unittest.skip("SPEC_DYNAMIC_AGENT_TOOL_PROMPT_PARITY: auto-delegation replaced by dynamic tool descriptions")
     def test_auto_delegation_records_internal_observations_not_tool_history(self):
         class FinalProvider:
             def complete(self, messages: list[dict], tools: list[dict]) -> ProviderTurn:

@@ -102,8 +102,14 @@ class ToolRegistry:
     def list(self) -> list[ToolDef]:
         return sorted(self._tools.values(), key=lambda tool: tool.name)
 
-    def schemas(self) -> list[dict[str, Any]]:
-        return [
+    def schemas(self, subagent_render_context: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        """Return tool schemas for the LLM provider.
+
+        When subagent_render_context is provided (from SubAgentManager.get_render_context()),
+        the agent_open and agent_eval descriptions are dynamically expanded with live agent type
+        listings and active subagent status — CodeWhale-style single source of truth.
+        """
+        schemas = [
             {
                 "name": tool.name,
                 "description": tool.description,
@@ -111,6 +117,34 @@ class ToolRegistry:
             }
             for tool in self.list()
         ]
+        if subagent_render_context is not None:
+            self._render_agent_descriptions(schemas, subagent_render_context)
+        return schemas
+
+    def _render_agent_descriptions(
+        self,
+        schemas: list[dict[str, Any]],
+        ctx: dict[str, Any],
+    ) -> None:
+        """Dynamically expand agent_open / agent_eval descriptions from live registry."""
+        try:
+            from ..subagents.render import render_agent_types, render_active_agents  # noqa: PLC0415
+        except ImportError:
+            return
+
+        agent_types = ctx.get("agent_types")
+        active_tasks = ctx.get("active_tasks")
+
+        for schema in schemas:
+            name = schema.get("name", "")
+            if name in ("agent_open", "Agent", "Task") and agent_types is not None:
+                base = schema["description"]
+                listing = render_agent_types(list(agent_types))
+                schema["description"] = f"{base}\n\n{listing}"
+            elif name == "agent_eval" and active_tasks is not None:
+                base = schema["description"]
+                listing = render_active_agents(list(active_tasks))
+                schema["description"] = f"{base}\n\n{listing}"
 
     def execute(self, name: str, arguments: dict[str, Any], ctx: ToolContext) -> tuple[ToolResult, int]:
         resolved_name = self.resolve(name) or name

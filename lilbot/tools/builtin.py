@@ -2820,6 +2820,33 @@ def _agent_list(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     return ToolResult(True, "\n".join(rows) if rows else "(no agent data)")
 
 
+def _plan_delegation(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    """Return the semantic delegation planning prompt for structured subagent planning.
+
+    CodeWhale-style: the tool provides evidence; the LLM makes the decision.
+    This returns the delegation planning system prompt so the LLM can use it
+    as a reference for structuring parallel agent_open calls. Most of the time
+    the LLM will read the dynamic agent_open description directly instead.
+    """
+    from ..core.delegation import SEMANTIC_DELEGATION_SYSTEM_PROMPT
+
+    task = str(args.get("task") or args.get("prompt") or "")
+    max_agents = max(1, int(args.get("max_agents", 4)))
+    agent_types = ctx.subagents.list_types() if ctx.subagents else []
+    type_list = "\n".join(
+        f"- {a.name}: {a.description}" for a in agent_types
+    ) or "- (no agent types available)"
+
+    return ToolResult(
+        True,
+        f"{SEMANTIC_DELEGATION_SYSTEM_PROMPT}\n\n"
+        f"Current task: {task}\n"
+        f"Max agents: {max_agents}\n\n"
+        f"Available agent types:\n{type_list}\n\n"
+        "Return a JSON delegation plan with: delegate, kind, reason, probes[].",
+    )
+
+
 def _agent_open(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     prompt = str(args.get("prompt") or args.get("message") or args.get("objective") or "")
     if not prompt:
@@ -3685,7 +3712,12 @@ def register_builtins(registry: ToolRegistry) -> None:
     registry.register(ToolDef("update_goal", "Update active goal status.", _schema({
         "status": _string("active, complete, or blocked."),
     }, ["status"]), _update_goal))
-    registry.register(ToolDef("agent_open", "Open a named CodeWhale-style subagent session.", _schema({
+    registry.register(ToolDef("plan_delegation", "Return a structured delegation planning prompt. Use when unsure how to split work across subagents — this returns the planning template and available agent types. For direct subagent launch, use agent_open after reading its dynamic type listing.", _schema({
+        "task": _string("The parent task description to plan delegation for."),
+        "prompt": _string("Alias for task."),
+        "max_agents": _integer("Maximum agents to plan for.", 4),
+    }, ["task"]), _plan_delegation))
+    registry.register(ToolDef("agent_open", "Open a named child sub-agent session for focused background work. Returns the session name, status, agent_id, and transcript metadata. Use agent_eval to fetch or wait on the session, and agent_close to cancel/close it. Open multiple sessions in one turn when tasks can run in parallel — this is the DEFAULT mode for any non-trivial work. Sub-agent results are self-reports; re-verify claimed file edits, commands, or tests before presenting them as facts.", _schema({
         "name": _string("Session name."),
         "prompt": _string("Initial task."),
         "type": _string("general/explore/researcher/plan/writer/critic/review/implementer/verifier/tool_agent/custom."),
@@ -3699,7 +3731,7 @@ def register_builtins(registry: ToolRegistry) -> None:
         "cleanup_worktree": _bool("Remove managed subagent worktree after completion.", True),
         "worktree_branch": _string("Optional branch name for worktree isolation."),
     }, ["prompt"]), _agent_open))
-    registry.register(ToolDef("Agent", "Launch a Claude-style subagent.", _schema({
+    registry.register(ToolDef("Agent", "Launch a sub-agent for independent parallel work. Same as agent_open — use for any task that benefits from background execution. Open multiple agents in one turn when tasks are independent. Sub-agent results are self-reports; re-verify claimed side effects.", _schema({
         "description": _string("Short task description."),
         "prompt": _string("Task for the agent to perform."),
         "subagent_type": _string("Specialized agent type."),
@@ -3712,7 +3744,7 @@ def register_builtins(registry: ToolRegistry) -> None:
         "cleanup_worktree": _bool("Remove managed subagent worktree after completion.", True),
         "worktree_branch": _string("Optional branch name for worktree isolation."),
     }, ["prompt"]), _agent_open))
-    registry.register(ToolDef("Task", "Legacy Claude-style alias for Agent.", _schema({
+    registry.register(ToolDef("Task", "Legacy Claude-style alias for Agent. Use for autonomous specialized subagent work and parallel independent tasks.", _schema({
         "description": _string("Short task description."),
         "prompt": _string("Task for the agent to perform."),
         "subagent_type": _string("Specialized agent type."),
@@ -3736,7 +3768,7 @@ def register_builtins(registry: ToolRegistry) -> None:
         "cleanup_worktree": _bool("Remove managed subagent worktree after completion.", True),
         "worktree_branch": _string("Optional branch name for worktree isolation."),
     }, ["prompt"]), _tool_agent))
-    registry.register(ToolDef("agent_eval", "Fetch, wait on, or message a subagent session.", _schema({
+    registry.register(ToolDef("agent_eval", "Fetch, wait on, or message a sub-agent session. Use block=true to wait for completion before collecting results. The description above shows currently active sub-agents and their status.", _schema({
         "name": _string("Session name."),
         "agent_id": _string("Agent id."),
         "message": _string("Optional follow-up."),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from prompt_toolkit.mouse_events import MouseButton, MouseEventType
 from prompt_toolkit.widgets import TextArea
@@ -16,6 +17,7 @@ from lilbot.tui.dashboard import (
     _highlight_trace_line,
     _summarize_interim_text,
     _summarize_tool_output,
+    _windows_clipboard_payload,
     DashboardUI,
 )
 
@@ -80,6 +82,27 @@ class DashboardTraceTests(unittest.TestCase):
         self.assertGreaterEqual(max(len(row) for row in LILBOT_AGENT_LOGO_ROWS), 86)
         self.assertEqual(len(LILBOT_AGENT_LOGO_COMPACT_ROWS), 3)
         self.assertLessEqual(len(_clip_line(LILBOT_AGENT_LOGO_ROWS[0], 30)), 30)
+
+    def test_windows_clipboard_payload_preserves_chinese_as_utf16(self):
+        text = "中文 Trace: 工具调用完成"
+
+        payload = _windows_clipboard_payload(text)
+
+        self.assertEqual(payload, text.encode("utf-16-le") + b"\x00\x00")
+
+    def test_windows_clipboard_write_uses_unicode_api_not_clip_exe(self):
+        ui = object.__new__(DashboardUI)
+
+        with (
+            patch("lilbot.tui.dashboard.os.name", "nt"),
+            patch("lilbot.tui.dashboard._write_windows_unicode_clipboard", return_value=True) as write_unicode,
+            patch("lilbot.tui.dashboard.subprocess.run") as run,
+        ):
+            ok = ui._write_clipboard("中文 Trace")
+
+        self.assertTrue(ok)
+        write_unicode.assert_called_once_with("中文 Trace")
+        run.assert_not_called()
 
     def test_markdown_tables_render_as_aligned_box_tables(self):
         source = "\n".join(
