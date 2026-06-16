@@ -1,13 +1,8 @@
-"""
-Dynamic agent-type and active-task renderers for tool description parity.
+"""Render live subagent metadata into tool descriptions.
 
-CodeWhale-style: compact, capability-forward, single source of truth.
-Called by ToolRegistry.schemas() at query time so the LLM always sees
-the current set of agent types and running tasks.
-
-The system prompt provides strategy (WHEN to use subagents); this module
-renders WHAT is available — with concrete "use for" hints per type to
-make the LLM's delegation decision immediate and actionable.
+This mirrors the CodeWhale/Claude Code pattern: the parent model sees the
+available agent types, when to use them, and their tool limits directly in the
+Agent tool description. The runtime still enforces the limits.
 """
 
 from __future__ import annotations
@@ -18,91 +13,84 @@ if TYPE_CHECKING:
     from .manager import AgentDefinition, SubAgentTask
 
 
-def _yn(value: bool) -> str:
-    return "yes" if value else "no"
-
-
-def _summarize_tools(agent: "AgentDefinition") -> str:
-    """Compact tool summary: category counts, not raw tool names."""
-    if not agent.allowed_tools and not agent.disallowed_tools:
-        return "none"
-    parts: list[str] = []
-    if agent.allowed_tools:
-        parts.append(f"{len(agent.allowed_tools)} tools")
-    if agent.disallowed_tools:
-        parts.append(f"{len(agent.disallowed_tools)} blocked")
-    return ", ".join(parts)
-
-
-def _terminal_status(status: str) -> bool:
-    return status in {"completed", "done", "failed", "cancelled", "error"}
-
-
-# ── When-to-use hints per agent type ──────────────────────────────────────
-# These map agent type names to concrete triggers that help the LLM decide
-# "should I delegate this?" instantly, without reasoning overhead.
-_USE_HINTS: dict[str, str] = {
-    "explore": "codebase mapping, multi-file reads, architecture exploration, grep tracing",
-    "researcher": "web research, fact-finding, comparisons, recommendations, current events, travel planning",
-    "plan": "decomposition, milestones, tradeoff analysis, roadmap",
-    "writer": "essays, reports, drafts, rewrites, style adaptation, prose",
-    "critic": "risk review, assumption checking, quality critique, gap analysis",
-    "review": "code review, bug hunting, regression checks, security audit",
-    "implementer": "code changes, bug fixes, feature implementation, refactoring",
-    "verifier": "test running, validation, pass/fail reporting",
-    "general": "multi-step tasks needing writes + reads + web + shell",
-    "tool_agent": "fast simple operations: OCR, single fetch, command probe",
-    "custom": "user-defined agent with explicit tool list",
+_WHEN_TO_USE: dict[str, str] = {
+    "general": "Use for flexible multi-step tasks that may need reads, writes, web research, and validation.",
+    "explore": "Use for codebase mapping, multi-file reads, architecture exploration, and grep/LSP tracing.",
+    "researcher": "Use for web research, public facts, comparisons, recommendations, current facts, and travel planning.",
+    "plan": "Use for decomposition, milestones, tradeoffs, roadmaps, and implementation strategy.",
+    "writer": "Use for essays, reports, drafts, rewrites, style adaptation, prose, and copy.",
+    "critic": "Use for assumption checks, risk review, quality critique, and gap analysis.",
+    "review": "Use for code review, bug hunting, regression checks, and security-oriented audit.",
+    "implementer": "Use for focused code changes, bug fixes, feature implementation, and refactoring.",
+    "verifier": "Use for tests, diagnostics, validation, and pass/fail evidence without fixing failures.",
+    "tool_agent": "Use for fast bounded tool probes such as a single fetch, search, OCR, or command check.",
+    "custom": "Use for caller-defined roles with explicit allowed_tools.",
 }
 
 
-def _use_hint(name: str, description: str) -> str:
-    """Return a one-line 'use for' hint, falling back to description prefix."""
-    return _USE_HINTS.get(name, description.split(".")[0].strip())
+def _when_to_use(agent: "AgentDefinition") -> str:
+    explicit = getattr(agent, "when_to_use", "") or ""
+    return explicit.strip() or _WHEN_TO_USE.get(agent.name, agent.description.strip())
+
+
+def _tool_name(tool_spec: str) -> str:
+    text = str(tool_spec).strip()
+    for marker in ("(", "["):
+        if marker in text:
+            return text.split(marker, 1)[0].strip()
+    return text
+
+
+def _tools_description(agent: "AgentDefinition") -> str:
+    allowed = [_tool_name(tool) for tool in getattr(agent, "allowed_tools", []) if _tool_name(tool)]
+    blocked = [_tool_name(tool) for tool in getattr(agent, "disallowed_tools", []) if _tool_name(tool)]
+    if allowed:
+        if blocked:
+            blocked_set = set(blocked)
+            effective = [tool for tool in allowed if tool not in blocked_set]
+            if not effective:
+                return "None"
+            return f"{', '.join(effective)} ({len(effective)} tools, {len(blocked)} blocked)"
+        return f"{', '.join(allowed)} ({len(allowed)} tools)"
+    if blocked:
+        return "None by default; runtime also blocks " + ", ".join(blocked)
+    return "None by default"
+
+
+def format_agent_line(agent: "AgentDefinition") -> str:
+    writes = "yes" if getattr(agent, "writes", False) else "no"
+    shell = getattr(agent, "shell", "minimal")
+    return (
+        f"- **{agent.name}**: {agent.description} "
+        f"When to use: {_when_to_use(agent)} "
+        f"(Tools: {_tools_description(agent)}) "
+        f"[writes={writes}, shell={shell}]"
+    )
 
 
 def render_agent_types(definitions: list["AgentDefinition"]) -> str:
-    """Render all registered agent types into an actionable listing.
-
-    Format (CodeWhale-style, with use-for triggers):
-        - name: description
-          Use for: concrete triggers.
-          [writes=yes|no, shell=mode, N tools]
-    """
     if not definitions:
         return "No agent types available."
-
-    lines = ["Available agent types — use with agent_open in parallel:"]
-    for agent in definitions:
-        cap = f"writes={_yn(agent.writes)}, shell={agent.shell}"
-        tools = _summarize_tools(agent)
-        if tools != "none":
-            cap += f", {tools}"
-        hint = _use_hint(agent.name, agent.description)
-        lines.append(f"- **{agent.name}**: {agent.description}")
-        lines.append(f"  Use for: {hint}. [{cap}]")
-    # Empty line before active agents section for readability
-    lines.append("")
+    lines = [
+        "Available agent types and the tools they have access to:",
+        *[format_agent_line(agent) for agent in definitions],
+        "",
+        "Usage notes:",
+        "- Launch multiple agents in one turn when tasks are independent.",
+        "- Before launching a duplicate agent, inspect active subagents in agent_eval and send a follow-up there if it already covers the work.",
+        "- Give each agent a narrow prompt; the parent remains responsible for final synthesis.",
+        "- Use agent_eval to collect results; do not guess results before an agent completes.",
+    ]
     return "\n".join(lines)
 
 
 def render_active_agents(tasks: list["SubAgentTask"]) -> str:
-    """Render currently active (non-terminal) subagent tasks.
-
-    Format:
-        Active subagents — collect results with agent_eval:
-        - name [type] status: prompt-truncated-to-80-chars
-        No active subagents.  (when empty)
-    """
-    active = [t for t in tasks if not _terminal_status(t.status)]
+    active = [task for task in tasks if task.status not in {"completed", "done", "failed", "cancelled", "error"}]
     if not active:
         return "No active subagents."
-
-    lines = ["Active subagents — collect results with agent_eval:"]
+    lines = ["Active subagents - collect results with agent_eval:"]
     for task in active:
-        prompt_preview = " ".join(str(task.prompt).split())[:80]
         name = task.name or task.id
-        lines.append(
-            f"- {name} [{task.agent_type}] {task.status}: {prompt_preview}"
-        )
+        prompt_preview = " ".join(str(task.prompt).split())[:100]
+        lines.append(f"- {name} [{task.agent_type}] {task.status}: {prompt_preview}")
     return "\n".join(lines)

@@ -232,6 +232,52 @@ class DashboardTraceTests(unittest.TestCase):
         self.assertIn("transcript:", text)
         self.assertIn("worktree: active branch lilbot/sub_1", text)
 
+    def test_agent_panel_renders_expanded_tool_and_skill_inventory(self):
+        ui = object.__new__(DashboardUI)
+        ui._width = lambda: 340
+        tools = [
+            "list_dir",
+            "read_file",
+            "write_file",
+            "git_status",
+            "git_diff",
+            "lsp_symbols",
+            "lsp_definition",
+            "web_search",
+            "fetch_url",
+            "bash",
+            "memory_save",
+            "skill_list",
+            "agent_open",
+            "Agent",
+            "update_plan",
+            "task_create",
+            "EnterWorktree",
+            "mcp_call",
+            "automation_create",
+            "rlm_open",
+            "image_ocr",
+            "github_comment",
+        ]
+        skills = [SimpleNamespace(name=f"skill_{idx:02d}") for idx in range(12)]
+        ui.registry = SimpleNamespace(list=lambda: [SimpleNamespace(name=name) for name in tools])
+        ui.ctx = SimpleNamespace(
+            config=SimpleNamespace(model="deepseek-v4-flash", provider="deepseek", workspace="F:/project"),
+            permissions=SimpleNamespace(mode="ask"),
+            skills=SimpleNamespace(list=lambda: skills),
+        )
+
+        plain = "".join(text for _style, text in ui._agent_panel())
+
+        self.assertIn("git: git_status, git_diff", plain)
+        self.assertIn("lsp: lsp_symbols, lsp_definition", plain)
+        self.assertIn("plan: update_plan", plain)
+        self.assertIn("worktree: EnterWorktree", plain)
+        self.assertIn("automation: automation_create", plain)
+        self.assertIn("media: image_ocr", plain)
+        self.assertIn("github: github_comment", plain)
+        self.assertIn("skill_11", plain)
+
     def test_custom_scrollbar_uses_wide_track_and_thumb_glyphs(self):
         ui = object.__new__(DashboardUI)
         ui.trace = TextArea(text="\n".join(f"line {idx}" for idx in range(30)), read_only=True)
