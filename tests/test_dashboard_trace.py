@@ -6,9 +6,11 @@ from types import SimpleNamespace
 from prompt_toolkit.mouse_events import MouseButton, MouseEventType
 from prompt_toolkit.widgets import TextArea
 
+from lilbot.core.events import ToolFinished, ToolStarted
 from lilbot.tui.dashboard import (
     LILBOT_AGENT_LOGO_COMPACT_ROWS,
     LILBOT_AGENT_LOGO_ROWS,
+    WELCOME_TRACE_ROWS,
     _clip_line,
     _format_markdown_tables,
     _highlight_trace_line,
@@ -20,6 +22,9 @@ from lilbot.tui.dashboard import (
 
 class DashboardTraceTests(unittest.TestCase):
     def test_trace_highlights_markdown_and_tool_cards(self):
+        welcome = _highlight_trace_line(WELCOME_TRACE_ROWS[0])
+        self.assertEqual(welcome[0][0], "class:logo.hot")
+
         heading = _highlight_trace_line("### Harness Engineering")
         self.assertEqual(heading[0][0], "class:trace.heading")
 
@@ -31,6 +36,21 @@ class DashboardTraceTests(unittest.TestCase):
         tool = _highlight_trace_line("╭─ ▷ run 120000-01  read_file")
         self.assertEqual(tool[0][0], "class:trace.tool.rail")
         self.assertIn("class:trace.tool", [style for style, _text in tool])
+
+    def test_trace_still_renders_tool_start_and_finish_events(self):
+        ui = object.__new__(DashboardUI)
+        ui.lines = []
+        ui.work_items = []
+        ui.tool_count = 0
+        ui._refresh = lambda: None
+
+        ui.event(ToolStarted("read_file", {"path": "README.md"}))
+        ui.event(ToolFinished("read_file", True, "README contents", 12, {}))
+
+        text = "\n".join(ui.lines)
+        self.assertIn("read_file", text)
+        self.assertIn("args", text)
+        self.assertIn("done read_file 12ms", text)
 
     def test_tool_output_summary_omits_noisy_git_paths(self):
         output = "\n".join(
@@ -150,6 +170,44 @@ class DashboardTraceTests(unittest.TestCase):
 
         self.assertEqual(ui.trace.window.vertical_scroll, 2)
         self.assertEqual(ui.trace.buffer.cursor_position, expected_cursor)
+
+    def test_work_panel_renders_structured_subagent_status(self):
+        ui = object.__new__(DashboardUI)
+        ui.work_items = ["state: running tool", "tool: read_file"]
+        ui.registry = SimpleNamespace(list=lambda: [1, 2, 3])
+        ui.ctx = SimpleNamespace(
+            config=SimpleNamespace(model="deepseek-v4-flash", provider="deepseek"),
+            permissions=SimpleNamespace(mode="ask"),
+            subagents=SimpleNamespace(
+                runtime_status=lambda: {
+                    "max_concurrent": 8,
+                    "running": 2,
+                    "queued": 1,
+                    "total": 3,
+                    "recent": [
+                        {
+                            "name": "scan",
+                            "status": "running",
+                            "agent_type": "explore",
+                            "duration_ms": 120,
+                            "progress": {"last_event": "tool_finished", "events": 7, "resume_count": 1},
+                            "transcript_handle": ".lilbot/subagent-transcripts/sub_1.jsonl",
+                            "worktree": {"status": "active", "branch": "lilbot/sub_1", "path": ".lilbot/worktrees/sub_1"},
+                        }
+                    ],
+                }
+            ),
+        )
+
+        text = ui._work_text()
+
+        self.assertIn("### Runtime", text)
+        self.assertIn("### Active tool", text)
+        self.assertIn("### Subagents", text)
+        self.assertIn("concurrency: 2/8 running | queued 1 | total 3", text)
+        self.assertIn("progress: tool_finished | events 7 | resumes 1", text)
+        self.assertIn("transcript:", text)
+        self.assertIn("worktree: active branch lilbot/sub_1", text)
 
     def test_custom_scrollbar_uses_wide_track_and_thumb_glyphs(self):
         ui = object.__new__(DashboardUI)

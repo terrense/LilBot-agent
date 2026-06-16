@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import tempfile
+import threading
+import time
 import unittest
 import os
 import sys
@@ -9,7 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from lilbot.memory import MemoryStore
-from lilbot.sandbox import PermissionManager, Sandbox, SandboxError
+from lilbot.sandbox import PermissionManager, Sandbox, SandboxError, analyze_powershell_command
 from lilbot.sandbox.workspace import _decode_process_output
 from lilbot.skills import SkillRegistry
 from lilbot.tools import ToolContext, ToolDef, ToolRegistry, ToolResult, register_builtins
@@ -41,6 +45,75 @@ class CoreTests(unittest.TestCase):
             result = sandbox.run(command)
         self.assertTrue(result.ok)
         self.assertNotIn("UnicodeDecodeError", result.output)
+
+    def test_powershell_safety_classifies_shell_risks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outside = analyze_powershell_command(r"Remove-Item -LiteralPath ..\outside -Recurse -Force", root)
+            inside = analyze_powershell_command(r"Remove-Item -LiteralPath .\build -Recurse -Force", root)
+            encoded = analyze_powershell_command("powershell -EncodedCommand AAAA", root)
+            composed = analyze_powershell_command("Write-Output ok; Write-Output done > out.txt", root)
+
+        self.assertTrue(outside["blocked"])
+        self.assertEqual(outside["risk_level"], "critical")
+        self.assertTrue(any(finding["rule"] == "path_outside_workspace" for finding in outside["findings"]))
+        self.assertFalse(inside["blocked"])
+        self.assertEqual(inside["risk_level"], "high")
+        self.assertTrue(encoded["blocked"])
+        self.assertTrue(any(finding["rule"] == "encoded_command" for finding in encoded["findings"]))
+        self.assertFalse(composed["blocked"])
+        self.assertTrue(any(finding["rule"] == "command_separator" for finding in composed["findings"]))
+        self.assertTrue(any(finding["rule"] == "redirection" for finding in composed["findings"]))
+
+    def test_powershell_safety_blocks_unsafe_shell_tool_before_execution(self):
+        if os.name != "nt":
+            self.skipTest("PowerShell safety integration is Windows-specific.")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / ".lilbot"
+            registry = ToolRegistry()
+            register_builtins(registry)
+            ctx = ToolContext(
+                Sandbox(root),
+                PermissionManager(state, "accept-all", interactive=False),
+                MemoryStore(state),
+                SkillRegistry(state),
+                SimpleNamespace(),
+                SimpleNamespace(),
+                SimpleNamespace(state_dir=state),
+            )
+
+            result, _ = registry.execute("bash", {"command": r"Remove-Item -LiteralPath ..\outside -Recurse -Force"}, ctx)
+
+        self.assertFalse(result.ok)
+        self.assertTrue(result.metadata["powershell_safety"]["blocked"])
+        self.assertEqual(result.metadata["powershell_safety"]["risk_level"], "critical")
+
+    def test_powershell_safety_summary_reaches_permission_prompt(self):
+        if os.name != "nt":
+            self.skipTest("PowerShell safety integration is Windows-specific.")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / ".lilbot"
+            registry = ToolRegistry()
+            register_builtins(registry)
+            ctx = ToolContext(
+                Sandbox(root),
+                PermissionManager(state, "ask", prompt=lambda _: "n", interactive=True),
+                MemoryStore(state),
+                SkillRegistry(state),
+                SimpleNamespace(),
+                SimpleNamespace(),
+                SimpleNamespace(state_dir=state),
+            )
+            stream = io.StringIO()
+
+            with contextlib.redirect_stdout(stream):
+                result, _ = registry.execute("bash", {"command": "Write-Output ok; Write-Output done"}, ctx)
+
+        self.assertFalse(result.ok)
+        self.assertIn("PowerShell safety", stream.getvalue())
+        self.assertEqual(result.metadata["powershell_safety"]["risk_level"], "medium")
 
     def test_bundled_skills_load(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -125,6 +198,14 @@ secret
         self.assertIn("EnterWorktree", names)
         self.assertIn("ExitWorktree", names)
         self.assertIn("git_status", names)
+        self.assertIn("lsp_symbols", names)
+        self.assertIn("lsp_definition", names)
+        self.assertIn("lsp_workspace_symbols", names)
+        self.assertIn("lsp_references", names)
+        self.assertIn("lsp_diagnostics", names)
+        self.assertIn("lsp_rename_preview", names)
+        self.assertIn("agent_transcript", names)
+        self.assertIn("WorktreeMergeBack", names)
 
     def test_plan_mode_lifecycle_persists_approval_state(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -439,6 +520,7 @@ secret
             manager = SubAgentManager(lambda messages, tools: ProviderTurn(content="done"), state / "agents")
             task = manager.open("writer", "draft", background=False)
             projection = manager.projection(task)
+            transcript_data = manager.transcript(task.id, after=0, limit=2)
 
             handle = projection["transcript_handle"]
             self.assertIsNotNone(handle)
@@ -447,6 +529,127 @@ secret
         self.assertIn('"event": "queued"', transcript)
         self.assertIn('"event": "provider_turn"', transcript)
         self.assertIn('"event": "completed"', transcript)
+        self.assertGreaterEqual(projection["progress"]["events"], 3)
+        self.assertEqual(projection["progress"]["last_event"], "completed")
+        self.assertIsNotNone(transcript_data)
+        self.assertEqual(len(transcript_data["events"]), 2)
+        self.assertTrue(transcript_data["cursor"] >= 2)
+
+    def test_subagent_concurrency_limit_queues_extra_background_tasks(self):
+        from lilbot.core.events import ProviderTurn
+        from lilbot.subagents import SubAgentManager
+
+        release = threading.Event()
+        entered = 0
+        entered_lock = threading.Lock()
+
+        def provider(messages, tools):
+            nonlocal entered
+            with entered_lock:
+                entered += 1
+            release.wait(2)
+            return ProviderTurn(content="done")
+
+        manager = SubAgentManager(provider, max_concurrent=2)
+        tasks = [manager.open("writer", f"task {idx}", background=True) for idx in range(4)]
+        deadline = time.time() + 2
+        while time.time() < deadline:
+            status = manager.runtime_status()
+            if status["running"] == 2 and status["queued"] == 2:
+                break
+            time.sleep(0.02)
+        status = manager.runtime_status()
+
+        self.assertEqual(status["max_concurrent"], 2)
+        self.assertEqual(status["running"], 2)
+        self.assertEqual(status["queued"], 2)
+        self.assertEqual(entered, 2)
+
+        release.set()
+        deadline = time.time() + 3
+        while time.time() < deadline and any(not task.terminal for task in tasks):
+            time.sleep(0.02)
+        self.assertTrue(all(task.status == "completed" for task in tasks))
+
+    def test_subagent_persisted_running_tasks_resume_after_restart_when_configured(self):
+        from lilbot.core.events import ProviderTurn
+        from lilbot.subagents import SubAgentManager
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / ".lilbot"
+            release = threading.Event()
+            resumed_called = threading.Event()
+
+            def provider(messages, tools):
+                release.wait(2)
+                return ProviderTurn(content="done")
+
+            manager = SubAgentManager(provider, state / "agents", max_concurrent=1)
+            task = manager.open("writer", "long task", background=True)
+            deadline = time.time() + 2
+            while time.time() < deadline and task.status != "running":
+                time.sleep(0.02)
+
+            def resumed_provider(messages, tools):
+                resumed_called.set()
+                return ProviderTurn(content="resumed")
+
+            recovered_manager = SubAgentManager(resumed_provider, state / "agents")
+            recovered = recovered_manager.get(task.id)
+            self.assertIsNotNone(recovered)
+            self.assertEqual(recovered.status, "queued")
+            self.assertTrue(recovered.recovered)
+
+            recovered_manager.configure_tools(SimpleNamespace(schemas=lambda: []), SimpleNamespace())
+            deadline = time.time() + 3
+            while time.time() < deadline and recovered.status != "completed":
+                time.sleep(0.02)
+            release.set()
+            deadline = time.time() + 3
+            while time.time() < deadline and not task.terminal:
+                time.sleep(0.02)
+
+        self.assertIsNotNone(recovered)
+        self.assertEqual(recovered.status, "completed")
+        self.assertTrue(recovered.recovered)
+        self.assertTrue(resumed_called.is_set())
+        self.assertIn("SUMMARY: resumed", recovered.result)
+
+    def test_subagent_worktree_isolation_reports_unsupported_outside_git_repo(self):
+        from lilbot.core.events import ProviderTurn
+        from lilbot.subagents import SubAgentManager
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / ".lilbot"
+            registry = ToolRegistry()
+            register_builtins(registry)
+            provider_called = False
+
+            def provider(messages, tools):
+                nonlocal provider_called
+                provider_called = True
+                return ProviderTurn(content="should not run")
+
+            manager = SubAgentManager(provider, state / "agents")
+            ctx = ToolContext(
+                Sandbox(root),
+                PermissionManager(state, "accept-all", interactive=False),
+                MemoryStore(state),
+                SkillRegistry(state),
+                manager,
+                SimpleNamespace(),
+                SimpleNamespace(state_dir=state, workspace=root),
+            )
+            manager.configure_tools(registry, ctx)
+            task = manager.open("writer", "isolated", background=False, isolation="worktree")
+            projection = manager.projection(task)
+
+        self.assertFalse(provider_called)
+        self.assertEqual(task.status, "failed")
+        self.assertEqual(projection["worktree"]["status"], "unsupported")
+        self.assertIn("workspace is not a git repository", task.error)
 
     def test_forked_skill_executes_in_subagent_with_skill_allowed_tools(self):
         from lilbot.core.events import ProviderTurn

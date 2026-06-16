@@ -1,18 +1,25 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 from uuid import uuid4
 
 from ..core.events import ProviderTurn
+from ..sandbox import Sandbox
+
+if TYPE_CHECKING:
+    from ..tools.registry import ToolContext
 
 
 ProviderCallable = Callable[[list[dict], list[dict]], ProviderTurn]
 SUBAGENT_MAX_TOOL_STEPS = 6
+DEFAULT_SUBAGENT_MAX_CONCURRENT = 8
 
 READ_ONLY_CODE_TOOLS = [
     "project_map",
@@ -29,6 +36,12 @@ READ_ONLY_CODE_TOOLS = [
     "git_log",
     "git_show",
     "git_blame",
+    "lsp_symbols",
+    "lsp_definition",
+    "lsp_workspace_symbols",
+    "lsp_references",
+    "lsp_diagnostics",
+    "lsp_rename_preview",
 ]
 DIAGNOSTIC_TOOLS = ["diagnostics", "run_tests", "task_gate_run"]
 WRITE_TOOLS = ["write_file", "edit_file", "apply_patch"]
@@ -146,10 +159,22 @@ class SubAgentTask:
     fork_context: bool = False
     gate_results: list[dict[str, Any]] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
+    started_at: float | None = None
     finished_at: float | None = None
     messages: list[str] = field(default_factory=list)
     transcript_handle: str = ""
     transcript_path: str = ""
+    recovered: bool = False
+    worktree_isolation: str | None = None
+    worktree_path: str = ""
+    worktree_branch: str = ""
+    worktree_created: bool = False
+    worktree_status: str = "none"
+    worktree_error: str = ""
+    cleanup_worktree: bool = True
+    progress_event_count: int = 0
+    last_event: str = ""
+    resume_count: int = 0
 
     @property
     def terminal(self) -> bool:
@@ -342,6 +367,7 @@ class SubAgentManager:
         provider: ProviderCallable,
         agents_dir: Path | None = None,
         transcripts_dir: Path | None = None,
+        max_concurrent: int | None = None,
     ):
         self.provider = provider
         self.agents_dir = agents_dir
@@ -349,16 +375,22 @@ class SubAgentManager:
         self.transcripts_dir = transcripts_dir or (
             self.state_dir / "subagent-transcripts" if self.state_dir is not None else None
         )
+        self.tasks_path = self.state_dir / "subagent-tasks.json" if self.state_dir is not None else None
+        self.max_concurrent = max(1, int(max_concurrent or _env_int("LILBOT_SUBAGENT_MAX_CONCURRENT", DEFAULT_SUBAGENT_MAX_CONCURRENT)))
+        self._semaphore = threading.BoundedSemaphore(self.max_concurrent)
+        self._resume_started: set[str] = set()
         self.registry: Any | None = None
         self.ctx: Any | None = None
         self.definitions = {d.name: d for d in DEFAULT_AGENT_TYPES}
         self.tasks: dict[str, SubAgentTask] = {}
         self._lock = threading.RLock()
         self.reload_custom_agents()
+        self._load_persisted_tasks()
 
     def configure_tools(self, registry: Any, ctx: Any) -> None:
         self.registry = registry
         self.ctx = ctx
+        self._resume_recovered_tasks()
 
     def list_types(self) -> list[AgentDefinition]:
         return sorted(self.definitions.values(), key=lambda item: item.name)
@@ -430,9 +462,13 @@ class SubAgentManager:
         allowed_tools: list[str] | None = None,
         model: str | None = None,
         fork_context: bool = False,
+        isolation: str | None = None,
+        cleanup_worktree: bool = True,
+        worktree_branch: str | None = None,
     ) -> SubAgentTask:
         canonical = self.resolve_type(agent_type)
         definition = self.definitions[canonical]
+        isolation = _normalize_isolation(isolation)
         effective_allowed_tools = _dedupe_tools(definition.allowed_tools if allowed_tools is None else allowed_tools)
         creation_gates = self._validate_creation_gates(
             canonical,
@@ -453,9 +489,14 @@ class SubAgentManager:
             model=model,
             fork_context=fork_context,
             gate_results=creation_gates,
+            worktree_isolation=isolation,
+            worktree_branch=str(worktree_branch or "").strip(),
+            cleanup_worktree=cleanup_worktree,
+            worktree_status="requested" if isolation == "worktree" else "none",
         )
         with self._lock:
             self.tasks[task.id] = task
+            self._persist_tasks_locked()
         self._append_transcript(task, "queued", {"agent_type": canonical, "name": task.name, "prompt": prompt})
         if background:
             thread = threading.Thread(target=self._run, args=(task,), daemon=True)
@@ -480,6 +521,7 @@ class SubAgentManager:
                 task.messages.append(message)
                 if task.status == "queued":
                     task.prompt = f"{task.prompt}\n\nFollow-up:\n{message}"
+                self._persist_tasks_locked()
             self._append_transcript(task, "follow_up", {"message": message})
         if block:
             deadline = time.time() + max(0.1, timeout)
@@ -500,9 +542,42 @@ class SubAgentManager:
                 task.error = "Cancelled by parent."
                 task.finished_at = time.time()
                 cancelled = True
+                self._persist_tasks_locked()
         if cancelled:
             self._append_transcript(task, "cancelled", {"error": task.error})
         return task
+
+    def transcript(self, task_ref: str, *, after: int = 0, limit: int = 100) -> dict[str, Any] | None:
+        task = self.get(task_ref)
+        if not task:
+            return None
+        path = Path(task.transcript_path) if task.transcript_path else None
+        events: list[dict[str, Any]] = []
+        total = 0
+        if path and path.exists():
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                lines = []
+            total = len(lines)
+            start = max(0, min(int(after), total))
+            stop = min(total, start + max(1, min(int(limit), 500)))
+            for index, raw in enumerate(lines[start:stop], start):
+                try:
+                    record = json.loads(raw)
+                except json.JSONDecodeError:
+                    record = {"event": "transcript_parse_error", "raw": raw}
+                record["cursor"] = index + 1
+                events.append(record)
+        next_cursor = events[-1]["cursor"] if events else max(0, min(int(after), total))
+        return {
+            "task": self.projection(task),
+            "handle": task.transcript_handle or None,
+            "events": events,
+            "cursor": next_cursor,
+            "total_events": total,
+            "has_more": next_cursor < total,
+        }
 
     def projection(self, task: SubAgentTask) -> dict[str, object]:
         duration_ms = int(((task.finished_at or time.time()) - task.created_at) * 1000)
@@ -518,6 +593,26 @@ class SubAgentManager:
             "fork_context": task.fork_context,
             "gate_results": task.gate_results,
             "transcript_handle": task.transcript_handle or None,
+            "recovered": task.recovered,
+            "concurrency": {
+                "max": self.max_concurrent,
+                "running": self._count_status("running"),
+                "queued": self._count_status("queued"),
+            },
+            "worktree": {
+                "isolation": task.worktree_isolation,
+                "status": task.worktree_status,
+                "path": task.worktree_path or None,
+                "branch": task.worktree_branch or None,
+                "created": task.worktree_created,
+                "cleanup": task.cleanup_worktree,
+                "error": task.worktree_error or None,
+            },
+            "progress": {
+                "events": task.progress_event_count,
+                "last_event": task.last_event or None,
+                "resume_count": task.resume_count,
+            },
             "duration_ms": duration_ms,
             "result": task.result if task.terminal else None,
             "error": task.error or None,
@@ -525,10 +620,19 @@ class SubAgentManager:
 
     def _run(self, task: SubAgentTask) -> None:
         definition = self.definitions[task.agent_type]
+        self._append_transcript(task, "waiting_for_slot", {"max_concurrent": self.max_concurrent})
+        self._semaphore.acquire()
+        acquired = True
         with self._lock:
             if task.status == "cancelled":
+                self._persist_tasks_locked()
+                self._semaphore.release()
                 return
             task.status = "running"
+            task.started_at = time.time()
+            if task.recovered:
+                task.error = ""
+            self._persist_tasks_locked()
         self._append_transcript(task, "running", {"agent_type": task.agent_type})
         messages = [
             {"role": "system", "content": f"{definition.system_hint}\n\n{self._tool_policy_hint(definition, task)}\n\n{OUTPUT_CONTRACT}"},
@@ -536,6 +640,8 @@ class SubAgentManager:
         ]
         transcript: list[str] = []
         try:
+            if not self._prepare_worktree(task):
+                return
             content = ""
             tool_schemas = self._tool_schemas_for_task(definition, task)
             steps = 0
@@ -591,6 +697,7 @@ class SubAgentManager:
                 if task.status != "cancelled":
                     task.status = "completed"
                     completed = True
+                    self._persist_tasks_locked()
             if completed:
                 self._append_transcript(task, "completed", {"result": task.result})
         except Exception as exc:  # pragma: no cover - defensive boundary
@@ -600,11 +707,16 @@ class SubAgentManager:
                     task.error = str(exc)
                     task.status = "failed"
                     failed = True
+                    self._persist_tasks_locked()
             if failed:
                 self._append_transcript(task, "failed", {"error": str(exc)})
         finally:
+            self._cleanup_worktree(task)
             with self._lock:
                 task.finished_at = task.finished_at or time.time()
+                self._persist_tasks_locked()
+            if acquired:
+                self._semaphore.release()
 
     def _ensure_output_contract(self, content: str) -> str:
         if "SUMMARY:" in content and "BLOCKERS:" in content:
@@ -769,6 +881,109 @@ class SubAgentManager:
                 return True
         return False
 
+    def _prepare_worktree(self, task: SubAgentTask) -> bool:
+        if task.worktree_isolation != "worktree":
+            return True
+        if self.ctx is None:
+            return self._fail_worktree(task, "subagent runtime has no tool context")
+        base_sandbox = getattr(self.ctx, "sandbox", None)
+        if base_sandbox is None:
+            return self._fail_worktree(task, "subagent runtime has no sandbox")
+        if not shutil.which("git"):
+            return self._fail_worktree(task, "git is not installed or not on PATH", status="unsupported")
+        git_root = base_sandbox.run("git rev-parse --show-toplevel", 10)
+        if not git_root.ok:
+            return self._fail_worktree(task, "workspace is not a git repository", status="unsupported", output=git_root.output)
+        support = base_sandbox.run("git worktree list --porcelain", 10)
+        if not support.ok:
+            return self._fail_worktree(task, "git worktree is unavailable or failed", status="unsupported", output=support.output)
+
+        rel_path = f".lilbot/worktrees/{task.id}"
+        branch = task.worktree_branch or f"lilbot/{task.id}"
+        try:
+            target = base_sandbox.resolve(rel_path)
+        except Exception as exc:
+            return self._fail_worktree(task, str(exc))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        command = f"git worktree add -b {_quote_ps(branch)} {_quote_ps(str(target))} HEAD"
+        result = base_sandbox.run(command, 120)
+        if not result.ok:
+            return self._fail_worktree(task, "git worktree add failed", output=result.output)
+        with self._lock:
+            task.worktree_path = str(target.resolve())
+            task.worktree_branch = branch
+            task.worktree_created = True
+            task.worktree_status = "active"
+            task.worktree_error = ""
+            self._persist_tasks_locked()
+        self._append_transcript(task, "worktree_active", {"path": task.worktree_path, "branch": branch, "created": True})
+        return True
+
+    def _fail_worktree(self, task: SubAgentTask, reason: str, *, status: str = "error", output: str = "") -> bool:
+        with self._lock:
+            task.status = "failed"
+            task.error = f"Worktree isolation {status}: {reason}"
+            task.worktree_status = status
+            task.worktree_error = reason
+            task.result = self._ensure_output_contract(task.error + (f"\n{output}" if output else ""))
+            self._persist_tasks_locked()
+        self._append_transcript(task, "worktree_failed", {"status": status, "reason": reason, "output": output})
+        return False
+
+    def _cleanup_worktree(self, task: SubAgentTask) -> None:
+        if task.worktree_isolation != "worktree" or not task.cleanup_worktree:
+            return
+        if not task.worktree_created or not task.worktree_path or self.ctx is None:
+            return
+        path = Path(task.worktree_path)
+        try:
+            base_root = self.ctx.sandbox.root.resolve()
+            resolved = path.resolve()
+        except Exception:
+            return
+        expected_parent = base_root / ".lilbot" / "worktrees"
+        if expected_parent not in resolved.parents:
+            with self._lock:
+                task.worktree_status = "cleanup_refused"
+                task.worktree_error = "worktree cleanup path is outside .lilbot/worktrees"
+                self._persist_tasks_locked()
+            self._append_transcript(task, "worktree_cleanup_refused", {"path": str(resolved)})
+            return
+        result = self.ctx.sandbox.run(f"git worktree remove --force {_quote_ps(str(resolved))}", 120)
+        with self._lock:
+            task.worktree_status = "cleaned" if result.ok else "cleanup_error"
+            task.worktree_error = "" if result.ok else result.output
+            self._persist_tasks_locked()
+        self._append_transcript(
+            task,
+            "worktree_cleanup",
+            {"path": str(resolved), "ok": result.ok, "returncode": result.returncode, "output": result.output},
+        )
+
+    def _ctx_for_task(self, task: SubAgentTask) -> "ToolContext":
+        if self.ctx is None:
+            raise ValueError("Subagent tool context is not configured.")
+        if task.worktree_status != "active" or not task.worktree_path:
+            return self.ctx
+        worktree_root = Path(task.worktree_path)
+        config = getattr(self.ctx, "config", None)
+        try:
+            task_config = replace(config, workspace=worktree_root)
+        except Exception:
+            try:
+                task_config = type(config)(**vars(config))
+                task_config.workspace = worktree_root
+            except Exception:
+                task_config = config
+        try:
+            return replace(self.ctx, sandbox=Sandbox(worktree_root), config=task_config)
+        except Exception:
+            clone = type("SubAgentToolContext", (), {})()
+            clone.__dict__.update(getattr(self.ctx, "__dict__", {}))
+            clone.sandbox = Sandbox(worktree_root)
+            clone.config = task_config
+            return clone
+
     def _execute_tool_call(self, definition: AgentDefinition, task: SubAgentTask, name: str, arguments: dict[str, Any]) -> str:
         if self.registry is None or self.ctx is None:
             return f"Tool unavailable in this subagent runtime: {name}"
@@ -797,7 +1012,7 @@ class SubAgentManager:
                 name,
                 "The role preset disallows this tool.",
             )
-        result, elapsed_ms = self.registry.execute(name, arguments or {}, self.ctx)
+        result, elapsed_ms = self.registry.execute(name, arguments or {}, self._ctx_for_task(task))
         if not result.ok and result.metadata.get("gate"):
             return self._runtime_gate_message(
                 task,
@@ -824,6 +1039,80 @@ class SubAgentManager:
             f"Gate {gate_number} ({gate}) failed. {reason}"
         )
 
+    def runtime_status(self) -> dict[str, Any]:
+        with self._lock:
+            tasks = [self.projection(task) for task in self.list_tasks()[:8]]
+            return {
+                "max_concurrent": self.max_concurrent,
+                "running": self._count_status("running"),
+                "queued": self._count_status("queued"),
+                "total": len(self.tasks),
+                "recent": tasks,
+            }
+
+    def _count_status(self, status: str) -> int:
+        return sum(1 for task in self.tasks.values() if task.status == status)
+
+    def _resume_recovered_tasks(self) -> None:
+        to_resume: list[SubAgentTask] = []
+        with self._lock:
+            for task in self.tasks.values():
+                if not task.recovered or task.terminal or task.status != "queued":
+                    continue
+                if task.id in self._resume_started:
+                    continue
+                self._resume_started.add(task.id)
+                to_resume.append(task)
+                self._append_transcript(
+                    task,
+                    "resume_scheduled",
+                    {"reason": "recovered from persisted non-terminal subagent task"},
+                )
+        for task in to_resume:
+            thread = threading.Thread(target=self._run, args=(task,), daemon=True)
+            thread.start()
+
+    def _load_persisted_tasks(self) -> None:
+        if self.tasks_path is None or not self.tasks_path.exists():
+            return
+        try:
+            raw = json.loads(self.tasks_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(raw, list):
+            return
+        changed = False
+        loaded: dict[str, SubAgentTask] = {}
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            task = _task_from_record(item)
+            if task is None:
+                continue
+            if not task.terminal:
+                task.status = "queued"
+                task.error = task.error or "Recovered after restart; queued for restart resume."
+                task.started_at = None
+                task.finished_at = None
+                task.recovered = True
+                task.resume_count += 1
+                changed = True
+            loaded[task.id] = task
+        with self._lock:
+            self.tasks.update(loaded)
+            if changed:
+                self._persist_tasks_locked()
+        for task in loaded.values():
+            if task.recovered and task.status == "queued":
+                self._append_transcript(task, "recovered_after_restart", {"resume_count": task.resume_count})
+
+    def _persist_tasks_locked(self) -> None:
+        if self.tasks_path is None:
+            return
+        records = [_task_to_record(task) for task in sorted(self.tasks.values(), key=lambda item: item.created_at)]
+        self.tasks_path.parent.mkdir(parents=True, exist_ok=True)
+        self.tasks_path.write_text(json.dumps(records, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
     def _append_transcript(self, task: SubAgentTask, event: str, data: dict[str, Any]) -> None:
         if self.transcripts_dir is None:
             return
@@ -833,9 +1122,12 @@ class SubAgentManager:
             task.transcript_handle = self._transcript_handle(path)
         record = {"ts": time.time(), "event": event, **data}
         with self._lock:
+            task.progress_event_count += 1
+            task.last_event = event
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            self._persist_tasks_locked()
 
     def _transcript_handle(self, path: Path) -> str:
         if self.state_dir is not None:
@@ -937,6 +1229,41 @@ def _tool_spec_name(spec: str) -> str:
     if "(" in value:
         value = value.split("(", 1)[0].strip()
     return value
+
+
+def _normalize_isolation(value: str | None) -> str | None:
+    text = str(value or "").strip().lower().replace("_", "-")
+    if not text or text in {"none", "false", "off"}:
+        return None
+    if text == "worktree":
+        return "worktree"
+    raise ValueError("isolation must be 'worktree' or empty")
+
+
+def _task_to_record(task: SubAgentTask) -> dict[str, Any]:
+    return {field.name: getattr(task, field.name) for field in fields(SubAgentTask)}
+
+
+def _task_from_record(item: dict[str, Any]) -> SubAgentTask | None:
+    names = {field.name for field in fields(SubAgentTask)}
+    data = {key: value for key, value in item.items() if key in names}
+    if not data.get("id") or not data.get("agent_type") or data.get("prompt") is None:
+        return None
+    try:
+        return SubAgentTask(**data)
+    except TypeError:
+        return None
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
+def _quote_ps(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
 
 
 def _as_bool(value: object, default: bool = False) -> bool:

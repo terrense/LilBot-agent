@@ -9,6 +9,7 @@ from typing import Any
 
 DEFAULT_MAX_STEPS = 10
 DEFAULT_TUI_FONT_SIZE = 18
+DEFAULT_SUBAGENT_MAX_CONCURRENT = 8
 
 
 @dataclass
@@ -21,6 +22,7 @@ class LilBotConfig:
     permission_mode: str = "ask"
     max_steps: int = DEFAULT_MAX_STEPS
     font_size: int = DEFAULT_TUI_FONT_SIZE
+    subagent_max_concurrent: int = DEFAULT_SUBAGENT_MAX_CONCURRENT
     compact_after_messages: int = 28
     verbose: bool = False
 
@@ -86,6 +88,7 @@ def default_config(workspace: Path | None = None) -> LilBotConfig:
         api_key=api_key,
         permission_mode=_env("LILBOT_PERMISSION_MODE", "ask"),
         font_size=max(0, _env_int("LILBOT_FONT_SIZE", DEFAULT_TUI_FONT_SIZE)),
+        subagent_max_concurrent=max(1, _env_int("LILBOT_SUBAGENT_MAX_CONCURRENT", DEFAULT_SUBAGENT_MAX_CONCURRENT)),
     )
 
 
@@ -116,6 +119,8 @@ def apply_env_overrides(cfg: LilBotConfig) -> LilBotConfig:
         cfg.max_steps = max(1, _env_int("LILBOT_MAX_STEPS", cfg.max_steps))
     elif cfg.max_steps == 8:
         cfg.max_steps = DEFAULT_MAX_STEPS
+    if _env("LILBOT_SUBAGENT_MAX_CONCURRENT"):
+        cfg.subagent_max_concurrent = max(1, _env_int("LILBOT_SUBAGENT_MAX_CONCURRENT", cfg.subagent_max_concurrent))
     return cfg
 
 

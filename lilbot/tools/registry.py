@@ -40,6 +40,8 @@ PLAN_APPROVAL_GATED_TOOLS = {
     "slop_ledger_update",
     "slop_ledger_export",
     "EnterWorktree",
+    "WorktreeMergeBack",
+    "worktree_merge_back",
 }
 
 
