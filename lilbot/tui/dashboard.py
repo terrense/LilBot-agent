@@ -369,6 +369,72 @@ def _is_noisy_path_line(line: str) -> bool:
     return any(marker.replace("\\", "/") in normalized for marker in NOISY_PATH_MARKERS)
 
 
+def _windows_clipboard_payload(text: str) -> bytes:
+    return str(text).encode("utf-16-le") + b"\x00\x00"
+
+
+def _write_windows_unicode_clipboard(text: str) -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return False
+
+    cf_unicodetext = 13
+    gmem_moveable = 0x0002
+    payload = _windows_clipboard_payload(text)
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+
+    user32.OpenClipboard.argtypes = [wintypes.HWND]
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.EmptyClipboard.argtypes = []
+    user32.EmptyClipboard.restype = wintypes.BOOL
+    user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+    user32.SetClipboardData.restype = wintypes.HANDLE
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = wintypes.BOOL
+    kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+    kernel32.GlobalAlloc.restype = wintypes.HANDLE
+    kernel32.GlobalLock.argtypes = [wintypes.HANDLE]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [wintypes.HANDLE]
+    kernel32.GlobalUnlock.restype = wintypes.BOOL
+    kernel32.GlobalFree.argtypes = [wintypes.HANDLE]
+    kernel32.GlobalFree.restype = wintypes.HANDLE
+
+    handle = kernel32.GlobalAlloc(gmem_moveable, len(payload))
+    if not handle:
+        return False
+    locked = kernel32.GlobalLock(handle)
+    if not locked:
+        kernel32.GlobalFree(handle)
+        return False
+    try:
+        ctypes.memmove(locked, payload, len(payload))
+    finally:
+        kernel32.GlobalUnlock(handle)
+
+    if not user32.OpenClipboard(None):
+        kernel32.GlobalFree(handle)
+        return False
+    try:
+        if not user32.EmptyClipboard():
+            kernel32.GlobalFree(handle)
+            return False
+        if not user32.SetClipboardData(cf_unicodetext, handle):
+            kernel32.GlobalFree(handle)
+            return False
+        handle = None
+        return True
+    finally:
+        user32.CloseClipboard()
+        if handle:
+            kernel32.GlobalFree(handle)
+
+
 def _summarize_interim_text(text: str) -> list[str]:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
@@ -1333,8 +1399,7 @@ class DashboardUI:
     def _write_clipboard(self, text: str) -> bool:
         try:
             if os.name == "nt":
-                subprocess.run(["clip"], input=text, text=True, check=True)
-                return True
+                return _write_windows_unicode_clipboard(text)
             if shutil.which("pbcopy"):
                 subprocess.run(["pbcopy"], input=text, text=True, check=True)
                 return True

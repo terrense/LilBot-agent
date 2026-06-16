@@ -399,6 +399,20 @@ class SubAgentManager:
         with self._lock:
             return sorted(self.tasks.values(), key=lambda item: item.created_at, reverse=True)
 
+    def get_render_context(self) -> dict[str, object]:
+        """Snapshot of agent types and active tasks for dynamic tool descriptions.
+
+        Used by ToolRegistry.schemas() to render agent_open/agent_eval descriptions
+        with live agent type listings and active subagent status — CodeWhale-style
+        tool description parity (single source of truth, no keyword heuristics).
+        """
+        return {
+            "agent_types": self.list_types(),
+            "active_tasks": self.list_tasks(),
+            "max_concurrent": self.max_concurrent,
+            "running_count": self._count_status("running"),
+        }
+
     def get(self, task_id: str) -> SubAgentTask | None:
         with self._lock:
             return self.tasks.get(task_id) or next((t for t in self.tasks.values() if t.name == task_id), None)

@@ -40,6 +40,19 @@ core capabilities enforceable and durable:
 - Subagent lifecycle now has a configurable concurrency cap, persisted task
   restart resume, transcript-cursor reads, structured dashboard progress, and
   optional subagent-level `worktree` isolation.
+- The agent loop now treats three or more unrelated questions in one prompt as
+  an independent question burst and fans them out to parallel `researcher`
+  subagents instead of serializing all web lookups in the parent turn.
+- Auto-delegation now uses a CodeWhale-inspired hybrid router: deterministic
+  heuristics catch obvious cases, and an LLM semantic delegation planner is
+  consulted as a bounded JSON fallback for prompts that do not match the local
+  keyword tables.
+- Research auto-delegation now splits mixed prompts into fact-scoped
+  `researcher` subagents and leaves final synthesis to the parent agent,
+  avoiding parallel fact-free `plan` subagents.
+- Delegation routing now has a regression matrix and a local probe script for
+  simple prompts, no-question-mark Chinese question bursts, code exploration,
+  research, mixed public facts, and semantic-planner writing fallback.
 - `EnterPlanMode` and `ExitPlanMode` persist plan lifecycle and approval state.
 - Pending plan approval now blocks write and execution tools through the central
   tool registry until the plan is approved or rejected.
@@ -59,15 +72,17 @@ core capabilities enforceable and durable:
   fallback, `run_tests` writes log artifacts under `.lilbot/test-artifacts/`,
   and `project_map` now detects frameworks, entrypoints, package managers, and
   key source files.
-- The dashboard Trace panel starts with a `WELCOME` banner, and the Work panel
-  now shows runtime, active tool, subagent, transcript, and worktree status.
+- The dashboard Trace panel starts with a `WELCOME` banner, the Work panel now
+  shows runtime, active tool, subagent, transcript, and worktree status, and
+  Windows `/copy` / `F2` uses the native Unicode clipboard format for Chinese
+  text instead of `clip.exe`.
 - The current test suite covers these enforcement and lifecycle paths.
 
 Current verified baseline:
 
 ```text
 python -m pytest
-80 passed
+95 passed, 9 subtests passed
 ```
 
 ---
@@ -191,7 +206,7 @@ flowchart TB
 | Layer | Main Files | Current State |
 |---|---|---|
 | CLI and runtime wiring | `lilbot/cli.py`, `lilbot/__main__.py` | Builds config, provider, registry, sandbox, memory, skills, subagents, MCP, and TUI. |
-| Agent loop | `lilbot/core/agent.py`, `lilbot/core/events.py`, `lilbot/core/prompts.py` | Runs provider turns, executes tools, tracks usage, compacts history, and auto-delegates broad tasks to explorer/research/planner subagents. |
+| Agent loop | `lilbot/core/agent.py`, `lilbot/core/delegation.py`, `lilbot/core/events.py`, `lilbot/core/prompts.py` | Runs provider turns, executes tools, tracks usage, compacts history, auto-delegates broad tasks, fans out independent question bursts, and falls back to an LLM semantic delegation planner. |
 | Provider layer | `lilbot/llm/providers.py` | Supports the local rule model and OpenAI-compatible providers such as DeepSeek. |
 | Tool bus | `lilbot/tools/registry.py`, `lilbot/tools/builtin.py` | Registers schemas and handlers for workspace, git, shell, memory, skills, subagents, tasks, automation, MCP, web, LSP/navigation, worktree merge-back, document/media probes, compatibility aliases, and central plan-approval gating. |
 | Safety boundary | `lilbot/sandbox/workspace.py`, `lilbot/sandbox/permissions.py` | Enforces workspace path boundaries and ask/accept-all/deny-all permission modes. |
@@ -210,7 +225,7 @@ flowchart TB
 | Workspace tools | File reads, directory listing, search, git status/diff/log/show/blame, bounded handles, diagnostics, pure-Python patch fallback, test log artifacts, and framework-aware `project_map`. | Richer test classification and artifact retrieval UX. |
 | Code navigation | `lsp_symbols`, `lsp_definition`, `lsp_workspace_symbols`, `lsp_references`, `lsp_diagnostics`, and `lsp_rename_preview`, with local LSP when available and AST/regex/grep fallback when unavailable. | Persistent warm LSP server sessions, references quality for dynamic languages, and safe rename apply. |
 | Skill ecosystem | Bundled skills, `SKILL.md` folders, metadata parsing, `load_skill`, inline skills, forked skill execution through subagents. | Source precedence, hooks, path-filtered skills, safer shell expansion. |
-| Subagents | Built-in roles, custom agents, five-gate allowed-tool protection, Claude tool-name compatibility, concurrency cap, restart resume, progress events, structured dashboard status, durable transcript handles, optional worktree isolation. | Exact model-state resume, per-agent resource quotas, richer cancellation semantics. |
+| Subagents | Built-in roles, custom agents, five-gate allowed-tool protection, Claude tool-name compatibility, independent question-burst fan-out, LLM semantic delegation fallback, concurrency cap, restart resume, progress events, structured dashboard status, durable transcript handles, optional worktree isolation. | Exact model-state resume, per-agent resource quotas, richer cancellation semantics. |
 | Planning lifecycle | `update_plan`, checklists, goals, `EnterPlanMode`, `ExitPlanMode`, persisted approval state, write/execute gating while approval is pending. | Better approval UX and plan review surfaces in the TUI. |
 | Worktree lifecycle | `EnterWorktree` / `ExitWorktree` with explicit unsupported fallback and cleanup/remove; subagents can request managed `worktree` isolation; `WorktreeMergeBack` can preflight or merge a source branch back. | Conflict UI, merge-back artifact summaries, stronger cleanup diagnostics. |
 | Shell and PowerShell | Permission-gated shell execution, background jobs, PowerShell safety metadata, destructive command classification, and hard blocks for unsafe delete/move targets. | Expand analyzer coverage for advanced PowerShell AST cases and richer remediation hints. |
@@ -447,7 +462,8 @@ https://api.deepseek.com
 Dashboard interaction notes:
 
 - `Trace` is the main conversation and tool-execution stream.
-- Select text in `Trace` to copy, or use `/copy` / `F2`.
+- Select text in `Trace` to copy, or use `/copy` / `F2`. On Windows this writes
+  `CF_UNICODETEXT`, so Chinese Trace content should paste without mojibake.
 - Right-click paste and `Ctrl+V` are supported in the Composer.
 - The top bar shows approximate context usage, for example `ctx 03%`.
 - During model work, the footer switches to a wave animation.
@@ -486,6 +502,22 @@ print(manager.runtime_status())
 Expected first print: `running` is `3`, `queued` is `3`. Expected second print:
 all six tasks are terminal.
 
+### Manual Delegation Matrix Probe
+
+Use this local probe to inspect routing without calling a model or the network:
+
+```powershell
+python experiment\delegation_matrix.py
+python experiment\delegation_matrix.py "谁是2025年NBA冠军 那谁是那一年的FMVP呢 哦对还有NBA是哪一个国家的比赛呀"
+```
+
+Expected shape for the second command: a deterministic plan with three
+`researcher` probes named `auto_question_01`, `auto_question_02`, and
+`auto_question_03`. A prompt such as `请创作一篇古风的1000字散文...` should show
+`deterministic_plan: null` plus `semantic_planner_if_no_plan: true`, meaning the
+host did not hard-code that genre but the model-side delegation planner should
+be consulted.
+
 ---
 
 ## Lifecycle Theory
@@ -513,6 +545,56 @@ recovery path.
 Transcript cursors are line-based. `agent_transcript` returns events after a
 cursor and a new cursor, so a dashboard or future GUI can poll progress without
 re-reading the whole transcript.
+
+Question-burst delegation is a separate planner rule. When one user message
+contains three or more unrelated questions, LilBot opens focused `researcher`
+subagents up to `LILBOT_SUBAGENT_MAX_CONCURRENT` and the current step budget.
+If there are more questions than available subagent slots, LilBot groups the
+extra questions into compact ordered question groups instead of dropping them.
+Normal broad code/research/planning tasks keep a more conservative budget so
+they still leave room for parent synthesis.
+
+### Delegation Theory
+
+CodeWhale/Claude-style delegation does not try to hard-code every possible
+task category in the host runtime. The product pattern is:
+
+```text
+agent descriptions + tool prompt
+  -> model decides whether Agent is useful
+  -> runtime validates allowed/disallowed tools, recursion, permissions,
+     lifecycle, transcripts, and isolation
+```
+
+Clean-room notes from the local CodeWhale/Claude Code source audit:
+
+- `AgentTool/prompt.ts` dynamically renders available agent types, their
+  `whenToUse` descriptions, and tool limits into the tool prompt, so the parent
+  model can decide when to spawn one or several agents.
+- `loadAgentsDir.ts` loads project/user custom agents from agent files with
+  descriptions, prompts, tool allow/disallow lists, models, and permission mode.
+- `agentToolUtils.ts` and tool constants hard-code safety boundaries: recursive
+  agent tools are disallowed, async/background tools are constrained, and custom
+  agent tool lists are resolved before runtime execution.
+- `forkSubagent.ts` is a lifecycle/runtime path, not a keyword classifier: it
+  inherits context through a directive and still prevents recursive forking.
+
+LilBot now follows that split more closely. `delegation.py` keeps fast local
+heuristics for obvious cases such as codebase exploration and question bursts,
+including Chinese question-like clauses without explicit question marks. If
+those heuristics do not match and the prompt is still substantial, the agent
+loop asks the configured provider for a bounded JSON delegation plan. The JSON
+is parsed defensively: unknown agent types are rejected, probe counts are
+clamped to the current budget, names are sanitized, and runtime subagent gates
+still enforce tool allowlists and safety.
+
+For mixed research requests, LilBot now treats subagents as evidence gatherers,
+not decorative planners. A prompt that combines travel recommendations, current
+rankings, and sports award facts should open separate `researcher` subagents
+for each factual scope. The parent then synthesizes the route, recommendation,
+or final answer from those results. After auto-delegation, the parent receives
+an internal guidance message telling it not to repeat the same searches unless
+a subagent failed or left a critical fact/source missing.
 
 ---
 
@@ -587,6 +669,27 @@ pretending worktree isolation happened.
   `lsp_diagnostics`, and `lsp_rename_preview`.
 - Updated the Work panel to show subagent last event, event count, resume count,
   transcript handle, worktree branch, and worktree path.
+- Added independent question-burst auto-delegation: three or more unrelated
+  questions in one prompt now fan out to parallel `researcher` subagents,
+  grouping overflow questions when slots are limited, while normal broad-task
+  delegation keeps its conservative explorer budget.
+- Added LLM semantic delegation fallback inspired by CodeWhale's Agent tool
+  routing: local keyword heuristics are no longer the only way to identify
+  writing, research, planning, review, or parallel question work. Chinese
+  question bursts without question marks are now covered by the fast path.
+- Reworked research auto-delegation to avoid "subagent theater": mixed
+  research prompts now split into fact-scoped `researcher` subagents, and the
+  parent receives guidance to synthesize from their evidence rather than
+  repeating identical searches.
+- Re-audited the local CodeWhale/Claude Code `AgentTool` source and documented
+  the split between dynamic model-side agent selection and host-side safety,
+  permission, lifecycle, transcript, and isolation enforcement.
+- Added `tests/test_delegation_matrix.py` plus
+  `experiment/delegation_matrix.py` to probe the full delegation route for
+  simple prompts, no-question-mark Chinese question bursts, code exploration,
+  research, mixed fact scopes, and semantic-planner writing fallback.
+- Fixed Windows `/copy` / `F2` Chinese clipboard mojibake by writing native
+  `CF_UNICODETEXT` instead of piping text through `clip.exe`.
 
 ### 2026-06-15
 
@@ -606,23 +709,33 @@ pretending worktree isolation happened.
 
 Recommended next batch:
 
-1. Persistent LSP sessions.
+1. Dynamic Agent tool prompt parity.
+   - Render active built-in/custom agents, `whenToUse`, allowed tools,
+     background support, and "continue existing agent" guidance directly into
+     the `agent_open` / `Agent` tool description.
+   - Let the parent model naturally choose multiple concurrent subagents during
+     normal tool-calling, while keeping deterministic auto-delegation as a fast
+     preflight for obvious question bursts and code/research fan-out.
+   - Add tests that assert the parent uses subagent evidence for synthesis
+     before repeating identical parent-side searches.
+
+2. Persistent LSP sessions.
    - Keep language servers warm across calls instead of one short request per
      lookup.
    - Add server lifecycle controls, cache invalidation, and richer diagnostics
      collection.
 
-2. Worktree merge UX.
+3. Worktree merge UX.
    - Add merge-back artifact summaries.
    - Add conflict reporting and cleanup diagnostics.
    - Add safer branch naming policy for repeated task names.
 
-3. Product-level hooks and lifecycle.
+4. Product-level hooks and lifecycle.
    - Add pre-tool/post-tool hooks.
    - Surface plan approval and PowerShell risk in the dashboard more clearly.
    - Add richer task/test artifact retrieval from handles.
 
-4. Subagent resource controls.
+5. Subagent resource controls.
    - Add per-agent time/tool/output quotas.
    - Add clearer cancellation semantics for queued vs running tasks.
    - Explore exact resume from structured conversation checkpoints.
