@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import difflib
 import fnmatch
 import html as html_lib
@@ -7,6 +8,7 @@ import ipaddress
 import json
 import os
 import platform
+import queue
 import re
 import shutil
 import socket
@@ -22,6 +24,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from ..sandbox import analyze_powershell_command
 from ..subagents import SubAgentGateError
 from .registry import ToolContext, ToolDef, ToolRegistry, ToolResult
 
@@ -60,6 +63,7 @@ NOISY_DIRS = {
     ".git",
     ".hg",
     ".svn",
+    ".lilbot",
     "__pycache__",
     ".pytest_cache",
     ".mypy_cache",
@@ -190,6 +194,31 @@ def _bounded_text_projection(text: str, args: dict[str, Any]) -> tuple[str, dict
 
 def _permission(ctx: ToolContext, action: str, description: str) -> bool:
     return ctx.permissions.check(action, description).allowed
+
+
+def _shell_permission(ctx: ToolContext, action: str, description: str, command: str, *, background: bool = False) -> tuple[bool, dict[str, Any], ToolResult | None]:
+    safety = _shell_safety(ctx, command, background=background)
+    if safety and safety.get("blocked"):
+        return False, safety, ToolResult(False, str(safety.get("summary") or "PowerShell safety gate blocked command."), {"powershell_safety": safety})
+    prompt = description
+    if safety:
+        prompt = f"{description} | {safety.get('summary')}"
+    if not _permission(ctx, action, prompt):
+        metadata = {"powershell_safety": safety} if safety else {}
+        return False, safety, ToolResult(False, "Permission denied.", metadata)
+    return True, safety, None
+
+
+def _shell_safety(ctx: ToolContext, command: str, *, background: bool = False) -> dict[str, Any]:
+    if os.name != "nt":
+        return {}
+    return analyze_powershell_command(command, ctx.sandbox.root, background=background)
+
+
+def _with_shell_safety(metadata: dict[str, Any], safety: dict[str, Any]) -> dict[str, Any]:
+    if safety:
+        metadata["powershell_safety"] = safety
+    return metadata
 
 
 def _clean_html_fragment(value: str) -> str:
@@ -517,6 +546,128 @@ def _edit_file(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     return ToolResult(True, diff or f"Edited {rel}")
 
 
+_PATCH_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+def _clean_patch_path(value: str) -> str | None:
+    value = value.strip().split("\t", 1)[0].strip()
+    if value == "/dev/null":
+        return None
+    if value.startswith("a/") or value.startswith("b/"):
+        value = value[2:]
+    return value.replace("\\", "/")
+
+
+def _parse_unified_patch(patch: str) -> tuple[list[dict[str, Any]], str | None]:
+    lines = patch.splitlines()
+    files: list[dict[str, Any]] = []
+    idx = 0
+    while idx < len(lines):
+        if not lines[idx].startswith("--- "):
+            idx += 1
+            continue
+        old_path = _clean_patch_path(lines[idx][4:])
+        idx += 1
+        if idx >= len(lines) or not lines[idx].startswith("+++ "):
+            return [], "Malformed unified diff: expected +++ after ---."
+        new_path = _clean_patch_path(lines[idx][4:])
+        idx += 1
+        hunks = []
+        while idx < len(lines):
+            if lines[idx].startswith("--- "):
+                break
+            if not lines[idx].startswith("@@ "):
+                idx += 1
+                continue
+            match = _PATCH_HUNK_RE.match(lines[idx])
+            if not match:
+                return [], f"Malformed hunk header: {lines[idx]}"
+            old_start = int(match.group(1))
+            old_count = int(match.group(2) or "1")
+            new_start = int(match.group(3))
+            new_count = int(match.group(4) or "1")
+            idx += 1
+            hunk_lines = []
+            while idx < len(lines):
+                line = lines[idx]
+                if line.startswith("@@ ") or line.startswith("--- "):
+                    break
+                if line.startswith("\\ No newline at end of file"):
+                    idx += 1
+                    continue
+                if not line or line[0] not in {" ", "+", "-"}:
+                    break
+                hunk_lines.append(line)
+                idx += 1
+            hunks.append({
+                "old_start": old_start,
+                "old_count": old_count,
+                "new_start": new_start,
+                "new_count": new_count,
+                "lines": hunk_lines,
+            })
+        files.append({"old_path": old_path, "new_path": new_path, "hunks": hunks})
+    if not files:
+        return [], "No file patches found in unified diff."
+    return files, None
+
+
+def _apply_file_patch_python(ctx: ToolContext, file_patch: dict[str, Any]) -> tuple[bool, str, str | None]:
+    rel = file_patch.get("new_path") or file_patch.get("old_path")
+    if not rel:
+        return False, "Delete-only patches are not supported by the Python fallback.", None
+    path = ctx.sandbox.resolve(rel)
+    old_path = file_patch.get("old_path")
+    old_text = ""
+    if old_path is not None and path.exists():
+        old_text = path.read_text(encoding="utf-8", errors="ignore")
+    old_lines = old_text.splitlines()
+    new_lines: list[str] = []
+    old_index = 0
+    for hunk in file_patch.get("hunks", []):
+        target_index = max(0, int(hunk["old_start"]) - 1)
+        if target_index < old_index:
+            return False, f"Overlapping patch hunks for {rel}.", rel
+        new_lines.extend(old_lines[old_index:target_index])
+        old_index = target_index
+        for raw in hunk["lines"]:
+            marker = raw[:1]
+            content = raw[1:]
+            if marker == " ":
+                if old_index >= len(old_lines) or old_lines[old_index] != content:
+                    return False, f"Patch context mismatch in {rel} near line {old_index + 1}.", rel
+                new_lines.append(content)
+                old_index += 1
+            elif marker == "-":
+                if old_index >= len(old_lines) or old_lines[old_index] != content:
+                    return False, f"Patch removal mismatch in {rel} near line {old_index + 1}.", rel
+                old_index += 1
+            elif marker == "+":
+                new_lines.append(content)
+    new_lines.extend(old_lines[old_index:])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    new_text = "\n".join(new_lines)
+    if new_lines and (old_text.endswith(("\n", "\r\n")) or old_path is None):
+        new_text += "\n"
+    path.write_text(new_text, encoding="utf-8")
+    return True, f"Patched {rel}", rel
+
+
+def _apply_patch_python(ctx: ToolContext, patch: str) -> tuple[bool, str, dict[str, Any]]:
+    file_patches, error = _parse_unified_patch(patch)
+    if error:
+        return False, error, {"engine": "python", "error": error}
+    touched: list[str] = []
+    for file_patch in file_patches:
+        ok, message, rel = _apply_file_patch_python(ctx, file_patch)
+        if not ok:
+            return False, message, {"engine": "python", "touched": touched, "error": message}
+        if rel:
+            touched.append(rel)
+    data = {"engine": "python", "touched": touched, "files": len(touched)}
+    return True, "\n".join(f"Patched {rel}" for rel in touched) or "Patch applied.", data
+
+
 def _apply_patch(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     patch = str(args.get("patch") or args.get("diff") or "")
     if not patch.strip():
@@ -533,7 +684,13 @@ def _apply_patch(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         patch_path.unlink(missing_ok=True)
     except OSError:
         pass
-    return ToolResult(result.ok, result.output or ("Patch applied." if result.ok else "Patch failed."), {"returncode": result.returncode})
+    if result.ok:
+        return ToolResult(True, result.output or "Patch applied.", {"returncode": result.returncode, "engine": "git"})
+    fallback_ok, fallback_output, fallback_meta = _apply_patch_python(ctx, patch)
+    fallback_meta["git_returncode"] = result.returncode
+    fallback_meta["git_output"] = result.output
+    return ToolResult(fallback_ok, fallback_output, fallback_meta)
+
 
 
 def _file_search(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -662,13 +819,20 @@ def _git_worktree_support(ctx: ToolContext) -> tuple[bool, dict[str, Any]]:
     }
 
 
+def _safe_branch_name(value: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9._/-]+", "-", value.strip())
+    text = re.sub(r"-+", "-", text).strip("-/.")
+    return text or f"lilbot-{uuid4().hex[:8]}"
+
+
 def _enter_worktree(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     supported, support = _git_worktree_support(ctx)
     if not supported:
         return ToolResult(False, _json(support), support)
     name = str(args.get("name") or f"worktree_{uuid4().hex[:8]}")
     rel_path = str(args.get("path") or f".lilbot/worktrees/{name}")
-    branch = str(args.get("branch") or args.get("ref") or "").strip()
+    ref = str(args.get("ref") or args.get("base") or "HEAD").strip()
+    branch = str(args.get("new_branch") or args.get("branch") or "").strip()
     try:
         target = ctx.sandbox.resolve(rel_path)
     except Exception as exc:
@@ -677,9 +841,12 @@ def _enter_worktree(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     create = _optional_bool(args.get("create"))
     should_create = (create is not False) and not target.exists()
     if should_create:
-        command = f"git worktree add {_quote_ps(str(target))}"
+        command = "git worktree add"
         if branch:
-            command += " " + _quote_ps(branch)
+            command += f" -b {_quote_ps(_safe_branch_name(branch))}"
+        command += f" {_quote_ps(str(target))}"
+        if ref:
+            command += " " + _quote_ps(ref)
         if not _permission(ctx, f"worktree:add:{target}", f"create git worktree at {target}"):
             return ToolResult(False, "Permission denied.")
         result = ctx.sandbox.run(command, int(args.get("timeout", 120)))
@@ -706,6 +873,7 @@ def _enter_worktree(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         "previous_root": str(previous_root),
         "created": should_create,
         "branch": branch or None,
+        "ref": ref or None,
         "entered_at": time.time(),
     }
     _save_state(ctx, "worktree.json", data)
@@ -722,15 +890,104 @@ def _exit_worktree(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         _save_state(ctx, "worktree.json", data)
         return ToolResult(False, _json(data), data)
     ctx.sandbox.root = previous_root.resolve()
+    cleanup = _optional_bool(args.get("cleanup") if args.get("cleanup") is not None else args.get("remove"))
+    cleanup_result: dict[str, Any] | None = None
+    if cleanup is True:
+        target = Path(str(data.get("path") or ""))
+        if not data.get("created"):
+            cleanup_result = {"ok": False, "reason": "worktree was not created by EnterWorktree"}
+        elif not target.exists():
+            cleanup_result = {"ok": True, "reason": "worktree path already absent"}
+        elif not _permission(ctx, f"worktree:remove:{target}", f"remove git worktree at {target}"):
+            cleanup_result = {"ok": False, "reason": "permission denied"}
+        else:
+            result = ctx.sandbox.run(f"git worktree remove --force {_quote_ps(str(target))}", int(args.get("timeout", 120)))
+            cleanup_result = {"ok": result.ok, "returncode": result.returncode, "output": result.output}
     data.update({
-        "status": "exited",
+        "status": "cleaned" if cleanup_result and cleanup_result.get("ok") else "exited",
         "path": str(data.get("path") or ""),
         "restored_root": str(ctx.sandbox.root),
+        "cleanup": cleanup_result,
         "exited_at": time.time(),
         "updated_at": time.time(),
     })
     _save_state(ctx, "worktree.json", data)
     return ToolResult(True, _json(data), data)
+
+
+def _worktree_merge_back(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    supported, support = _git_worktree_support(ctx)
+    if not supported:
+        return ToolResult(False, _json(support), support)
+    state = _load_state(ctx, "worktree.json", {})
+    worktree_path_arg = args.get("path") or (state.get("path") if isinstance(state, dict) else "")
+    if not worktree_path_arg:
+        return ToolResult(False, "Missing worktree path and no active worktree state.", {"status": "inactive"})
+    try:
+        worktree_path = ctx.sandbox.resolve(str(worktree_path_arg))
+    except Exception as exc:
+        data = {"status": "error", "reason": str(exc), "path": str(worktree_path_arg)}
+        return ToolResult(False, _json(data), data)
+    source_branch = str(args.get("source_branch") or args.get("branch") or "").strip()
+    if not source_branch:
+        branch_result = ctx.sandbox.run(f"git -C {_quote_ps(str(worktree_path))} branch --show-current", 20)
+        source_branch = branch_result.output.strip()
+    target_branch = str(args.get("target_branch") or args.get("target") or "").strip()
+    if not target_branch:
+        target_result = ctx.sandbox.run("git branch --show-current", 20)
+        target_branch = target_result.output.strip()
+    if not source_branch or not target_branch:
+        data = {
+            "status": "error",
+            "reason": "Could not resolve source_branch or target_branch.",
+            "source_branch": source_branch or None,
+            "target_branch": target_branch or None,
+        }
+        return ToolResult(False, _json(data), data)
+    timeout = int(args.get("timeout", 120))
+    worktree_status = ctx.sandbox.run(f"git -C {_quote_ps(str(worktree_path))} status --porcelain", 30)
+    root_status = ctx.sandbox.run("git status --porcelain", 30)
+    diff = ctx.sandbox.run(f"git diff --stat {_quote_ps(f'{target_branch}...{source_branch}')}", 60)
+    dry_run = _optional_bool(args.get("dry_run"))
+    if dry_run is not False:
+        data = {
+            "status": "preflight",
+            "source_branch": source_branch,
+            "target_branch": target_branch,
+            "worktree_path": str(worktree_path),
+            "worktree_dirty": bool(worktree_status.output.strip()),
+            "target_dirty": bool(root_status.output.strip()),
+            "diff_stat": diff.output,
+            "merge_command": f"git merge --no-ff {source_branch}",
+        }
+        return ToolResult(True, _json(data), data)
+    if worktree_status.output.strip():
+        return ToolResult(False, "Worktree has uncommitted changes; commit or clean it before merge-back.", {
+            "status": "blocked",
+            "reason": "worktree_dirty",
+            "worktree_status": worktree_status.output,
+        })
+    if root_status.output.strip():
+        return ToolResult(False, "Target workspace has uncommitted changes; clean it before merge-back.", {
+            "status": "blocked",
+            "reason": "target_dirty",
+            "target_status": root_status.output,
+        })
+    if not _permission(ctx, f"worktree:merge:{source_branch}->{target_branch}", f"merge worktree branch {source_branch} into {target_branch}"):
+        return ToolResult(False, "Permission denied.")
+    checkout = ctx.sandbox.run(f"git checkout {_quote_ps(target_branch)}", timeout)
+    if not checkout.ok:
+        return ToolResult(False, checkout.output or "git checkout failed", {"status": "error", "step": "checkout", "returncode": checkout.returncode})
+    merge = ctx.sandbox.run(f"git merge --no-ff {_quote_ps(source_branch)}", timeout)
+    data = {
+        "status": "merged" if merge.ok else "error",
+        "source_branch": source_branch,
+        "target_branch": target_branch,
+        "worktree_path": str(worktree_path),
+        "returncode": merge.returncode,
+        "output": merge.output,
+    }
+    return ToolResult(merge.ok, _json(data), data)
 
 
 def _github_issue_context(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -819,16 +1076,57 @@ def _diagnostics(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     return ToolResult(True, _json(data), data)
 
 
+def _write_test_artifact(ctx: ToolContext, command: str, output: str, returncode: int) -> dict[str, Any]:
+    artifact_dir = ctx.sandbox.resolve(".lilbot/test-artifacts")
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    name = f"test-{time.strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}.log"
+    path = artifact_dir / name
+    body = "\n".join(
+        [
+            f"command: {command}",
+            f"returncode: {returncode}",
+            f"workspace: {ctx.sandbox.root}",
+            "",
+            output or "(no output)",
+        ]
+    )
+    path.write_text(body, encoding="utf-8")
+    handle = path.relative_to(ctx.sandbox.root).as_posix()
+    return {"handle": handle, "path": str(path), "bytes": len(body.encode("utf-8"))}
+
+
 def _run_tests(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     command = str(args.get("command") or "").strip()
     if not command:
         command = "python -m pytest" if (ctx.sandbox.root / "pyproject.toml").exists() else "python -m unittest discover"
     if args.get("args"):
         command = f"{command} {args['args']}"
-    if not _permission(ctx, f"test:{command}", f"run test command: {command}"):
-        return ToolResult(False, "Permission denied.")
+    allowed, safety, denied = _shell_permission(ctx, f"test:{command}", f"run test command: {command}", command)
+    if not allowed:
+        return denied or ToolResult(False, "Permission denied.", _with_shell_safety({}, safety))
     result = ctx.sandbox.run(command, int(args.get("timeout", 120)))
-    return ToolResult(result.ok, result.output or f"Process exited with {result.returncode}", {"returncode": result.returncode, "command": command})
+    artifact: dict[str, Any] | None = None
+    artifact_error: str | None = None
+    try:
+        artifact = _write_test_artifact(ctx, command, result.output, result.returncode)
+    except OSError as exc:
+        artifact_error = str(exc)
+    metadata = {
+        "returncode": result.returncode,
+        "command": command,
+        "output_chars": len(result.output or ""),
+    }
+    if artifact:
+        metadata["artifact"] = artifact["handle"]
+        metadata["artifact_path"] = artifact["path"]
+        metadata["artifact_bytes"] = artifact["bytes"]
+    if artifact_error:
+        metadata["artifact_error"] = artifact_error
+    return ToolResult(
+        result.ok,
+        result.output or f"Process exited with {result.returncode}",
+        _with_shell_safety(metadata, safety),
+    )
 
 
 def _validate_data(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -850,20 +1148,940 @@ def _validate_data(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     return ToolResult(False, f"Unsupported format: {fmt}")
 
 
+SYMBOL_SUFFIXES = {
+    ".py",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".go",
+    ".rs",
+    ".java",
+    ".cs",
+    ".cpp",
+    ".c",
+    ".h",
+    ".hpp",
+    ".md",
+}
+
+PROJECT_MAP_SUFFIXES = SYMBOL_SUFFIXES | {
+    ".toml",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".ini",
+    ".cfg",
+    ".txt",
+    ".html",
+    ".css",
+    ".scss",
+    ".vue",
+    ".svelte",
+}
+
+LSP_KIND_NAMES = {
+    1: "file",
+    2: "module",
+    3: "namespace",
+    4: "package",
+    5: "class",
+    6: "method",
+    7: "property",
+    8: "field",
+    9: "constructor",
+    10: "enum",
+    11: "interface",
+    12: "function",
+    13: "variable",
+    14: "constant",
+    15: "string",
+    16: "number",
+    17: "boolean",
+    18: "array",
+    19: "object",
+    20: "key",
+    21: "null",
+    22: "enumMember",
+    23: "struct",
+    24: "event",
+    25: "operator",
+    26: "typeParameter",
+}
+
+
+def _iter_source_files(base: Path, root: Path, limit: int = 2000) -> list[Path]:
+    if base.is_file():
+        return [base] if base.suffix.lower() in SYMBOL_SUFFIXES else []
+    files: list[Path] = []
+    for path in sorted(base.rglob("*")):
+        if len(files) >= limit:
+            break
+        if not path.is_file() or _is_noisy_path(path, root):
+            continue
+        if path.suffix.lower() in SYMBOL_SUFFIXES:
+            files.append(path)
+    return files
+
+
+def _symbol_record(path: Path, root: Path, name: str, kind: str, line: int, character: int = 1, container: str | None = None, source: str = "fallback") -> dict[str, Any]:
+    return {
+        "name": name,
+        "kind": kind,
+        "path": path.relative_to(root).as_posix(),
+        "line": line,
+        "character": character,
+        "container": container,
+        "source": source,
+    }
+
+
+def _python_file_symbols(path: Path, root: Path) -> list[dict[str, Any]]:
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    tree = ast.parse(text)
+    symbols: list[dict[str, Any]] = []
+
+    class Visitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.stack: list[str] = []
+
+        def _add(self, node: ast.AST, name: str, kind: str) -> None:
+            symbols.append(
+                _symbol_record(
+                    path,
+                    root,
+                    name,
+                    kind,
+                    int(getattr(node, "lineno", 1)),
+                    int(getattr(node, "col_offset", 0)) + 1,
+                    ".".join(self.stack) or None,
+                    "python_ast",
+                )
+            )
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> Any:
+            self._add(node, node.name, "class")
+            self.stack.append(node.name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> Any:
+            self._add(node, node.name, "method" if self.stack else "function")
+            self.stack.append(node.name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> Any:
+            self._add(node, node.name, "async_method" if self.stack else "async_function")
+            self.stack.append(node.name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+    Visitor().visit(tree)
+    return symbols
+
+
+def _regex_file_symbols(path: Path, root: Path) -> list[dict[str, Any]]:
+    suffix = path.suffix.lower()
+    patterns: list[tuple[str, str]] = []
+    if suffix in {".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte"}:
+        patterns = [
+            ("class", r"\b(?:export\s+)?class\s+([A-Za-z_$][\w$]*)"),
+            ("function", r"\b(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)"),
+            ("variable", r"\b(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*="),
+        ]
+    elif suffix == ".go":
+        patterns = [
+            ("function", r"^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*\("),
+            ("type", r"^\s*type\s+([A-Za-z_]\w*)\s+(?:struct|interface|func|\w+)"),
+        ]
+    elif suffix == ".rs":
+        patterns = [
+            ("function", r"^\s*(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z_]\w*)"),
+            ("struct", r"^\s*(?:pub\s+)?struct\s+([A-Za-z_]\w*)"),
+            ("enum", r"^\s*(?:pub\s+)?enum\s+([A-Za-z_]\w*)"),
+            ("trait", r"^\s*(?:pub\s+)?trait\s+([A-Za-z_]\w*)"),
+        ]
+    elif suffix in {".java", ".cs", ".cpp", ".c", ".h", ".hpp"}:
+        patterns = [
+            ("class", r"\b(?:class|interface|enum|struct)\s+([A-Za-z_]\w*)"),
+            ("function", r"\b([A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{"),
+        ]
+    elif suffix == ".md":
+        patterns = [("heading", r"^(#{1,6})\s+(.+?)\s*$")]
+
+    symbols: list[dict[str, Any]] = []
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return symbols
+    for line_no, line in enumerate(lines, 1):
+        for kind, pattern in patterns:
+            match = re.search(pattern, line)
+            if not match:
+                continue
+            name = match.group(2).strip() if suffix == ".md" else match.group(1)
+            symbols.append(_symbol_record(path, root, name, kind, line_no, max(1, match.start(1) + 1), source="regex"))
+    return symbols
+
+
+def _fallback_symbols(ctx: ToolContext, base: Path, query_text: str = "", max_results: int = 100) -> list[dict[str, Any]]:
+    symbols: list[dict[str, Any]] = []
+    for path in _iter_source_files(base, ctx.sandbox.root):
+        try:
+            if path.suffix.lower() == ".py":
+                symbols.extend(_python_file_symbols(path, ctx.sandbox.root))
+            else:
+                symbols.extend(_regex_file_symbols(path, ctx.sandbox.root))
+        except (OSError, SyntaxError, UnicodeDecodeError):
+            continue
+        if len(symbols) >= max_results * 4:
+            break
+    if query_text:
+        query_lower = query_text.lower()
+        symbols = [
+            item
+            for item in symbols
+            if query_lower in str(item.get("name", "")).lower()
+            or query_lower in str(item.get("container", "")).lower()
+            or query_lower in str(item.get("path", "")).lower()
+        ]
+    symbols.sort(key=lambda item: (str(item.get("path", "")), int(item.get("line", 0)), str(item.get("name", ""))))
+    return symbols[:max_results]
+
+
+def _lsp_command_for_path(path: Path) -> tuple[list[str], str, str] | None:
+    suffix = path.suffix.lower()
+    candidates: list[tuple[list[str], str, str]] = []
+    if suffix == ".py":
+        candidates = [(["pylsp"], "python", "pylsp"), (["pyright-langserver", "--stdio"], "python", "pyright-langserver")]
+    elif suffix in {".js", ".jsx", ".ts", ".tsx"}:
+        candidates = [(["typescript-language-server", "--stdio"], "typescript", "typescript-language-server")]
+    elif suffix == ".go":
+        candidates = [(["gopls"], "go", "gopls")]
+    elif suffix == ".rs":
+        candidates = [(["rust-analyzer"], "rust", "rust-analyzer")]
+    for command, language_id, name in candidates:
+        executable = shutil.which(command[0])
+        if executable:
+            return [executable, *command[1:]], language_id, name
+    return None
+
+
+def _lsp_send(proc: subprocess.Popen, payload: dict[str, Any]) -> None:
+    if proc.stdin is None:
+        raise RuntimeError("LSP stdin is closed")
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    proc.stdin.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body)
+    proc.stdin.flush()
+
+
+def _lsp_reader(proc: subprocess.Popen, messages: queue.Queue, stderr_chunks: list[str]) -> None:
+    stdout = proc.stdout
+    if stdout is None:
+        return
+    while True:
+        headers: dict[str, str] = {}
+        while True:
+            raw = stdout.readline()
+            if not raw:
+                return
+            if raw in {b"\r\n", b"\n"}:
+                break
+            try:
+                key, value = raw.decode("ascii", errors="ignore").split(":", 1)
+            except ValueError:
+                continue
+            headers[key.lower()] = value.strip()
+        try:
+            length = int(headers.get("content-length", "0"))
+        except ValueError:
+            continue
+        if length <= 0:
+            continue
+        body = stdout.read(length)
+        try:
+            messages.put(json.loads(body.decode("utf-8", errors="replace")))
+        except json.JSONDecodeError:
+            continue
+
+
+def _lsp_stderr_reader(proc: subprocess.Popen, stderr_chunks: list[str]) -> None:
+    stderr = proc.stderr
+    if stderr is None:
+        return
+    while True:
+        raw = stderr.readline()
+        if not raw:
+            return
+        if sum(len(chunk) for chunk in stderr_chunks) < 4000:
+            stderr_chunks.append(raw.decode("utf-8", errors="replace"))
+
+
+def _lsp_request(ctx: ToolContext, path: Path, method: str, params: dict[str, Any], timeout: float) -> tuple[bool, Any, dict[str, Any]]:
+    server = _lsp_command_for_path(path)
+    if server is None:
+        return False, None, {"available": False, "reason": "no supported language server on PATH"}
+    command, language_id, server_name = server
+    metadata = {"available": True, "server": server_name, "command": command, "language_id": language_id}
+    try:
+        proc = subprocess.Popen(
+            command,
+            cwd=ctx.sandbox.root,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as exc:
+        metadata["error"] = str(exc)
+        return False, None, metadata
+
+    messages: queue.Queue = queue.Queue()
+    stderr_chunks: list[str] = []
+    reader = threading.Thread(target=_lsp_reader, args=(proc, messages, stderr_chunks), daemon=True)
+    err_reader = threading.Thread(target=_lsp_stderr_reader, args=(proc, stderr_chunks), daemon=True)
+    reader.start()
+    err_reader.start()
+    next_id = 0
+
+    def request(req_method: str, req_params: dict[str, Any]) -> dict[str, Any]:
+        nonlocal next_id
+        next_id += 1
+        request_id = next_id
+        _lsp_send(proc, {"jsonrpc": "2.0", "id": request_id, "method": req_method, "params": req_params})
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                message = messages.get(timeout=0.05)
+            except queue.Empty:
+                if proc.poll() is not None:
+                    raise RuntimeError(f"LSP server exited with {proc.returncode}")
+                continue
+            if message.get("id") == request_id:
+                return message
+        raise TimeoutError(f"LSP request timed out: {req_method}")
+
+    try:
+        root_uri = ctx.sandbox.root.as_uri()
+        init = request(
+            "initialize",
+            {
+                "processId": os.getpid(),
+                "rootUri": root_uri,
+                "workspaceFolders": [{"uri": root_uri, "name": ctx.sandbox.root.name}],
+                "capabilities": {
+                    "textDocument": {
+                        "documentSymbol": {"hierarchicalDocumentSymbolSupport": True},
+                        "definition": {"linkSupport": True},
+                    }
+                },
+            },
+        )
+        if init.get("error"):
+            metadata["error"] = init["error"]
+            return False, None, metadata
+        document_uri = path.as_uri()
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        _lsp_send(proc, {"jsonrpc": "2.0", "method": "initialized", "params": {}})
+        _lsp_send(
+            proc,
+            {
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": {
+                    "textDocument": {
+                        "uri": document_uri,
+                        "languageId": language_id,
+                        "version": 1,
+                        "text": text,
+                    }
+                },
+            },
+        )
+        response = request(method, params)
+        if response.get("error"):
+            metadata["error"] = response["error"]
+            return False, None, metadata
+        return True, response.get("result"), metadata
+    except Exception as exc:
+        metadata["error"] = f"{type(exc).__name__}: {exc}"
+        if stderr_chunks:
+            metadata["stderr"] = "".join(stderr_chunks)[-1000:]
+        return False, None, metadata
+    finally:
+        try:
+            _lsp_send(proc, {"jsonrpc": "2.0", "id": 999998, "method": "shutdown", "params": None})
+            _lsp_send(proc, {"jsonrpc": "2.0", "method": "exit", "params": {}})
+        except Exception:
+            pass
+        try:
+            proc.terminate()
+            proc.wait(timeout=0.5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
+def _flatten_lsp_symbols(result: Any, path: Path, root: Path, container: str | None = None) -> list[dict[str, Any]]:
+    symbols: list[dict[str, Any]] = []
+    if not isinstance(result, list):
+        return symbols
+    for item in result:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "")
+        if not name:
+            continue
+        kind = LSP_KIND_NAMES.get(int(item.get("kind") or 0), str(item.get("kind") or "symbol"))
+        location = item.get("location") if isinstance(item.get("location"), dict) else None
+        range_data = item.get("range") if isinstance(item.get("range"), dict) else None
+        if location and isinstance(location.get("range"), dict):
+            range_data = location["range"]
+        start = range_data.get("start", {}) if isinstance(range_data, dict) else {}
+        line = int(start.get("line", 0)) + 1
+        character = int(start.get("character", 0)) + 1
+        symbol_path = path
+        if location and location.get("uri"):
+            symbol_path = _path_from_file_uri(str(location["uri"])) or path
+        symbols.append(_symbol_record(symbol_path, root, name, kind, line, character, container, "lsp"))
+        children = item.get("children")
+        if isinstance(children, list):
+            next_container = f"{container}.{name}" if container else name
+            symbols.extend(_flatten_lsp_symbols(children, path, root, next_container))
+    return symbols
+
+
+def _path_from_file_uri(uri: str) -> Path | None:
+    parsed = urllib.parse.urlparse(uri)
+    if parsed.scheme != "file":
+        return None
+    raw_path = urllib.request.url2pathname(parsed.path)
+    if os.name == "nt" and re.match(r"^/[A-Za-z]:/", raw_path):
+        raw_path = raw_path[1:]
+    return Path(raw_path)
+
+
+def _lsp_symbols_tool(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    base = ctx.sandbox.resolve(args.get("path", "."))
+    query_text = str(args.get("query") or args.get("symbol") or "").strip()
+    max_results = max(1, min(int(args.get("max_results", args.get("limit", 100))), 500))
+    timeout = max(0.5, min(float(args.get("timeout", 4)), 20.0))
+    lsp_meta: dict[str, Any] = {"available": False}
+    if base.is_file():
+        ok, result, lsp_meta = _lsp_request(
+            ctx,
+            base,
+            "textDocument/documentSymbol",
+            {"textDocument": {"uri": base.as_uri()}},
+            timeout,
+        )
+        if ok:
+            symbols = _flatten_lsp_symbols(result, base, ctx.sandbox.root)
+            if query_text:
+                lowered = query_text.lower()
+                symbols = [item for item in symbols if lowered in str(item.get("name", "")).lower()]
+            symbols = symbols[:max_results]
+            data = {"provider": "lsp", "lsp": lsp_meta, "count": len(symbols), "symbols": symbols}
+            return ToolResult(True, _json(data), data)
+
+    symbols = _fallback_symbols(ctx, base, query_text, max_results)
+    data = {"provider": "fallback", "lsp": lsp_meta, "count": len(symbols), "symbols": symbols}
+    return ToolResult(True, _json(data), data)
+
+
+def _extract_symbol_at_position(path: Path, line: int, character: int) -> str:
+    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    if line < 1 or line > len(lines):
+        return ""
+    text = lines[line - 1]
+    index = max(0, min(character, len(text)))
+    left = index
+    while left > 0 and re.match(r"[\w$]", text[left - 1]):
+        left -= 1
+    right = index
+    while right < len(text) and re.match(r"[\w$]", text[right]):
+        right += 1
+    return text[left:right]
+
+
+def _fallback_definition(ctx: ToolContext, symbol: str, base: Path | None, max_results: int) -> list[dict[str, Any]]:
+    if not symbol:
+        return []
+    search_base = base if base and base.is_dir() else ctx.sandbox.root
+    candidates = _fallback_symbols(ctx, search_base, symbol, max(max_results * 4, 50))
+    exact = [item for item in candidates if str(item.get("name")) == symbol]
+    if exact:
+        return exact[:max_results]
+    lowered = symbol.lower()
+    fuzzy = [item for item in candidates if str(item.get("name", "")).lower() == lowered]
+    if fuzzy:
+        return fuzzy[:max_results]
+    pattern = re.compile(rf"\b{re.escape(symbol)}\b")
+    matches: list[dict[str, Any]] = []
+    for path in _iter_source_files(search_base, ctx.sandbox.root, 2000):
+        try:
+            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            continue
+        for idx, text in enumerate(lines, 1):
+            if pattern.search(text):
+                matches.append(_symbol_record(path, ctx.sandbox.root, symbol, "reference", idx, max(1, text.find(symbol) + 1), source="grep"))
+                if len(matches) >= max_results:
+                    return matches
+    return matches
+
+
+def _fallback_references(ctx: ToolContext, symbol: str, base: Path | None, max_results: int) -> list[dict[str, Any]]:
+    if not symbol:
+        return []
+    search_base = base if base and base.is_dir() else ctx.sandbox.root
+    pattern = re.compile(rf"\b{re.escape(symbol)}\b")
+    matches: list[dict[str, Any]] = []
+    for path in _iter_source_files(search_base, ctx.sandbox.root, 2000):
+        try:
+            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            continue
+        for idx, text in enumerate(lines, 1):
+            match = pattern.search(text)
+            if not match:
+                continue
+            matches.append(_symbol_record(path, ctx.sandbox.root, symbol, "reference", idx, match.start() + 1, source="grep"))
+            if len(matches) >= max_results:
+                return matches
+    return matches
+
+
+def _lsp_locations(result: Any, root: Path) -> list[dict[str, Any]]:
+    if not result:
+        return []
+    items = result if isinstance(result, list) else [result]
+    locations = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        uri = item.get("targetUri") or item.get("uri")
+        range_data = item.get("targetRange") or item.get("range") or {}
+        if not uri:
+            continue
+        path = _path_from_file_uri(str(uri))
+        if path is None:
+            continue
+        try:
+            rel = path.resolve().relative_to(root).as_posix()
+        except ValueError:
+            rel = str(path)
+        start = range_data.get("start", {}) if isinstance(range_data, dict) else {}
+        locations.append({
+            "path": rel,
+            "line": int(start.get("line", 0)) + 1,
+            "character": int(start.get("character", 0)) + 1,
+            "source": "lsp",
+        })
+    return locations
+
+
+def _lsp_definition_tool(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    path_arg = args.get("path")
+    symbol = str(args.get("symbol") or args.get("name") or "").strip()
+    max_results = max(1, min(int(args.get("max_results", args.get("limit", 20))), 200))
+    timeout = max(0.5, min(float(args.get("timeout", 4)), 20.0))
+    base: Path | None = None
+    lsp_meta: dict[str, Any] = {"available": False}
+    if path_arg:
+        base = ctx.sandbox.resolve(path_arg)
+    line_value = args.get("line")
+    if base and base.is_file() and line_value is not None:
+        line = max(1, int(line_value))
+        character = max(0, int(args.get("character", args.get("column", 0))))
+        if not symbol:
+            symbol = _extract_symbol_at_position(base, line, character)
+        ok, result, lsp_meta = _lsp_request(
+            ctx,
+            base,
+            "textDocument/definition",
+            {"textDocument": {"uri": base.as_uri()}, "position": {"line": line - 1, "character": character}},
+            timeout,
+        )
+        if ok:
+            locations = _lsp_locations(result, ctx.sandbox.root)[:max_results]
+            if locations:
+                data = {"provider": "lsp", "lsp": lsp_meta, "symbol": symbol or None, "count": len(locations), "definitions": locations}
+                return ToolResult(True, _json(data), data)
+    definitions = _fallback_definition(ctx, symbol, base, max_results)
+    data = {"provider": "fallback", "lsp": lsp_meta, "symbol": symbol or None, "count": len(definitions), "definitions": definitions}
+    return ToolResult(True, _json(data), data)
+
+
+def _lsp_seed_file(ctx: ToolContext, base: Path) -> Path | None:
+    if base.is_file():
+        return base
+    files = _iter_source_files(base, ctx.sandbox.root, 100)
+    for path in files:
+        if _lsp_command_for_path(path) is not None:
+            return path
+    return files[0] if files else None
+
+
+def _lsp_workspace_symbols_tool(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    base = ctx.sandbox.resolve(args.get("path", "."))
+    query_text = str(args.get("query") or "").strip()
+    max_results = max(1, min(int(args.get("max_results", args.get("limit", 100))), 500))
+    timeout = max(0.5, min(float(args.get("timeout", 4)), 20.0))
+    seed = _lsp_seed_file(ctx, base)
+    lsp_meta: dict[str, Any] = {"available": False}
+    if seed is not None and _lsp_command_for_path(seed) is not None:
+        ok, result, lsp_meta = _lsp_request(ctx, seed, "workspace/symbol", {"query": query_text}, timeout)
+        if ok:
+            symbols = _flatten_lsp_symbols(result, seed, ctx.sandbox.root)[:max_results]
+            data = {"provider": "lsp", "lsp": lsp_meta, "query": query_text, "count": len(symbols), "symbols": symbols}
+            return ToolResult(True, _json(data), data)
+    symbols = _fallback_symbols(ctx, base, query_text, max_results)
+    data = {"provider": "fallback", "lsp": lsp_meta, "query": query_text, "count": len(symbols), "symbols": symbols}
+    return ToolResult(True, _json(data), data)
+
+
+def _lsp_references_tool(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    path_arg = args.get("path")
+    symbol = str(args.get("symbol") or args.get("name") or "").strip()
+    max_results = max(1, min(int(args.get("max_results", args.get("limit", 80))), 500))
+    timeout = max(0.5, min(float(args.get("timeout", 4)), 20.0))
+    include_declaration = _optional_bool(args.get("include_declaration"))
+    if include_declaration is None:
+        include_declaration = True
+    base = ctx.sandbox.resolve(path_arg) if path_arg else ctx.sandbox.root
+    lsp_meta: dict[str, Any] = {"available": False}
+    if path_arg and base.is_file() and args.get("line") is not None:
+        line = max(1, int(args.get("line")))
+        character = max(0, int(args.get("character", args.get("column", 0))))
+        if not symbol:
+            symbol = _extract_symbol_at_position(base, line, character)
+        ok, result, lsp_meta = _lsp_request(
+            ctx,
+            base,
+            "textDocument/references",
+            {
+                "textDocument": {"uri": base.as_uri()},
+                "position": {"line": line - 1, "character": character},
+                "context": {"includeDeclaration": include_declaration},
+            },
+            timeout,
+        )
+        if ok:
+            references = _lsp_locations(result, ctx.sandbox.root)[:max_results]
+            if references:
+                data = {"provider": "lsp", "lsp": lsp_meta, "symbol": symbol or None, "count": len(references), "references": references}
+                return ToolResult(True, _json(data), data)
+    references = _fallback_references(ctx, symbol, base if base.is_dir() else None, max_results)
+    for item in references:
+        item["kind"] = "reference"
+    data = {"provider": "fallback", "lsp": lsp_meta, "symbol": symbol or None, "count": len(references), "references": references}
+    return ToolResult(True, _json(data), data)
+
+
+def _normalize_lsp_diagnostics(result: Any, path: Path, root: Path) -> list[dict[str, Any]]:
+    severity = {1: "error", 2: "warning", 3: "information", 4: "hint"}
+    items = []
+    if isinstance(result, dict):
+        raw_items = result.get("items") or result.get("diagnostics") or []
+    elif isinstance(result, list):
+        raw_items = result
+    else:
+        raw_items = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        range_data = item.get("range") if isinstance(item.get("range"), dict) else {}
+        start = range_data.get("start", {}) if isinstance(range_data, dict) else {}
+        items.append({
+            "path": path.relative_to(root).as_posix(),
+            "line": int(start.get("line", 0)) + 1,
+            "character": int(start.get("character", 0)) + 1,
+            "severity": severity.get(int(item.get("severity") or 0), "unknown"),
+            "message": str(item.get("message") or ""),
+            "source": item.get("source") or "lsp",
+        })
+    return items
+
+
+def _fallback_diagnostics(ctx: ToolContext, base: Path, max_results: int) -> list[dict[str, Any]]:
+    diagnostics: list[dict[str, Any]] = []
+    for path in _iter_source_files(base, ctx.sandbox.root, 2000):
+        if path.suffix.lower() != ".py":
+            continue
+        try:
+            ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+        except SyntaxError as exc:
+            diagnostics.append({
+                "path": path.relative_to(ctx.sandbox.root).as_posix(),
+                "line": int(exc.lineno or 1),
+                "character": int(exc.offset or 1),
+                "severity": "error",
+                "message": exc.msg,
+                "source": "python_ast",
+            })
+        except OSError:
+            continue
+        if len(diagnostics) >= max_results:
+            break
+    return diagnostics
+
+
+def _lsp_diagnostics_tool(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    base = ctx.sandbox.resolve(args.get("path", "."))
+    max_results = max(1, min(int(args.get("max_results", args.get("limit", 100))), 500))
+    timeout = max(0.5, min(float(args.get("timeout", 4)), 20.0))
+    lsp_meta: dict[str, Any] = {"available": False}
+    if base.is_file() and _lsp_command_for_path(base) is not None:
+        ok, result, lsp_meta = _lsp_request(
+            ctx,
+            base,
+            "textDocument/diagnostic",
+            {"textDocument": {"uri": base.as_uri()}},
+            timeout,
+        )
+        if ok:
+            diagnostics = _normalize_lsp_diagnostics(result, base, ctx.sandbox.root)[:max_results]
+            data = {"provider": "lsp", "lsp": lsp_meta, "count": len(diagnostics), "diagnostics": diagnostics}
+            return ToolResult(True, _json(data), data)
+    diagnostics = _fallback_diagnostics(ctx, base, max_results)
+    data = {"provider": "fallback", "lsp": lsp_meta, "count": len(diagnostics), "diagnostics": diagnostics}
+    return ToolResult(True, _json(data), data)
+
+
+def _workspace_edit_items(result: Any, root: Path) -> list[dict[str, Any]]:
+    edits: list[dict[str, Any]] = []
+    if not isinstance(result, dict):
+        return edits
+    changes = result.get("changes") if isinstance(result.get("changes"), dict) else {}
+    document_changes = result.get("documentChanges") if isinstance(result.get("documentChanges"), list) else []
+    for uri, uri_edits in changes.items():
+        path = _path_from_file_uri(str(uri))
+        if path is None:
+            continue
+        for edit in uri_edits if isinstance(uri_edits, list) else []:
+            range_data = edit.get("range") if isinstance(edit, dict) else {}
+            start = range_data.get("start", {}) if isinstance(range_data, dict) else {}
+            try:
+                rel = path.resolve().relative_to(root).as_posix()
+            except ValueError:
+                rel = str(path)
+            edits.append({
+                "path": rel,
+                "line": int(start.get("line", 0)) + 1,
+                "character": int(start.get("character", 0)) + 1,
+                "new_text": str(edit.get("newText") or ""),
+                "source": "lsp",
+            })
+    for change in document_changes:
+        if not isinstance(change, dict):
+            continue
+        document = change.get("textDocument") if isinstance(change.get("textDocument"), dict) else {}
+        uri = document.get("uri")
+        path = _path_from_file_uri(str(uri)) if uri else None
+        if path is None:
+            continue
+        try:
+            rel = path.resolve().relative_to(root).as_posix()
+        except ValueError:
+            rel = str(path)
+        for edit in change.get("edits") if isinstance(change.get("edits"), list) else []:
+            range_data = edit.get("range") if isinstance(edit, dict) else {}
+            start = range_data.get("start", {}) if isinstance(range_data, dict) else {}
+            edits.append({
+                "path": rel,
+                "line": int(start.get("line", 0)) + 1,
+                "character": int(start.get("character", 0)) + 1,
+                "new_text": str(edit.get("newText") or ""),
+                "source": "lsp",
+            })
+    return edits
+
+
+def _lsp_rename_preview_tool(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    path_arg = args.get("path")
+    new_name = str(args.get("new_name") or args.get("newName") or "").strip()
+    if not path_arg or not new_name:
+        return ToolResult(False, "path and new_name are required.")
+    path = ctx.sandbox.resolve(path_arg)
+    if not path.is_file():
+        return ToolResult(False, f"Not a file: {path_arg}")
+    line = max(1, int(args.get("line", 1)))
+    character = max(0, int(args.get("character", args.get("column", 0))))
+    symbol = str(args.get("symbol") or "").strip() or _extract_symbol_at_position(path, line, character)
+    max_results = max(1, min(int(args.get("max_results", args.get("limit", 100))), 500))
+    timeout = max(0.5, min(float(args.get("timeout", 4)), 20.0))
+    lsp_meta: dict[str, Any] = {"available": False}
+    if _lsp_command_for_path(path) is not None:
+        ok, result, lsp_meta = _lsp_request(
+            ctx,
+            path,
+            "textDocument/rename",
+            {
+                "textDocument": {"uri": path.as_uri()},
+                "position": {"line": line - 1, "character": character},
+                "newName": new_name,
+            },
+            timeout,
+        )
+        if ok:
+            edits = _workspace_edit_items(result, ctx.sandbox.root)[:max_results]
+            data = {"provider": "lsp", "applies": False, "lsp": lsp_meta, "symbol": symbol or None, "new_name": new_name, "count": len(edits), "edits": edits}
+            return ToolResult(True, _json(data), data)
+    references = _fallback_references(ctx, symbol, ctx.sandbox.root, max_results)
+    edits = [
+        {
+            "path": item["path"],
+            "line": item["line"],
+            "character": item.get("character", 1),
+            "old_text": symbol,
+            "new_text": new_name,
+            "source": "fallback_reference",
+        }
+        for item in references
+    ]
+    data = {"provider": "fallback", "applies": False, "lsp": lsp_meta, "symbol": symbol or None, "new_name": new_name, "count": len(edits), "edits": edits}
+    return ToolResult(True, _json(data), data)
+
+
+def _add_framework(frameworks: list[dict[str, str]], name: str, evidence: str) -> None:
+    if not any(item["name"] == name for item in frameworks):
+        frameworks.append({"name": name, "evidence": evidence})
+
+
+def _detect_frameworks(root: Path) -> dict[str, Any]:
+    frameworks: list[dict[str, str]] = []
+    entrypoints: list[str] = []
+    package_managers: list[str] = []
+    markers: list[str] = []
+
+    def exists(rel: str) -> bool:
+        found = (root / rel).exists()
+        if found:
+            markers.append(rel)
+        return found
+
+    if exists("package.json"):
+        try:
+            package = json.loads((root / "package.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            package = {}
+        deps = {}
+        for key in ("dependencies", "devDependencies", "peerDependencies"):
+            value = package.get(key)
+            if isinstance(value, dict):
+                deps.update(value)
+        scripts = package.get("scripts") if isinstance(package.get("scripts"), dict) else {}
+        for name, marker in [
+            ("Next.js", "next"),
+            ("React", "react"),
+            ("Vite", "vite"),
+            ("Vue", "vue"),
+            ("Svelte", "svelte"),
+            ("Express", "express"),
+            ("Electron", "electron"),
+            ("Tailwind CSS", "tailwindcss"),
+            ("Vitest", "vitest"),
+            ("Jest", "jest"),
+            ("Playwright", "@playwright/test"),
+        ]:
+            if marker in deps:
+                _add_framework(frameworks, name, f"package.json dependency {marker}")
+        for key in ("main", "module", "types"):
+            if package.get(key):
+                entrypoints.append(f"package.json:{key} -> {package[key]}")
+        for key in ("dev", "build", "test", "start"):
+            if key in scripts:
+                entrypoints.append(f"npm script {key}: {scripts[key]}")
+    for lock, manager in [
+        ("pnpm-lock.yaml", "pnpm"),
+        ("yarn.lock", "yarn"),
+        ("package-lock.json", "npm"),
+        ("bun.lockb", "bun"),
+        ("uv.lock", "uv"),
+        ("poetry.lock", "poetry"),
+        ("Pipfile.lock", "pipenv"),
+    ]:
+        if exists(lock):
+            package_managers.append(manager)
+    if exists("pyproject.toml"):
+        text = (root / "pyproject.toml").read_text(encoding="utf-8", errors="ignore").lower()
+        for name, marker in [
+            ("FastAPI", "fastapi"),
+            ("Django", "django"),
+            ("Flask", "flask"),
+            ("Pytest", "pytest"),
+            ("Ruff", "ruff"),
+            ("Mypy", "mypy"),
+            ("Poetry", "poetry"),
+            ("Hatch", "hatch"),
+            ("PDM", "pdm"),
+        ]:
+            if marker in text:
+                _add_framework(frameworks, name, f"pyproject.toml mentions {marker}")
+    if exists("requirements.txt"):
+        text = (root / "requirements.txt").read_text(encoding="utf-8", errors="ignore").lower()
+        for name, marker in [("FastAPI", "fastapi"), ("Django", "django"), ("Flask", "flask"), ("Pytest", "pytest")]:
+            if marker in text:
+                _add_framework(frameworks, name, f"requirements.txt dependency {marker}")
+    if exists("manage.py"):
+        _add_framework(frameworks, "Django", "manage.py")
+        entrypoints.append("manage.py")
+    if exists("Cargo.toml"):
+        _add_framework(frameworks, "Rust/Cargo", "Cargo.toml")
+        package_managers.append("cargo")
+    if exists("go.mod"):
+        _add_framework(frameworks, "Go module", "go.mod")
+        package_managers.append("go")
+    for rel in ["src/main.ts", "src/main.tsx", "src/main.js", "src/main.jsx", "src/app.py", "app.py", "main.py", "lilbot/__main__.py"]:
+        if (root / rel).exists():
+            entrypoints.append(rel)
+    return {
+        "frameworks": frameworks,
+        "entrypoints": sorted(dict.fromkeys(entrypoints)),
+        "package_managers": sorted(dict.fromkeys(package_managers)),
+        "markers": sorted(dict.fromkeys(markers)),
+    }
+
+
 def _project_map(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     max_files = max(10, min(int(args.get("max_files", 200)), 1000))
-    rows = []
-    for path in ctx.sandbox.root.rglob("*"):
-        rel = path.relative_to(ctx.sandbox.root).as_posix()
-        if any(part in {".git", "__pycache__", ".venv", "node_modules"} for part in path.parts):
+    max_depth = max(1, min(int(args.get("max_depth", 3)), 8))
+    root = ctx.sandbox.root
+    directories: list[str] = []
+    files: list[str] = []
+    counts = {"files": 0, "directories": 0, "by_suffix": {}}
+    for path in sorted(root.rglob("*")):
+        if _is_noisy_path(path, root):
             continue
-        if path.is_dir() and len(path.relative_to(ctx.sandbox.root).parts) <= 2:
-            rows.append(rel + "/")
-        elif path.is_file() and path.suffix in {".py", ".md", ".toml", ".json", ".yaml", ".yml"}:
-            rows.append(rel)
-        if len(rows) >= max_files:
-            break
-    return ToolResult(True, "\n".join(rows) if rows else "(empty)", {"count": len(rows)})
+        rel_path = path.relative_to(root)
+        rel = rel_path.as_posix()
+        if path.is_dir():
+            counts["directories"] += 1
+            if len(rel_path.parts) <= max_depth:
+                directories.append(rel + "/")
+            continue
+        counts["files"] += 1
+        suffix = path.suffix.lower() or "[no extension]"
+        by_suffix = counts["by_suffix"]
+        by_suffix[suffix] = int(by_suffix.get(suffix, 0)) + 1
+        if len(files) < max_files and (path.name in {"README.md", "pyproject.toml", "package.json", "Cargo.toml", "go.mod"} or path.suffix.lower() in PROJECT_MAP_SUFFIXES):
+            files.append(rel)
+    framework_data = _detect_frameworks(root)
+    data = {
+        "workspace": str(root),
+        "frameworks": framework_data["frameworks"],
+        "entrypoints": framework_data["entrypoints"],
+        "package_managers": framework_data["package_managers"],
+        "markers": framework_data["markers"],
+        "counts": counts,
+        "directories": directories[:max_files],
+        "files": files,
+        "truncated_files": len(files) >= max_files,
+    }
+    return ToolResult(True, _json(data), data)
 
 
 def _retrieve_tool_result(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -882,12 +2100,17 @@ def _handle_read(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
 
 def _bash(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     command = args["command"]
-    if not _permission(ctx, f"bash:{command}", f"run shell command: {command}"):
-        return ToolResult(False, "Permission denied.")
     if bool(args.get("background", False)):
         return _task_shell_start(args, ctx)
+    allowed, safety, denied = _shell_permission(ctx, f"bash:{command}", f"run shell command: {command}", command)
+    if not allowed:
+        return denied or ToolResult(False, "Permission denied.", _with_shell_safety({}, safety))
     result = ctx.sandbox.run(command, int(args.get("timeout", 30)))
-    return ToolResult(result.ok, result.output or f"Process exited with {result.returncode}", {"returncode": result.returncode})
+    return ToolResult(
+        result.ok,
+        result.output or f"Process exited with {result.returncode}",
+        _with_shell_safety({"returncode": result.returncode}, safety),
+    )
 
 
 def _start_process(command: str, ctx: ToolContext) -> subprocess.Popen:
@@ -912,12 +2135,13 @@ def _task_shell_start(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     command = str(args.get("command") or "")
     if not command:
         return ToolResult(False, "Missing required command.")
-    if not _permission(ctx, f"bash:{command}", f"start background command: {command}"):
-        return ToolResult(False, "Permission denied.")
+    allowed, safety, denied = _shell_permission(ctx, f"bash:{command}", f"start background command: {command}", command, background=True)
+    if not allowed:
+        return denied or ToolResult(False, "Permission denied.", _with_shell_safety({}, safety))
     try:
         proc = _start_process(command, ctx)
     except OSError as exc:
-        return ToolResult(False, f"Failed to start command: {exc}")
+        return ToolResult(False, f"Failed to start command: {exc}", _with_shell_safety({}, safety))
     task_id = f"sh_{uuid4().hex[:10]}"
     with _SHELL_LOCK:
         _SHELL_JOBS[task_id] = {
@@ -929,7 +2153,8 @@ def _task_shell_start(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
             "status": "running",
             "returncode": None,
         }
-    return ToolResult(True, _json({"task_id": task_id, "status": "running", "command": command}), {"task_id": task_id, "status": "running"})
+    data = _with_shell_safety({"task_id": task_id, "status": "running", "command": command}, safety)
+    return ToolResult(True, _json(data), data)
 
 
 def _task_shell_wait(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -1296,8 +2521,9 @@ def _task_gate_run(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     command = str(args.get("command") or "")
     if not command:
         return ToolResult(False, "Missing command.")
-    if not _permission(ctx, f"gate:{command}", f"run verification gate: {command}"):
-        return ToolResult(False, "Permission denied.")
+    allowed, safety, denied = _shell_permission(ctx, f"gate:{command}", f"run verification gate: {command}", command)
+    if not allowed:
+        return denied or ToolResult(False, "Permission denied.", _with_shell_safety({}, safety))
     started = time.time()
     result = ctx.sandbox.run(command, int(args.get("timeout", 120)))
     gate = {
@@ -1307,6 +2533,8 @@ def _task_gate_run(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         "duration_ms": int((time.time() - started) * 1000),
         "summary": (result.output or "")[:1000],
     }
+    if safety:
+        gate["powershell_safety"] = safety
     task_id = args.get("task_id")
     if task_id:
         tasks = _task_records(ctx)
@@ -1551,6 +2779,9 @@ def _agent_spawn(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
             prompt=args["prompt"],
             background=bool(args.get("background", False)),
             allowed_tools=_tool_list_arg(args),
+            isolation=args.get("isolation"),
+            cleanup_worktree=_optional_bool(args.get("cleanup_worktree")) is not False,
+            worktree_branch=args.get("worktree_branch"),
         )
     except SubAgentGateError as exc:
         return ToolResult(False, _json(exc.to_dict()), {"gate": "subagent_creation", "gates": exc.failures})
@@ -1565,6 +2796,22 @@ def _agent_status(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         return ToolResult(False, "Task not found.")
     body = task.result if task.status in {"done", "completed"} else task.error or task.status
     return ToolResult(task.status != "error", f"{task.id} [{task.status}] {task.agent_type}\n{body}")
+
+
+def _agent_transcript(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    ref = str(args.get("task_id") or args.get("agent_id") or args.get("name") or args.get("id") or "")
+    if not ref:
+        return ToolResult(False, "Missing task_id, agent_id, name, or id.")
+    if not hasattr(ctx.subagents, "transcript"):
+        return ToolResult(False, "Subagent transcript reads are unavailable in this runtime.")
+    data = ctx.subagents.transcript(
+        ref,
+        after=max(0, int(args.get("after", args.get("cursor", 0)))),
+        limit=max(1, min(int(args.get("limit", 100)), 500)),
+    )
+    if data is None:
+        return ToolResult(False, "Subagent not found.")
+    return ToolResult(True, _json(data), data)
 
 
 def _agent_list(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -1586,6 +2833,9 @@ def _agent_open(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
             allowed_tools=_tool_list_arg(args),
             model=args.get("model"),
             fork_context=bool(args.get("fork_context", False)),
+            isolation=args.get("isolation"),
+            cleanup_worktree=_optional_bool(args.get("cleanup_worktree")) is not False,
+            worktree_branch=args.get("worktree_branch"),
         )
     except SubAgentGateError as exc:
         return ToolResult(False, _json(exc.to_dict()), {"gate": "subagent_creation", "gates": exc.failures})
@@ -2099,10 +3349,21 @@ def register_builtins(registry: ToolRegistry) -> None:
         "allowed_tools_list": {"type": "array", "items": {"type": "string"}},
         "tools": {"type": "array", "items": {"type": "string"}},
         "background": _bool("Run in background.", False),
+        "isolation": _string("Optional isolation mode. Use worktree for an isolated git worktree."),
+        "cleanup_worktree": _bool("Remove managed subagent worktree after completion.", True),
+        "worktree_branch": _string("Optional branch name for worktree isolation."),
     }, ["prompt"]), _agent_spawn))
     registry.register(ToolDef("agent_status", "Check a sub-agent task.", _schema({
         "task_id": _string("Task id."),
     }, ["task_id"]), _agent_status))
+    registry.register(ToolDef("agent_transcript", "Read persisted subagent transcript events with a cursor.", _schema({
+        "task_id": _string("Task id."),
+        "agent_id": _string("Task id alias."),
+        "name": _string("Subagent name alias."),
+        "cursor": _integer("Return events after this cursor.", 0),
+        "after": _integer("Cursor alias.", 0),
+        "limit": _integer("Maximum events.", 100),
+    }), _agent_transcript))
     registry.register(ToolDef("agent_list", "List sub-agent types and tasks.", _schema({}), _agent_list))
     registry.register(ToolDef("mcp_servers", "List configured MCP-style servers.", _schema({}), _mcp_servers))
     registry.register(ToolDef("mcp_call", "Call a tool on an MCP-style server.", _schema({
@@ -2184,11 +3445,36 @@ def register_builtins(registry: ToolRegistry) -> None:
     registry.register(ToolDef("EnterWorktree", "Enter a git worktree or report an honest unsupported state.", _schema({
         "name": _string("Worktree name used for default path."),
         "path": _string("Existing or new worktree path inside the workspace sandbox."),
-        "branch": _string("Optional branch or ref for git worktree add."),
+        "branch": _string("Optional new branch name for git worktree add."),
+        "new_branch": _string("Explicit new branch name for git worktree add."),
+        "ref": _string("Base ref for the worktree, default HEAD."),
+        "base": _string("Alias for ref."),
         "create": _bool("Create the worktree when path does not exist.", True),
         "timeout": _integer("Timeout in seconds.", 120),
     }), _enter_worktree))
-    registry.register(ToolDef("ExitWorktree", "Exit the active worktree and restore the previous sandbox root.", _schema({}), _exit_worktree))
+    registry.register(ToolDef("ExitWorktree", "Exit the active worktree and restore the previous sandbox root.", _schema({
+        "cleanup": _bool("Remove the created git worktree after exit.", False),
+        "remove": _bool("Alias for cleanup.", False),
+        "timeout": _integer("Timeout in seconds.", 120),
+    }), _exit_worktree))
+    registry.register(ToolDef("WorktreeMergeBack", "Preflight or merge a worktree branch back into a target branch.", _schema({
+        "path": _string("Worktree path, default active worktree state."),
+        "source_branch": _string("Branch to merge from."),
+        "branch": _string("Alias for source_branch."),
+        "target_branch": _string("Branch to merge into, default current branch."),
+        "target": _string("Alias for target_branch."),
+        "dry_run": _bool("Only report merge-back plan and diff stat.", True),
+        "timeout": _integer("Timeout in seconds.", 120),
+    }), _worktree_merge_back))
+    registry.register(ToolDef("worktree_merge_back", "Alias for WorktreeMergeBack.", _schema({
+        "path": _string("Worktree path, default active worktree state."),
+        "source_branch": _string("Branch to merge from."),
+        "branch": _string("Alias for source_branch."),
+        "target_branch": _string("Branch to merge into, default current branch."),
+        "target": _string("Alias for target_branch."),
+        "dry_run": _bool("Only report merge-back plan and diff stat.", True),
+        "timeout": _integer("Timeout in seconds.", 120),
+    }), _worktree_merge_back))
     registry.register(ToolDef("github_issue_context", "Read GitHub issue context through gh.", _schema({
         "issue": _string("Issue number or URL."),
         "number": _string("Issue number alias."),
@@ -2225,7 +3511,94 @@ def register_builtins(registry: ToolRegistry) -> None:
     }), _validate_data))
     registry.register(ToolDef("project_map", "Summarize project directories and key source files.", _schema({
         "max_files": _integer("Maximum rows.", 200),
+        "max_depth": _integer("Maximum directory depth.", 3),
     }), _project_map))
+    registry.register(ToolDef("lsp_symbols", "List document/project symbols via LSP when available, otherwise fallback to AST/regex project scan.", _schema({
+        "path": _string("File or directory path relative to workspace."),
+        "query": _string("Optional symbol/path filter."),
+        "max_results": _integer("Maximum symbols.", 100),
+        "timeout": _integer("LSP request timeout in seconds.", 4),
+    }), _lsp_symbols_tool))
+    registry.register(ToolDef("symbols", "Alias for lsp_symbols.", _schema({
+        "path": _string("File or directory path relative to workspace."),
+        "query": _string("Optional symbol/path filter."),
+        "max_results": _integer("Maximum symbols.", 100),
+        "timeout": _integer("LSP request timeout in seconds.", 4),
+    }), _lsp_symbols_tool))
+    registry.register(ToolDef("lsp_definition", "Find definitions via LSP when available, otherwise fallback to symbol and grep evidence.", _schema({
+        "symbol": _string("Symbol name to resolve."),
+        "path": _string("Optional file or directory path relative to workspace."),
+        "line": _integer("1-based source line for LSP definition lookup."),
+        "character": _integer("0-based source character for LSP definition lookup.", 0),
+        "max_results": _integer("Maximum definitions.", 20),
+        "timeout": _integer("LSP request timeout in seconds.", 4),
+    }), _lsp_definition_tool))
+    registry.register(ToolDef("definition", "Alias for lsp_definition.", _schema({
+        "symbol": _string("Symbol name to resolve."),
+        "path": _string("Optional file or directory path relative to workspace."),
+        "line": _integer("1-based source line for LSP definition lookup."),
+        "character": _integer("0-based source character for LSP definition lookup.", 0),
+        "max_results": _integer("Maximum definitions.", 20),
+        "timeout": _integer("LSP request timeout in seconds.", 4),
+    }), _lsp_definition_tool))
+    registry.register(ToolDef("lsp_workspace_symbols", "Search workspace symbols via LSP when available, otherwise fallback to AST/regex project scan.", _schema({
+        "path": _string("File or directory path relative to workspace."),
+        "query": _string("Symbol query."),
+        "max_results": _integer("Maximum symbols.", 100),
+        "timeout": _integer("LSP request timeout in seconds.", 4),
+    }), _lsp_workspace_symbols_tool))
+    registry.register(ToolDef("workspace_symbols", "Alias for lsp_workspace_symbols.", _schema({
+        "path": _string("File or directory path relative to workspace."),
+        "query": _string("Symbol query."),
+        "max_results": _integer("Maximum symbols.", 100),
+        "timeout": _integer("LSP request timeout in seconds.", 4),
+    }), _lsp_workspace_symbols_tool))
+    registry.register(ToolDef("lsp_references", "Find symbol references via LSP when available, otherwise fallback to grep evidence.", _schema({
+        "symbol": _string("Symbol name to find."),
+        "path": _string("Optional file or directory path relative to workspace."),
+        "line": _integer("1-based source line for LSP reference lookup."),
+        "character": _integer("0-based source character for LSP reference lookup.", 0),
+        "include_declaration": _bool("Include declaration in LSP references.", True),
+        "max_results": _integer("Maximum references.", 80),
+        "timeout": _integer("LSP request timeout in seconds.", 4),
+    }), _lsp_references_tool))
+    registry.register(ToolDef("references", "Alias for lsp_references.", _schema({
+        "symbol": _string("Symbol name to find."),
+        "path": _string("Optional file or directory path relative to workspace."),
+        "line": _integer("1-based source line for LSP reference lookup."),
+        "character": _integer("0-based source character for LSP reference lookup.", 0),
+        "include_declaration": _bool("Include declaration in LSP references.", True),
+        "max_results": _integer("Maximum references.", 80),
+        "timeout": _integer("LSP request timeout in seconds.", 4),
+    }), _lsp_references_tool))
+    registry.register(ToolDef("lsp_diagnostics", "Report diagnostics via LSP pull diagnostics when available, otherwise Python syntax fallback.", _schema({
+        "path": _string("File or directory path relative to workspace."),
+        "max_results": _integer("Maximum diagnostics.", 100),
+        "timeout": _integer("LSP request timeout in seconds.", 4),
+    }), _lsp_diagnostics_tool))
+    registry.register(ToolDef("diagnostics_symbols", "Alias for lsp_diagnostics.", _schema({
+        "path": _string("File or directory path relative to workspace."),
+        "max_results": _integer("Maximum diagnostics.", 100),
+        "timeout": _integer("LSP request timeout in seconds.", 4),
+    }), _lsp_diagnostics_tool))
+    registry.register(ToolDef("lsp_rename_preview", "Preview rename edits via LSP when available, otherwise fallback to reference candidates; does not modify files.", _schema({
+        "path": _string("File path relative to workspace."),
+        "line": _integer("1-based source line for rename position.", 1),
+        "character": _integer("0-based source character for rename position.", 0),
+        "symbol": _string("Optional symbol name when no exact position is available."),
+        "new_name": _string("Proposed new symbol name."),
+        "max_results": _integer("Maximum preview edits.", 100),
+        "timeout": _integer("LSP request timeout in seconds.", 4),
+    }, ["path", "new_name"]), _lsp_rename_preview_tool))
+    registry.register(ToolDef("rename_preview", "Alias for lsp_rename_preview.", _schema({
+        "path": _string("File path relative to workspace."),
+        "line": _integer("1-based source line for rename position.", 1),
+        "character": _integer("0-based source character for rename position.", 0),
+        "symbol": _string("Optional symbol name when no exact position is available."),
+        "new_name": _string("Proposed new symbol name."),
+        "max_results": _integer("Maximum preview edits.", 100),
+        "timeout": _integer("LSP request timeout in seconds.", 4),
+    }, ["path", "new_name"]), _lsp_rename_preview_tool))
     registry.register(ToolDef("retrieve_tool_result", "Read a stored path/handle for a prior large result.", _schema({
         "path": _string("Path or handle."),
         "handle": _string("Path or handle alias."),
@@ -2322,6 +3695,9 @@ def register_builtins(registry: ToolRegistry) -> None:
         "tools": {"type": "array", "items": {"type": "string"}},
         "background": _bool("Run in background.", True),
         "fork_context": _bool("Fork parent context marker.", False),
+        "isolation": _string("Optional isolation mode. Use worktree for an isolated git worktree."),
+        "cleanup_worktree": _bool("Remove managed subagent worktree after completion.", True),
+        "worktree_branch": _string("Optional branch name for worktree isolation."),
     }, ["prompt"]), _agent_open))
     registry.register(ToolDef("Agent", "Launch a Claude-style subagent.", _schema({
         "description": _string("Short task description."),
@@ -2332,6 +3708,9 @@ def register_builtins(registry: ToolRegistry) -> None:
         "model": _string("Optional model hint."),
         "run_in_background": _bool("Run in background.", True),
         "name": _string("Optional addressable agent name."),
+        "isolation": _string("Optional isolation mode. Use worktree for an isolated git worktree."),
+        "cleanup_worktree": _bool("Remove managed subagent worktree after completion.", True),
+        "worktree_branch": _string("Optional branch name for worktree isolation."),
     }, ["prompt"]), _agent_open))
     registry.register(ToolDef("Task", "Legacy Claude-style alias for Agent.", _schema({
         "description": _string("Short task description."),
@@ -2342,6 +3721,9 @@ def register_builtins(registry: ToolRegistry) -> None:
         "model": _string("Optional model hint."),
         "run_in_background": _bool("Run in background.", True),
         "name": _string("Optional addressable agent name."),
+        "isolation": _string("Optional isolation mode. Use worktree for an isolated git worktree."),
+        "cleanup_worktree": _bool("Remove managed subagent worktree after completion.", True),
+        "worktree_branch": _string("Optional branch name for worktree isolation."),
     }, ["prompt"]), _agent_open))
     registry.register(ToolDef("tool_agent", "Open a fast tool-bound subagent.", _schema({
         "name": _string("Session name."),
@@ -2350,6 +3732,9 @@ def register_builtins(registry: ToolRegistry) -> None:
         "allowed_tools_list": {"type": "array", "items": {"type": "string"}},
         "tools": {"type": "array", "items": {"type": "string"}},
         "background": _bool("Run in background.", True),
+        "isolation": _string("Optional isolation mode. Use worktree for an isolated git worktree."),
+        "cleanup_worktree": _bool("Remove managed subagent worktree after completion.", True),
+        "worktree_branch": _string("Optional branch name for worktree isolation."),
     }, ["prompt"]), _tool_agent))
     registry.register(ToolDef("agent_eval", "Fetch, wait on, or message a subagent session.", _schema({
         "name": _string("Session name."),

@@ -37,18 +37,37 @@ core capabilities enforceable and durable:
   rendering prompt text back into the parent conversation.
 - Subagent transcripts are persisted under `.lilbot/subagent-transcripts/` and
   exposed through `transcript_handle`.
+- Subagent lifecycle now has a configurable concurrency cap, persisted task
+  restart resume, transcript-cursor reads, structured dashboard progress, and
+  optional subagent-level `worktree` isolation.
 - `EnterPlanMode` and `ExitPlanMode` persist plan lifecycle and approval state.
 - Pending plan approval now blocks write and execution tools through the central
   tool registry until the plan is approved or rejected.
-- `EnterWorktree` and `ExitWorktree` probe git worktree support and return an
-  honest unsupported result when worktrees cannot be used.
+- Windows shell execution now runs through a PowerShell safety analyzer that
+  classifies separators, redirection, subprocess boundaries, background
+  launches, destructive commands, and unsafe delete/move targets before
+  permission prompts.
+- `EnterWorktree` and `ExitWorktree` probe git worktree support, return an
+  honest unsupported result, and support cleanup/remove for created worktrees.
+- Worktree isolation now has branch naming and `WorktreeMergeBack` dry-run or
+  merge execution for bringing a worktree branch back into the target branch.
+- LSP phase 2 is available through symbols, definitions, workspace symbols,
+  references, diagnostics, and rename preview tools. LilBot uses a local
+  language server when one is installed, otherwise it falls back to Python AST,
+  regex symbols, grep evidence, and project-map context.
+- Batch 1 workspace cleanup is implemented: `apply_patch` has a pure-Python
+  fallback, `run_tests` writes log artifacts under `.lilbot/test-artifacts/`,
+  and `project_map` now detects frameworks, entrypoints, package managers, and
+  key source files.
+- The dashboard Trace panel starts with a `WELCOME` banner, and the Work panel
+  now shows runtime, active tool, subagent, transcript, and worktree status.
 - The current test suite covers these enforcement and lifecycle paths.
 
 Current verified baseline:
 
 ```text
 python -m pytest
-66 passed
+80 passed
 ```
 
 ---
@@ -174,13 +193,13 @@ flowchart TB
 | CLI and runtime wiring | `lilbot/cli.py`, `lilbot/__main__.py` | Builds config, provider, registry, sandbox, memory, skills, subagents, MCP, and TUI. |
 | Agent loop | `lilbot/core/agent.py`, `lilbot/core/events.py`, `lilbot/core/prompts.py` | Runs provider turns, executes tools, tracks usage, compacts history, and auto-delegates broad tasks to explorer/research/planner subagents. |
 | Provider layer | `lilbot/llm/providers.py` | Supports the local rule model and OpenAI-compatible providers such as DeepSeek. |
-| Tool bus | `lilbot/tools/registry.py`, `lilbot/tools/builtin.py` | Registers schemas and handlers for workspace, git, shell, memory, skills, subagents, tasks, automation, MCP, web, document/media probes, compatibility aliases, and central plan-approval gating. |
+| Tool bus | `lilbot/tools/registry.py`, `lilbot/tools/builtin.py` | Registers schemas and handlers for workspace, git, shell, memory, skills, subagents, tasks, automation, MCP, web, LSP/navigation, worktree merge-back, document/media probes, compatibility aliases, and central plan-approval gating. |
 | Safety boundary | `lilbot/sandbox/workspace.py`, `lilbot/sandbox/permissions.py` | Enforces workspace path boundaries and ask/accept-all/deny-all permission modes. |
 | Memory | `lilbot/memory/store.py` | Persists project memory as JSONL with list/search/delete helpers. |
 | Skills | `lilbot/skills/registry.py`, `lilbot/skills/bundled/` | Loads inline and forked markdown skills, Claude-style frontmatter, aliases, companion files, allowed tools, agent hints, and model hints. |
-| Subagents | `lilbot/subagents/manager.py` | Provides built-in and custom agents, five-gate custom allowed-tool validation, runtime tool allowlists, structured final reports, cancellation, and transcript handles. |
+| Subagents | `lilbot/subagents/manager.py` | Provides built-in and custom agents, five-gate custom allowed-tool validation, runtime tool allowlists, concurrency limits, restart resume, structured final reports, cancellation, progress events, transcript handles, and optional worktree isolation. |
 | MCP adapter | `lilbot/mcp/manager.py` | Reads `.lilbot/mcp.json` and provides phase-1 server/tool/resource integration. |
-| TUI | `lilbot/tui/classic.py`, `lilbot/tui/dashboard.py`, `lilbot/tui/windows_console.py` | Provides Rich classic fallback and a prompt_toolkit dashboard for Windows-first operation. |
+| TUI | `lilbot/tui/classic.py`, `lilbot/tui/dashboard.py`, `lilbot/tui/windows_console.py` | Provides Rich classic fallback and a prompt_toolkit dashboard with Trace, structured Work status, permission popups, and transcript/progress visibility. |
 
 ---
 
@@ -188,12 +207,13 @@ flowchart TB
 
 | Area | Done | Next Gap |
 |---|---|---|
-| Workspace tools | File reads, directory listing, search, git status/diff/log/show/blame, bounded handles, diagnostics. | Pure-Python patch fallback, richer `run_tests` classification, better `project_map`. |
+| Workspace tools | File reads, directory listing, search, git status/diff/log/show/blame, bounded handles, diagnostics, pure-Python patch fallback, test log artifacts, and framework-aware `project_map`. | Richer test classification and artifact retrieval UX. |
+| Code navigation | `lsp_symbols`, `lsp_definition`, `lsp_workspace_symbols`, `lsp_references`, `lsp_diagnostics`, and `lsp_rename_preview`, with local LSP when available and AST/regex/grep fallback when unavailable. | Persistent warm LSP server sessions, references quality for dynamic languages, and safe rename apply. |
 | Skill ecosystem | Bundled skills, `SKILL.md` folders, metadata parsing, `load_skill`, inline skills, forked skill execution through subagents. | Source precedence, hooks, path-filtered skills, safer shell expansion. |
-| Subagents | Built-in roles, custom agents, five-gate allowed-tool protection, Claude tool-name compatibility, durable transcript handles. | Configurable concurrency caps, persisted task recovery, progress events in the UI. |
+| Subagents | Built-in roles, custom agents, five-gate allowed-tool protection, Claude tool-name compatibility, concurrency cap, restart resume, progress events, structured dashboard status, durable transcript handles, optional worktree isolation. | Exact model-state resume, per-agent resource quotas, richer cancellation semantics. |
 | Planning lifecycle | `update_plan`, checklists, goals, `EnterPlanMode`, `ExitPlanMode`, persisted approval state, write/execute gating while approval is pending. | Better approval UX and plan review surfaces in the TUI. |
-| Worktree lifecycle | `EnterWorktree` / `ExitWorktree` with explicit unsupported fallback. | Stronger branch naming, cleanup/remove flow, per-subagent worktree isolation. |
-| Shell and PowerShell | Permission-gated shell execution and background jobs. | Claude-grade PowerShell parser, destructive command classifier, safer command segments. |
+| Worktree lifecycle | `EnterWorktree` / `ExitWorktree` with explicit unsupported fallback and cleanup/remove; subagents can request managed `worktree` isolation; `WorktreeMergeBack` can preflight or merge a source branch back. | Conflict UI, merge-back artifact summaries, stronger cleanup diagnostics. |
+| Shell and PowerShell | Permission-gated shell execution, background jobs, PowerShell safety metadata, destructive command classification, and hard blocks for unsafe delete/move targets. | Expand analyzer coverage for advanced PowerShell AST cases and richer remediation hints. |
 | External integrations | Web search/fetch, GitHub via `gh`, MCP phase-1 adapter, automation records. | Deeper MCP resource discovery, stronger GitHub workflows, real automation scheduler. |
 | Analysis/media/docs | RLM Python sessions, pandoc/OCR/image probes. | Artifact handles, richer document/spreadsheet/presentation workflows. |
 
@@ -431,6 +451,154 @@ Dashboard interaction notes:
 - Right-click paste and `Ctrl+V` are supported in the Composer.
 - The top bar shows approximate context usage, for example `ctx 03%`.
 - During model work, the footer switches to a wave animation.
+- The `Work` panel shows runtime status, active tool state, recent subagents,
+  last progress event, transcript handles, worktree branch, and worktree state.
+
+### Manual Subagent Concurrency Test
+
+Use this quick local probe to verify queueing without calling a real model:
+
+```powershell
+$env:LILBOT_SUBAGENT_MAX_CONCURRENT='3'
+@'
+from pathlib import Path
+import threading, time
+from lilbot.core.events import ProviderTurn
+from lilbot.subagents import SubAgentManager
+
+release = threading.Event()
+def provider(messages, tools):
+    release.wait(20)
+    return ProviderTurn(content="done")
+
+manager = SubAgentManager(provider, Path(".lilbot/agents"), max_concurrent=3)
+tasks = [manager.open("writer", f"manual concurrency {i}", background=True) for i in range(6)]
+time.sleep(0.3)
+print(manager.runtime_status())
+release.set()
+for task in tasks:
+    while not task.terminal:
+        time.sleep(0.05)
+print(manager.runtime_status())
+'@ | python -
+```
+
+Expected first print: `running` is `3`, `queued` is `3`. Expected second print:
+all six tasks are terminal.
+
+---
+
+## Lifecycle Theory
+
+LilBot treats long-running agent work as a small lifecycle system rather than a
+single function call. A subagent task moves through `queued`, `running`, and a
+terminal state such as `completed`, `failed`, or `cancelled`. Every meaningful
+transition is also appended to a JSONL transcript. This makes the dashboard and
+tools read the same source of truth:
+
+```text
+SubAgentTask state
+  -> persisted in .lilbot/subagent-tasks.json
+  -> mirrored by transcript events in .lilbot/subagent-transcripts/*.jsonl
+  -> projected into Work panel progress rows
+```
+
+Restart resume is deliberately conservative. If LilBot restarts while a task is
+non-terminal, the task is recovered as `queued`, marked with `recovered=True`,
+and scheduled again after the runtime is configured. This resumes from the
+assignment prompt and transcript evidence, not from hidden model token state.
+That keeps the behavior honest while still avoiding the old failure-only
+recovery path.
+
+Transcript cursors are line-based. `agent_transcript` returns events after a
+cursor and a new cursor, so a dashboard or future GUI can poll progress without
+re-reading the whole transcript.
+
+---
+
+## LSP Theory
+
+LilBot's code navigation tools follow a "semantic first, evidence fallback"
+rule:
+
+```text
+local language server available
+  -> use LSP request
+  -> normalize result into path/line/character records
+otherwise
+  -> Python AST for Python symbols and syntax diagnostics
+  -> regex symbol extraction for common languages
+  -> grep-style reference evidence
+```
+
+The current LSP surface includes:
+
+| Tool | Purpose | Fallback |
+|---|---|---|
+| `lsp_symbols` | Document/project symbols | AST/regex scan |
+| `lsp_definition` | Symbol definition | AST/regex definitions, then grep evidence |
+| `lsp_workspace_symbols` | Workspace symbol search | AST/regex project scan |
+| `lsp_references` | Reference lookup | grep-style references |
+| `lsp_diagnostics` | Diagnostics | Python syntax diagnostics |
+| `lsp_rename_preview` | Rename edit preview | reference candidates only |
+
+Rename preview does not write files. It returns candidate edits so a later
+phase can add permission-gated apply semantics with conflict checks.
+
+---
+
+## Worktree Theory
+
+Worktree isolation gives a subagent a separate checkout under
+`.lilbot/worktrees/` so it can inspect or modify files without sharing the main
+workspace directory. Branch naming matters because merge-back needs a durable
+source branch, not just a detached checkout.
+
+The current flow is:
+
+```text
+EnterWorktree or subagent isolation=worktree
+  -> probe git worktree support
+  -> create a named branch/worktree when supported
+  -> run work in the worktree sandbox
+  -> optionally cleanup/remove the worktree
+  -> WorktreeMergeBack dry-run shows source -> target diff
+  -> WorktreeMergeBack dry_run=false merges after permission and clean-tree checks
+```
+
+Unsupported systems return structured `unsupported` results rather than
+pretending worktree isolation happened.
+
+---
+
+## Update Log
+
+### 2026-06-16
+
+- Added subagent restart resume: persisted non-terminal tasks recover as
+  `queued` and are automatically scheduled after tool/context configuration.
+- Added transcript cursor reads through `agent_transcript` and progress metadata
+  in subagent projections.
+- Added worktree branch naming for managed subagent worktrees and `EnterWorktree`
+  branch/ref options.
+- Added `WorktreeMergeBack` / `worktree_merge_back` for merge-back preflight and
+  permission-gated execution.
+- Added LSP phase 2 tools: `lsp_workspace_symbols`, `lsp_references`,
+  `lsp_diagnostics`, and `lsp_rename_preview`.
+- Updated the Work panel to show subagent last event, event count, resume count,
+  transcript handle, worktree branch, and worktree path.
+
+### 2026-06-15
+
+- Enforced plan approval for write/execute tools.
+- Added PowerShell safety analysis before shell permission prompts.
+- Added custom subagent five-gate allowed-tool protection.
+- Added forked skill execution through subagents.
+- Added durable subagent transcripts, concurrency limits, restart recovery,
+  optional worktree isolation, and structured dashboard subagent status.
+- Added LSP phase 1 symbols/definition tools and Batch 1 workspace cleanup:
+  pure-Python patch fallback, test log artifacts, and framework-aware
+  `project_map`.
 
 ---
 
@@ -438,32 +606,26 @@ Dashboard interaction notes:
 
 Recommended next batch:
 
-1. PowerShell safety.
-   - Add a dedicated PowerShell command analyzer for Windows.
-   - Classify destructive commands, command separators, redirection,
-     subprocess boundaries, path deletes/moves, and background launches.
-   - Return structured safety metadata before permission prompts.
+1. Persistent LSP sessions.
+   - Keep language servers warm across calls instead of one short request per
+     lookup.
+   - Add server lifecycle controls, cache invalidation, and richer diagnostics
+     collection.
 
-2. Subagent lifecycle hardening.
-   - Add configurable concurrency limits.
-   - Persist task records strongly enough to recover after restart.
-   - Surface transcript/progress events in the dashboard.
-   - Prepare per-subagent worktree isolation.
+2. Worktree merge UX.
+   - Add merge-back artifact summaries.
+   - Add conflict reporting and cleanup diagnostics.
+   - Add safer branch naming policy for repeated task names.
 
-3. Worktree isolation.
-   - Extend `EnterWorktree` / `ExitWorktree` into a subagent-aware workflow.
-   - Add cleanup/remove behavior with explicit permissions.
-   - Keep unsupported states honest on systems without git worktree support.
+3. Product-level hooks and lifecycle.
+   - Add pre-tool/post-tool hooks.
+   - Surface plan approval and PowerShell risk in the dashboard more clearly.
+   - Add richer task/test artifact retrieval from handles.
 
-4. LSP phase 1.
-   - Add an `LSP` tool that can report symbols/definitions when a local
-     language server is available.
-   - Fall back cleanly to grep/project-map evidence when LSP is unavailable.
-
-5. Batch 1 cleanup.
-   - Add pure-Python `apply_patch` fallback for non-git workspaces.
-   - Store test logs/artifact handles.
-   - Improve `project_map` from file listing into framework-aware summaries.
+4. Subagent resource controls.
+   - Add per-agent time/tool/output quotas.
+   - Add clearer cancellation semantics for queued vs running tasks.
+   - Explore exact resume from structured conversation checkpoints.
 
 ---
 

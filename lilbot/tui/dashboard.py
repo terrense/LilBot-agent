@@ -117,6 +117,15 @@ LILBOT_LOGO_STYLES = [
     "class:logo.shadow",
 ]
 
+WELCOME_TRACE_ROWS = [
+    "██╗    ██╗███████╗██╗      ██████╗ ██████╗ ███╗   ███╗███████╗",
+    "██║    ██║██╔════╝██║     ██╔════╝██╔═══██╗████╗ ████║██╔════╝",
+    "██║ █╗ ██║█████╗  ██║     ██║     ██║   ██║██╔████╔██║█████╗  ",
+    "██║███╗██║██╔══╝  ██║     ██║     ██║   ██║██║╚██╔╝██║██╔══╝  ",
+    "╚███╔███╔╝███████╗███████╗╚██████╗╚██████╔╝██║ ╚═╝ ██║███████╗",
+    " ╚══╝╚══╝ ╚══════╝╚══════╝ ╚═════╝ ╚═════╝ ╚═╝     ╚═╝╚══════╝",
+]
+
 
 STYLE = Style.from_dict(
     {
@@ -230,6 +239,10 @@ def _highlight_trace_line(line: str):
         return [("class:trace", "")]
     if line.startswith("> "):
         return [("class:trace.user", "> "), *_inline_fragments(line[2:], "class:trace.user")]
+    if line in WELCOME_TRACE_ROWS:
+        idx = WELCOME_TRACE_ROWS.index(line)
+        style = LILBOT_LOGO_STYLES[min(idx, len(LILBOT_LOGO_STYLES) - 1)]
+        return [(style, line)]
     if stripped == "LILBOT":
         return [("class:trace.agent.label", "LILBOT")]
     if re.match(r"^\s{0,3}#{1,6}\s+", line):
@@ -425,6 +438,8 @@ class DashboardUI:
         self.registry = registry
         self.ctx = ctx
         self.lines: list[str] = [
+            *WELCOME_TRACE_ROWS,
+            "",
             "Boot sequence ready.",
             "Trace is the main conversation and tool-execution stream.",
             "Trace keeps final answers readable and summarizes noisy tool output.",
@@ -1611,19 +1626,76 @@ class DashboardUI:
         return value if len(value) <= limit else value[: max(0, limit - 3)] + "..."
 
     def _work_text(self) -> str:
+        ctx = getattr(self, "ctx", None)
+        config = getattr(ctx, "config", None)
+        permissions = getattr(ctx, "permissions", None)
+        registry = getattr(self, "registry", None)
+        try:
+            tool_count = len(registry.list()) if registry is not None else 0
+        except Exception:
+            tool_count = 0
         rows = [
-            "### Nebula workplane",
+            "### Runtime",
+            f"model: {getattr(config, 'model', 'unknown')}",
+            f"provider: {getattr(config, 'provider', 'unknown')}",
+            f"permissions: {getattr(permissions, 'mode', 'unknown')}",
+            f"tools: {tool_count}",
             "",
-            *SYSTEM_MAP.splitlines(),
-            "",
-            "### Active work",
+            "### Active tool",
             *(self.work_items or ["No active work."]),
+            "",
+            "### Subagents",
+            *self._subagent_work_lines(),
+            "",
+            "### Flow",
+            *SYSTEM_MAP.splitlines(),
             "",
             "---",
             "F5 focuses Work. Mouse wheel or PageUp/PageDown scrolls the focused pane.",
             "Esc returns to Composer.",
         ]
         return "\n".join(rows)
+
+    def _subagent_work_lines(self) -> list[str]:
+        manager = getattr(getattr(self, "ctx", None), "subagents", None)
+        if manager is None or not hasattr(manager, "runtime_status"):
+            return ["status: unavailable"]
+        try:
+            status = manager.runtime_status()
+        except Exception as exc:
+            return [f"status: unavailable ({type(exc).__name__}: {exc})"]
+        rows = [
+            (
+                f"concurrency: {status.get('running', 0)}/{status.get('max_concurrent', '?')} running"
+                f" | queued {status.get('queued', 0)} | total {status.get('total', 0)}"
+            )
+        ]
+        recent = status.get("recent") or []
+        if not recent:
+            rows.append("recent: none")
+            return rows
+        for item in recent[:5]:
+            name = str(item.get("name") or item.get("agent_id") or "subagent")
+            task_status = str(item.get("status") or "?")
+            agent_type = str(item.get("agent_type") or "?")
+            duration = int(item.get("duration_ms") or 0)
+            rows.append(f"- {name} [{task_status}] {agent_type} {duration}ms")
+            progress = item.get("progress") if isinstance(item.get("progress"), dict) else {}
+            if progress:
+                rows.append(
+                    f"  progress: {progress.get('last_event') or 'none'}"
+                    f" | events {progress.get('events', 0)}"
+                    f" | resumes {progress.get('resume_count', 0)}"
+                )
+            handle = item.get("transcript_handle")
+            if handle:
+                rows.append(f"  transcript: {handle}")
+            worktree = item.get("worktree") if isinstance(item.get("worktree"), dict) else {}
+            worktree_status = worktree.get("status") if worktree else None
+            if worktree_status and worktree_status != "none":
+                branch = f" branch {worktree.get('branch')}" if worktree.get("branch") else ""
+                rows.append(f"  worktree: {worktree_status}{branch} {worktree.get('path') or ''}".rstrip())
+        return rows
 
     def _toolbar(self):
         return FormattedText(
