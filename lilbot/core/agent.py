@@ -126,6 +126,13 @@ class Agent:
         self.messages = [self.messages[0], {"role": "system", "content": summary}, *keep]
         return f"Compacted context. Messages now: {len(self.messages)}"
 
+    def reset_conversation(self) -> str:
+        self.messages = [
+            {"role": "system", "content": build_system_prompt(self.ctx.memory, self.ctx.skills)}
+        ]
+        self.usage.clear()
+        return "Conversation reset. Messages now: 1"
+
     def _compaction_tail_start(self, target_tail: int) -> int:
         start = max(1, len(self.messages) - target_tail)
         # Tool messages are only valid immediately after their assistant tool_calls message.

@@ -12,7 +12,7 @@ from time import monotonic
 from typing import Iterable
 
 from ..core.agent import Agent
-from ..cli import handle_slash, run_prompt, slash_commands_matching
+from ..cli import handle_slash, run_prompt, slash_command_runs_agent, slash_commands_matching
 from ..core.events import TextDelta, ToolFinished, ToolStarted, TurnFinished
 from ..tools import ToolContext, ToolRegistry
 
@@ -629,12 +629,28 @@ class DashboardUI:
         self.command_popup_lines = []
         self.command_popup_error = False
 
+    def clear_trace(self) -> None:
+        self.lines = [
+            *WELCOME_TRACE_ROWS,
+            "",
+            "Trace cleared. New local conversation started.",
+            "Use /help for slash commands. F2 copies the current Trace selection.",
+        ]
+        self.tool_count = 0
+        self.auto_scroll = True
+        self._refresh()
+
     def help(self, compact: bool = False) -> None:
         rows = [
             ("/help", "show commands"),
+            ("/clear", "clear Trace and reset local conversation"),
             ("/copy", "copy all Trace to clipboard"),
             ("/theme", "show theme preview"),
             ("/model [flash|pro]", "switch DeepSeek model"),
+            ("/tokens", "show local token/context usage"),
+            ("/plan [task]", "enter Plan Mode; optional task goes to Agent"),
+            ("/do", "exit Plan Mode as approved"),
+            ("/review [focus]", "ask Agent to review git diff"),
             ("/tools", "list tools"),
             ("/skills", "list skills"),
             ("/memory list|search|save|delete", "manage memory"),
@@ -827,8 +843,7 @@ class DashboardUI:
     def _is_popup_slash_command(self, line: str) -> bool:
         if not line.startswith("/"):
             return False
-        command = line[1:].split(maxsplit=1)[0].lower()
-        return command not in {"skill"}
+        return not slash_command_runs_agent(line)
 
     def _append(self, text: str) -> None:
         for line in str(text).splitlines() or [""]:
@@ -922,7 +937,7 @@ class DashboardUI:
                 [
                     (prefix_style, marker),
                     (name_style, _pad_display(command.usage, 34)),
-                    (desc_style, f" {command.description}{aliases}\n"),
+                    (desc_style, f" [{command.type}] {command.description}{aliases}\n"),
                 ]
             )
         fragments.append(("class:slash.footer", "  Up/Down move   Tab accept   Esc close"))

@@ -75,13 +75,17 @@ core capabilities enforceable and durable:
   active tool, subagent, transcript, and worktree status, and Windows `/copy` /
   `F2` uses the native Unicode clipboard format for Chinese text instead of
   `clip.exe`.
+- Composer slash commands now have an explicit fast path: `local` and
+  `local-ui` commands such as `/clear`, `/tokens`, `/plan`, and `/do` are
+  handled locally, while `prompt` commands such as `/review` intentionally enter
+  the Agent Loop.
 - The current test suite covers these enforcement and lifecycle paths.
 
 Current verified baseline:
 
 ```text
 python -m pytest
-103 passed, 6 skipped, 9 subtests passed
+109 passed, 6 skipped
 ```
 
 ---
@@ -204,7 +208,7 @@ flowchart TB
 
 | Layer | Main Files | Current State |
 |---|---|---|
-| CLI and runtime wiring | `lilbot/cli.py`, `lilbot/__main__.py` | Builds config, provider, registry, sandbox, memory, skills, subagents, MCP, and TUI. |
+| CLI and runtime wiring | `lilbot/cli.py`, `lilbot/__main__.py` | Builds config, provider, registry, sandbox, memory, skills, subagents, MCP, TUI, and the typed slash-command fast path. |
 | Agent loop | `lilbot/core/agent.py`, `lilbot/core/delegation.py`, `lilbot/core/events.py`, `lilbot/core/prompts.py` | Runs provider turns, executes tools, tracks usage, compacts history, and exposes live CodeWhale-style Agent tool schemas so the parent model can choose subagents during normal tool-calling. |
 | Provider layer | `lilbot/llm/providers.py` | Supports the local rule model and OpenAI-compatible providers such as DeepSeek. |
 | Tool bus | `lilbot/tools/registry.py`, `lilbot/tools/builtin.py` | Registers schemas and handlers for workspace, git, shell, memory, skills, subagents, tasks, automation, MCP, web, LSP/navigation, worktree merge-back, document/media probes, compatibility aliases, and central plan-approval gating. |
@@ -230,6 +234,7 @@ flowchart TB
 | Shell and PowerShell | Permission-gated shell execution, background jobs, PowerShell safety metadata, destructive command classification, and hard blocks for unsafe delete/move targets. | Expand analyzer coverage for advanced PowerShell AST cases and richer remediation hints. |
 | External integrations | Web search/fetch, GitHub via `gh`, MCP phase-1 adapter, automation records. | Deeper MCP resource discovery, stronger GitHub workflows, real automation scheduler. |
 | Analysis/media/docs | RLM Python sessions, pandoc/OCR/image probes. | Artifact handles, richer document/spreadsheet/presentation workflows. |
+| Composer commands | Typed slash registry with `local`, `local-ui`, and `prompt` command modes; `/clear`, `/tokens`, `/plan`, `/do`, and `/review` are routed without ad hoc composer hard-coding. | User/project contributed slash commands from skills and MCP prompt discovery. |
 
 ---
 
@@ -444,19 +449,50 @@ https://api.deepseek.com
 
 ## Command Deck
 
-| Command | Purpose |
-|---|---|
-| `/help` | Show commands |
-| `/copy` | Copy the Trace panel to clipboard |
-| `/theme` | Show theme preview |
-| `/tools` | List tools |
-| `/skills` | List skills |
-| `/skill review <target>` | Run a skill template |
-| `/memory list/search/save/delete` | Manage memory |
-| `/agents` | List subagent types and tasks |
-| `/mcp` | List MCP-style server config |
-| `/permissions ask/accept-all/deny-all` | Switch permission mode |
-| `/exit` | Quit |
+Slash commands are intercepted in the Composer before the normal Agent Loop.
+They are registered with an explicit execution type:
+
+- `local`: deterministic local read/config action, no model call.
+- `local-ui`: deterministic UI/session action, no model call unless the command
+  explicitly includes a task to send onward.
+- `prompt`: expands into a prompt and intentionally enters the Agent Loop.
+
+| Command | Type | Purpose |
+|---|---|---|
+| `/help [command]` | `local` | Show all commands or one command's metadata |
+| `/clear` | `local-ui` | Clear Trace and reset the local conversation |
+| `/copy` | `local-ui` | Copy the Trace panel to clipboard |
+| `/theme` | `local-ui` | Show theme preview |
+| `/model [flash\|pro]` | `local` | View or switch DeepSeek model |
+| `/tools` | `local` | List registered tools |
+| `/skills` | `local` | List skills |
+| `/skill NAME ARGS` | `prompt` | Render a skill and run it through Agent |
+| `/memory list/search/save/delete` | `local` | Manage memory |
+| `/agents` | `local` | List subagent types and tasks |
+| `/agent TYPE PROMPT` | `local` | Run a focused subagent task |
+| `/mcp` | `local` | List MCP-style server config |
+| `/permissions ask/accept-all/deny-all` | `local` | Switch permission mode |
+| `/tokens` | `local` | Show local token/context usage |
+| `/plan [task]` | `local-ui` | Enter Plan Mode; with `task`, send a planning prompt to Agent |
+| `/do [approved\|rejected]` | `local-ui` | Exit Plan Mode and persist approval state |
+| `/review [focus]` | `prompt` | Ask Agent to review the current git diff |
+| `/display` | `local` | Show terminal and font diagnostics |
+| `/exit` | `local-ui` | Quit |
+
+### Slash Command Theory
+
+Slash commands exist for the "fast lane" cases where calling the LLM would be
+wasteful or impossible. `/clear` is a UI/session reset, `/tokens` is a local
+usage read, and `/plan` without a task is a deterministic state change into
+`EnterPlanMode`. These commands return in milliseconds and do not consume model
+tokens.
+
+Prompt commands are the explicit exception. `/review` and `/skill` are still
+slash commands, but their job is to turn a short command into a structured
+Agent request. `/plan design auth module` first enters Plan Mode locally, then
+sends the task text to the Agent for planning. The dashboard uses the same
+registry metadata to decide whether a slash command should appear as a popup or
+as a normal Trace/Agent turn.
 
 Dashboard interaction notes:
 
@@ -658,6 +694,23 @@ pretending worktree isolation happened.
 ---
 
 ## Update Log
+
+### 2026-06-17
+
+- Added typed Composer slash commands with `local`, `local-ui`, and `prompt`
+  modes, so deterministic UI/session commands bypass the Agent Loop.
+- Added `/clear`, `/tokens`, `/plan`, `/do`, and `/review`.
+  - `/clear` resets the local conversation and clears Trace.
+  - `/tokens` reads local usage/context estimates without a model call.
+  - `/plan` enters persisted Plan Mode locally; `/plan <task>` also sends the
+    task to Agent for planning.
+  - `/do` exits Plan Mode and records approval state.
+  - `/review` is a prompt command that asks Agent to inspect the current diff.
+- Updated dashboard composer routing to use slash command metadata: local
+  commands render in the command popup, while prompt commands render as normal
+  Trace/Agent turns.
+- Added regression tests proving local slash commands do not call
+  `agent.run_turn()` and prompt commands call `run_prompt()` intentionally.
 
 ### 2026-06-16
 
