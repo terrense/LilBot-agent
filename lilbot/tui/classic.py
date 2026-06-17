@@ -141,6 +141,12 @@ class LilBotUI:
         else:
             print(value)
 
+    def clear_trace(self) -> None:
+        if self.enabled:
+            self.console.clear()
+        else:
+            print("\033[2J\033[H", end="")
+
     def rule(self, title: str) -> None:
         if self.enabled:
             self.console.rule(title, style="dim")
@@ -201,8 +207,13 @@ class LilBotUI:
     def help(self, compact: bool = False) -> None:
         rows = [
             ("/help", "show commands"),
+            ("/clear", "clear trace and reset local conversation"),
             ("/theme", "show theme preview"),
             ("/model [flash|pro]", "switch DeepSeek model"),
+            ("/tokens", "show local token/context usage"),
+            ("/plan [task]", "enter Plan Mode; optional task goes to Agent"),
+            ("/do", "exit Plan Mode as approved"),
+            ("/review [focus]", "ask Agent to review git diff"),
             ("/tools", "list tools"),
             ("/skills", "list skills"),
             ("/skill NAME ARGS", "render and run a skill"),

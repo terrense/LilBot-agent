@@ -47,6 +47,8 @@ class SlashCommandInfo:
     usage: str
     description: str
     aliases: tuple[str, ...] = ()
+    type: str = "local"
+    hidden: bool = False
 
     @property
     def palette_text(self) -> str:
@@ -55,12 +57,13 @@ class SlashCommandInfo:
 
 SLASH_COMMANDS: tuple[SlashCommandInfo, ...] = (
     SlashCommandInfo("help", "/help [command]", "Show commands and short help.", ("?", "h")),
-    SlashCommandInfo("theme", "/theme", "Show the current visual theme preview."),
+    SlashCommandInfo("clear", "/clear", "Clear Trace and start a fresh local conversation.", ("cls",), "local-ui"),
+    SlashCommandInfo("theme", "/theme", "Show the current visual theme preview.", type="local-ui"),
     SlashCommandInfo("model", "/model [flash|pro]", "Switch or view the current DeepSeek model.", ("moxing",)),
     SlashCommandInfo("models", "/models", "List available models.", ("moxingliebiao",)),
     SlashCommandInfo("tools", "/tools", "List registered tools grouped by capability."),
     SlashCommandInfo("skills", "/skills", "List bundled and installed skills."),
-    SlashCommandInfo("skill", "/skill NAME ARGS", "Render and run a skill prompt."),
+    SlashCommandInfo("skill", "/skill NAME ARGS", "Render and run a skill prompt.", type="prompt"),
     SlashCommandInfo("memory", "/memory list|search|save|delete", "Manage project memory."),
     SlashCommandInfo("agents", "/agents", "List sub-agent types and tasks."),
     SlashCommandInfo("agent", "/agent TYPE PROMPT", "Run a sub-agent task."),
@@ -68,9 +71,13 @@ SLASH_COMMANDS: tuple[SlashCommandInfo, ...] = (
     SlashCommandInfo("permissions", "/permissions ask|accept-all|deny-all", "Change permission mode."),
     SlashCommandInfo("compact", "/compact", "Compact conversation context."),
     SlashCommandInfo("status", "/status", "Show session status."),
+    SlashCommandInfo("tokens", "/tokens", "Show local token and context usage.", ("usage", "token")),
+    SlashCommandInfo("plan", "/plan [task]", "Enter Plan Mode locally; optional task is sent to Agent.", ("p",), "local-ui"),
+    SlashCommandInfo("do", "/do [approved|rejected]", "Exit Plan Mode and record the approval state.", ("execute",), "local-ui"),
+    SlashCommandInfo("review", "/review [focus]", "Ask Agent to review the current git diff.", type="prompt"),
     SlashCommandInfo("display", "/display", "Show terminal and font diagnostics."),
-    SlashCommandInfo("copy", "/copy", "Copy Trace to clipboard."),
-    SlashCommandInfo("exit", "/exit", "Quit LilBot.", ("quit", "q")),
+    SlashCommandInfo("copy", "/copy", "Copy Trace to clipboard.", type="local-ui"),
+    SlashCommandInfo("exit", "/exit", "Quit LilBot.", ("quit", "q"), "local-ui"),
 )
 
 
@@ -79,11 +86,35 @@ def slash_commands_matching(prefix: str) -> list[SlashCommandInfo]:
     matches = [
         command
         for command in SLASH_COMMANDS
-        if not query
-        or command.name.startswith(query)
-        or any(alias.startswith(query) for alias in command.aliases)
+        if not command.hidden
+        and (
+            not query
+            or command.name.startswith(query)
+            or any(alias.startswith(query) for alias in command.aliases)
+        )
     ]
     return sorted(matches, key=lambda command: (not command.name.startswith(query), command.name))
+
+
+def resolve_slash_command(name: str) -> SlashCommandInfo | None:
+    query = name.strip().lstrip("/").lower()
+    if not query:
+        return next(command for command in SLASH_COMMANDS if command.name == "help")
+    for command in SLASH_COMMANDS:
+        if command.name == query or query in command.aliases:
+            return command
+    return None
+
+
+def slash_command_runs_agent(line: str) -> bool:
+    """Return True when a slash command intentionally enters the Agent Loop."""
+    if not line.startswith("/"):
+        return False
+    head, _, tail = line[1:].partition(" ")
+    command = resolve_slash_command(head)
+    if command is None:
+        return False
+    return command.type == "prompt" or (command.name == "plan" and bool(tail.strip()))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -184,17 +215,131 @@ def run_prompt(agent: Agent, ui: LilBotUI, prompt: str) -> None:
         ui.event(event)
 
 
+REVIEW_PROMPT = """Review the current workspace changes like a senior code reviewer.
+
+Prioritize bugs, behavioral regressions, security/safety risks, and missing tests.
+Inspect the relevant git diff and files before concluding. Lead with findings ordered
+by severity and include file/line references where possible. If there are no findings,
+say that clearly and mention any residual test risk.
+"""
+
+
+def _show_slash_help(args: str, ui: LilBotUI) -> None:
+    if args:
+        command = resolve_slash_command(args)
+        if command is None:
+            ui.error(f"Unknown command: /{args.lstrip('/')}")
+            return
+        aliases = ", ".join(f"/{alias}" for alias in command.aliases) or "-"
+        ui.table(
+            f"/{command.name}",
+            ["Key", "Value"],
+            [
+                ("usage", command.usage),
+                ("type", command.type),
+                ("aliases", aliases),
+                ("description", command.description),
+            ],
+        )
+        return
+
+    rows = [
+        (command.usage, command.type, command.description)
+        for command in SLASH_COMMANDS
+        if not command.hidden
+    ]
+    ui.table("Slash Commands", ["Command", "Type", "Purpose"], rows)
+
+
+def _estimate_message_tokens(messages: list[dict[str, object]]) -> int:
+    total_chars = 0
+    for message in messages:
+        total_chars += len(str(message.get("role", "")))
+        content = message.get("content", "")
+        if isinstance(content, list):
+            total_chars += sum(len(str(item)) for item in content)
+        else:
+            total_chars += len(str(content))
+    return max(0, total_chars // 4)
+
+
+def _token_rows(agent: Agent, ctx: ToolContext) -> list[tuple[str, str]]:
+    messages = getattr(agent, "messages", []) or []
+    usage = getattr(agent, "usage", {}) or {}
+    prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+    completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+    total_tokens = int(usage.get("total_tokens", prompt_tokens + completion_tokens) or 0)
+    return [
+        ("messages", str(len(messages))),
+        ("approx_context_tokens", str(_estimate_message_tokens(messages))),
+        ("prompt_tokens", str(prompt_tokens)),
+        ("completion_tokens", str(completion_tokens)),
+        ("total_tokens", str(total_tokens)),
+        ("compact_after_messages", str(ctx.config.compact_after_messages)),
+        ("max_steps", str(ctx.config.max_steps)),
+    ]
+
+
+def _reset_conversation(agent: Agent) -> str:
+    reset = getattr(agent, "reset_conversation", None)
+    if callable(reset):
+        return str(reset())
+    messages = getattr(agent, "messages", None)
+    if isinstance(messages, list):
+        del messages[1:]
+    usage = getattr(agent, "usage", None)
+    if isinstance(usage, dict):
+        usage.clear()
+    return "Conversation reset. Messages now: 1"
+
+
+def _clear_trace(ui: LilBotUI) -> None:
+    clear_trace = getattr(ui, "clear_trace", None)
+    if callable(clear_trace):
+        clear_trace()
+
+
+def _copy_trace(ui: LilBotUI) -> bool:
+    copy_trace = getattr(ui, "copy_trace", None)
+    if callable(copy_trace):
+        copy_trace()
+        return True
+    private_copy_trace = getattr(ui, "_copy_trace", None)
+    if callable(private_copy_trace):
+        private_copy_trace(selection_first=False)
+        return True
+    return False
+
+
+def _run_local_tool(registry: ToolRegistry, ctx: ToolContext, name: str, args: dict[str, object], ui: LilBotUI, success: str) -> bool:
+    result, _elapsed_ms = registry.execute(name, args, ctx)
+    if result.ok:
+        ui.print(success, "green")
+        return True
+    ui.error(result.output)
+    return False
+
+
 def handle_slash(line: str, agent: Agent, registry: ToolRegistry, ctx: ToolContext, ui: LilBotUI) -> bool:
     if not line.startswith("/"):
         return False
     head, _, tail = line[1:].partition(" ")
-    cmd = head.strip().lower()
+    command = resolve_slash_command(head)
+    if command is None:
+        ui.error(f"Unknown command: /{head.strip().lower()}. Try /help")
+        return True
+    cmd = command.name
     args = tail.strip()
 
-    if cmd in {"exit", "quit", "q"}:
+    if cmd == "exit":
         raise KeyboardInterrupt
-    if cmd in {"help", "h", ""}:
-        ui.help()
+    if cmd == "help":
+        _show_slash_help(args, ui)
+        return True
+    if cmd == "clear":
+        message = _reset_conversation(agent)
+        _clear_trace(ui)
+        ui.print(f"{message}. Trace cleared.", "green")
         return True
     if cmd == "theme":
         ui.theme_demo()
@@ -278,6 +423,47 @@ def handle_slash(line: str, agent: Agent, registry: ToolRegistry, ctx: ToolConte
             ("font_size", str(ctx.config.font_size)),
         ])
         return True
+    if cmd == "tokens":
+        ui.table("Token Usage", ["Key", "Value"], _token_rows(agent, ctx))
+        return True
+    if cmd == "plan":
+        ok = _run_local_tool(
+            registry,
+            ctx,
+            "EnterPlanMode",
+            {"reason": args or "slash /plan", "plan": args},
+            ui,
+            "Plan Mode enabled. Write/execute tools are gated until the plan is approved.",
+        )
+        if ok and args:
+            run_prompt(
+                agent,
+                ui,
+                (
+                    "Plan Mode task:\n"
+                    f"{args}\n\n"
+                    "Create a concise implementation plan first. Do not perform write, shell, "
+                    "or other execution actions until the user approves the plan."
+                ),
+            )
+        return True
+    if cmd == "do":
+        requested = args.strip().lower()
+        rejected = requested in {"reject", "rejected", "deny", "denied", "no", "n"}
+        approval_state = "rejected" if rejected else "approved"
+        _run_local_tool(
+            registry,
+            ctx,
+            "ExitPlanMode",
+            {"approved": not rejected, "approval_state": approval_state, "summary": args or "slash /do"},
+            ui,
+            f"Plan Mode exited with approval_state={approval_state}.",
+        )
+        return True
+    if cmd == "review":
+        focus = f"\nExtra review focus: {args}\n" if args else ""
+        run_prompt(agent, ui, REVIEW_PROMPT + focus)
+        return True
     if cmd == "display":
         font = console_font_status()
         terminal = shutil.get_terminal_size(fallback=(0, 0))
@@ -291,7 +477,10 @@ def handle_slash(line: str, agent: Agent, registry: ToolRegistry, ctx: ToolConte
             ("font_message", font.message),
         ])
         return True
-    ui.error(f"Unknown command: /{cmd}. Try /help")
+    if cmd == "copy":
+        if not _copy_trace(ui):
+            ui.error("Trace copy is only available in the dashboard UI.")
+        return True
     return True
 
 

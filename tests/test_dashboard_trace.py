@@ -168,6 +168,14 @@ class DashboardTraceTests(unittest.TestCase):
         self.assertTrue(any("deepseek-v4-flash" in line for line in ui.command_popup_lines))
         self.assertFalse(ui.command_popup_error)
 
+    def test_slash_popup_routing_uses_command_type(self):
+        ui = object.__new__(DashboardUI)
+
+        self.assertTrue(ui._is_popup_slash_command("/tokens"))
+        self.assertTrue(ui._is_popup_slash_command("/plan"))
+        self.assertFalse(ui._is_popup_slash_command("/plan design auth module"))
+        self.assertFalse(ui._is_popup_slash_command("/review focus on concurrency"))
+
     def test_refresh_preserves_trace_scroll_for_permission_popup(self):
         ui = object.__new__(DashboardUI)
         ui.lines = ["one", "two", "three", "four"]
