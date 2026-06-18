@@ -2847,7 +2847,313 @@ def _plan_delegation(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     )
 
 
+# ── Team coordination tools ──────────────────────────────────────────────
+
+
+def _str_list(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return [v.strip() for v in str(value).split(",") if v.strip()]
+
+
+def _actor_name(ctx: ToolContext) -> str:
+    return str(getattr(ctx, "agent_name", None) or "lead")
+
+
+def _resolve_team(ctx: ToolContext, args: dict[str, Any]) -> tuple[str | None, str]:
+    """Resolve which team a coordination call targets.
+
+    Priority: explicit ``team`` arg -> the caller's own team (teammate ctx) ->
+    the sole existing team. Returns ``(team_name, "")`` or ``(None, error)``.
+    """
+    teams = getattr(ctx, "teams", None)
+    if teams is None:
+        return None, "Team system is unavailable in this runtime."
+    explicit = str(args.get("team") or args.get("team_name") or "").strip()
+    if explicit:
+        return (explicit, "") if teams.get_team(explicit) else (None, f"Team '{explicit}' not found.")
+    if getattr(ctx, "team_name", None):
+        return str(ctx.team_name), ""
+    all_teams = teams.list_teams()
+    if not all_teams:
+        return None, "No team exists. Create one with team_create first."
+    if len(all_teams) == 1:
+        return all_teams[0].name, ""
+    return None, "Multiple teams exist; pass 'team' to disambiguate."
+
+
+def _team_create(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    teams = getattr(ctx, "teams", None)
+    if teams is None:
+        return ToolResult(False, "Team system is unavailable in this runtime.")
+    name = str(args.get("team_name") or args.get("name") or "").strip()
+    if not name:
+        return ToolResult(False, "team_create requires 'team_name'.")
+    team = teams.create_team(name, "lead", str(args.get("description") or ""))
+    return ToolResult(
+        True,
+        _json({
+            "team": team.name,
+            "config": team.config_path,
+            "next": (
+                "Spawn teammates with Agent(team_name='%s', name=..., subagent_type=...). "
+                "Talk to them with send_message; they report back to 'lead' and go idle." % team.name
+            ),
+        }),
+        {"team": team.name},
+    )
+
+
+def _team_delete(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    teams = getattr(ctx, "teams", None)
+    if teams is None:
+        return ToolResult(False, "Team system is unavailable in this runtime.")
+    name = str(args.get("team_name") or args.get("name") or "").strip()
+    if not name:
+        return ToolResult(False, "team_delete requires 'team_name'.")
+    try:
+        teams.delete_team(name)
+    except Exception as exc:  # noqa: BLE001
+        return ToolResult(False, f"Failed to delete team '{name}': {exc}")
+    return ToolResult(True, f"Team '{name}' deleted.")
+
+
+def _team_list(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    teams = getattr(ctx, "teams", None)
+    if teams is None:
+        return ToolResult(False, "Team system is unavailable in this runtime.")
+    data = []
+    for team in teams.list_teams():
+        data.append({
+            "team": team.name,
+            "description": team.description,
+            "members": [
+                {"name": m.name, "agent_type": m.agent_type,
+                 "active": m.is_active,
+                 "status": getattr(getattr(m, "progress", None), "status", None)}
+                for m in team.members
+            ],
+        })
+    return ToolResult(True, _json(data), {"count": len(data)})
+
+
+def _send_message(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    team_name, err = _resolve_team(ctx, args)
+    if err:
+        return ToolResult(False, err)
+    teams = ctx.teams
+    to = str(args.get("to") or args.get("recipient") or "").strip()
+    message = str(args.get("message") or args.get("content") or "")
+    if not to or not message:
+        return ToolResult(False, "send_message requires 'to' and 'message'.")
+    from ..teams.mailbox import create_message
+
+    team = teams.get_team(team_name)
+    mailbox = teams.get_mailbox(team_name)
+    if team is None or mailbox is None:
+        return ToolResult(False, f"Team '{team_name}' is not ready.")
+    actor = _actor_name(ctx)
+    summary = str(args.get("summary") or message[:60])
+    msg_type = str(args.get("message_type") or "text")
+
+    if to == "*":
+        targets = [m.name for m in team.members if m.name != actor]
+        if actor != "lead":
+            targets.append("lead")
+        mailbox.broadcast(targets, create_message(actor, "*", message, summary, msg_type))
+        return ToolResult(True, f"Broadcast to {len(targets)} recipient(s) in '{team_name}'.")
+
+    if to in ("lead", team.lead_agent_id):
+        key = "lead"
+    else:
+        member = team.get_member(to)
+        key = member.name if member else None
+    if not key:
+        return ToolResult(False, f"Cannot resolve recipient '{to}' in team '{team_name}'.")
+    mailbox.write(key, create_message(actor, key, message, summary, msg_type))
+    return ToolResult(True, f"Message sent to '{key}' in team '{team_name}'.")
+
+
+def _team_task_create(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    team_name, err = _resolve_team(ctx, args)
+    if err:
+        return ToolResult(False, err)
+    store = ctx.teams.get_task_store(team_name)
+    if store is None:
+        return ToolResult(False, f"Team '{team_name}' has no task store.")
+    title = str(args.get("title") or args.get("prompt") or "")
+    if not title:
+        return ToolResult(False, "team_task_create requires 'title'.")
+    task = store.create(
+        title=title,
+        description=str(args.get("description") or ""),
+        assignee=str(args.get("assignee") or ""),
+        blocks=_str_list(args.get("blocks")),
+        blocked_by=_str_list(args.get("blocked_by")),
+        created_by=_actor_name(ctx),
+    )
+    return ToolResult(True, _json(task.to_dict()), {"task_id": task.id, "team": team_name})
+
+
+def _team_task_list(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    team_name, err = _resolve_team(ctx, args)
+    if err:
+        return ToolResult(False, err)
+    store = ctx.teams.get_task_store(team_name)
+    if store is None:
+        return ToolResult(False, f"Team '{team_name}' has no task store.")
+    tasks = store.list_tasks(args.get("status") or None, args.get("assignee") or None)
+    return ToolResult(True, _json([t.to_dict() for t in tasks]), {"count": len(tasks), "team": team_name})
+
+
+def _team_task_get(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    team_name, err = _resolve_team(ctx, args)
+    if err:
+        return ToolResult(False, err)
+    store = ctx.teams.get_task_store(team_name)
+    if store is None:
+        return ToolResult(False, f"Team '{team_name}' has no task store.")
+    task = store.get(str(args.get("task_id") or ""))
+    if task is None:
+        return ToolResult(False, "Shared task not found.")
+    return ToolResult(True, _json(task.to_dict()), {"task_id": task.id})
+
+
+def _team_task_update(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    team_name, err = _resolve_team(ctx, args)
+    if err:
+        return ToolResult(False, err)
+    store = ctx.teams.get_task_store(team_name)
+    if store is None:
+        return ToolResult(False, f"Team '{team_name}' has no task store.")
+    task = store.update(
+        str(args.get("task_id") or ""),
+        status=args.get("status"),
+        assignee=args.get("assignee"),
+        description=args.get("description"),
+        add_blocks=_str_list(args.get("add_blocks")) or None,
+        add_blocked_by=_str_list(args.get("add_blocked_by")) or None,
+    )
+    if task is None:
+        return ToolResult(False, "Shared task not found.")
+    return ToolResult(True, _json(task.to_dict()), {"task_id": task.id})
+
+
+def _spawn_teammate(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    from dataclasses import replace as _dc_replace
+
+    teams = getattr(ctx, "teams", None)
+    subagents = getattr(ctx, "subagents", None)
+    if teams is None or subagents is None:
+        return ToolResult(False, "Team runtime is unavailable.")
+    team_name = str(args.get("team_name") or "").strip()
+    team = teams.get_team(team_name)
+    if team is None:
+        return ToolResult(False, f"Team '{team_name}' not found. Create it first with team_create.")
+    prompt = str(args.get("prompt") or args.get("message") or args.get("objective") or "")
+    if not prompt:
+        return ToolResult(False, "Missing prompt.")
+
+    base = str(args.get("name") or args.get("subagent_type") or args.get("type") or "worker").strip() or "worker"
+    existing = {m.name for m in team.members}
+    teammate_name = base
+    i = 2
+    while teammate_name in existing:
+        teammate_name = f"{base}-{i}"
+        i += 1
+
+    agent_type = args.get("subagent_type") or args.get("type") or args.get("agent_type") or args.get("role")
+    try:
+        task = subagents.build_teammate_task(
+            agent_type, prompt, name=teammate_name,
+            allowed_tools=_tool_list_arg(args), model=args.get("model"),
+        )
+    except SubAgentGateError as exc:
+        return ToolResult(False, _json(exc.to_dict()), {"gate": "subagent_creation", "gates": exc.failures})
+
+    definition = subagents.definitions[task.agent_type]
+
+    # Optional git-worktree isolation: each teammate edits in its own working tree.
+    # Degrades to the shared workspace when git/worktrees are unavailable.
+    use_wt = False
+    wt_note = ""
+    if str(args.get("isolation") or "").strip().lower() in ("worktree", "1", "true", "yes", "on"):
+        if subagents.worktree_available():
+            task.worktree_isolation = "worktree"
+            task.worktree_status = "requested"
+            if subagents._prepare_worktree(task):
+                use_wt = True
+            else:
+                task.status = "running"
+                task.error = ""
+                wt_note = "worktree prep failed; running in shared workspace"
+        else:
+            wt_note = "worktree unavailable (no git repo); running in shared workspace"
+
+    from ..teams.progress import TeammateProgress, random_verb
+    from ..teams.models import TeammateInfo
+    from ..teams.spawn_inprocess import spawn_inprocess_teammate
+
+    progress = TeammateProgress(name=teammate_name, team_name=team_name, spinner_verb=random_verb())
+    agent_id = task.id
+    member = TeammateInfo(
+        name=teammate_name, agent_id=agent_id, agent_type=task.agent_type,
+        model=task.model or (definition.model or ""),
+        worktree_path=task.worktree_path if use_wt else "", is_active=True,
+    )
+    member.progress = progress
+    teams.register_member(team_name, member)
+
+    if use_wt:
+        team_ctx = _dc_replace(subagents.ctx_for_task(task), team_name=team_name, agent_name=teammate_name)
+    else:
+        team_ctx = _dc_replace(ctx, team_name=team_name, agent_name=teammate_name)
+
+    from ..subagents.manager import TEAMMATE_MAX_TOOL_STEPS
+
+    def run_one_turn(turn_prompt: str, prog: Any) -> str:
+        with subagents.slot():
+            return subagents.run_agent_turn(
+                definition, task, turn_prompt,
+                progress=prog, run_ctx=team_ctx, max_steps=TEAMMATE_MAX_TOOL_STEPS,
+            )
+
+    mailbox = teams.get_mailbox(team_name)
+    handle = spawn_inprocess_teammate(
+        run_one_turn=run_one_turn,
+        name=teammate_name,
+        team_name=team_name,
+        mailbox=mailbox,
+        team_manager=teams,
+        progress=progress,
+        prompt=prompt,
+        on_completed=lambda nm: teams.on_teammate_completed(agent_id),
+    )
+    teams.register_inprocess_handle(agent_id, handle)
+    return ToolResult(
+        True,
+        _json({
+            "teammate": teammate_name,
+            "agent_id": agent_id,
+            "team": team_name,
+            "agent_type": task.agent_type,
+            "worktree": task.worktree_path if use_wt else None,
+            "isolation_note": wt_note or None,
+            "note": (
+                "Long-running teammate started in-process. It runs a turn, reports to 'lead', "
+                "then goes idle. Its messages arrive automatically as team-notifications; "
+                "reply with send_message to wake it for the next task."
+            ),
+        }),
+        {"teammate": teammate_name, "team": team_name},
+    )
+
+
 def _agent_open(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    if str(args.get("team_name") or "").strip():
+        return _spawn_teammate(args, ctx)
     prompt = str(args.get("prompt") or args.get("message") or args.get("objective") or "")
     if not prompt:
         return ToolResult(False, "Missing prompt.")
@@ -3779,6 +4085,50 @@ def register_builtins(registry: ToolRegistry) -> None:
         "name": _string("Session name."),
         "agent_id": _string("Agent id."),
     }), _agent_close))
+    # ── Teams: long-running teammates that coordinate via messages + a shared board ──
+    registry.register(ToolDef("team_create", "Create a team to coordinate multiple long-running teammates. After creating, spawn teammates with Agent(team_name=..., name=..., subagent_type=...). Use a team when work needs several agents collaborating (e.g. implementer + reviewer) rather than one-shot subagents.", _schema({
+        "team_name": _string("Name for the new team."),
+        "name": _string("Alias for team_name."),
+        "description": _string("Optional team purpose."),
+    }, ["team_name"]), _team_create))
+    registry.register(ToolDef("team_delete", "Delete a team, stopping its teammates and cleaning up its mailbox and worktrees.", _schema({
+        "team_name": _string("Team to delete."),
+        "name": _string("Alias for team_name."),
+    }, ["team_name"]), _team_delete))
+    registry.register(ToolDef("team_list", "List teams and their members with live status.", _schema({}), _team_list))
+    registry.register(ToolDef("send_message", "Send a message to a teammate by name (or 'lead', or '*' to broadcast). Teammates go idle after each turn; sending a message wakes them for the next task. Their replies arrive to you automatically as <team-notification> reminders.", _schema({
+        "to": _string("Recipient teammate name, 'lead', or '*' for all."),
+        "message": _string("Message body."),
+        "summary": _string("Short 5-10 word summary (recommended for text)."),
+        "message_type": _string("text | shutdown_request | shutdown_response."),
+        "team": _string("Team name (only needed if you have multiple teams)."),
+    }, ["to", "message"]), _send_message))
+    registry.register(ToolDef("team_task_create", "Create a task on the team's shared board (with optional assignee and blocks/blocked_by dependencies).", _schema({
+        "title": _string("Task title."),
+        "description": _string("Task detail."),
+        "assignee": _string("Teammate name to own it."),
+        "blocks": _schema_array("Task ids this blocks."),
+        "blocked_by": _schema_array("Task ids that block this."),
+        "team": _string("Team name (if multiple)."),
+    }, ["title"]), _team_task_create))
+    registry.register(ToolDef("team_task_list", "List tasks on the team's shared board, optionally filtered by status or assignee.", _schema({
+        "status": _string("Filter: pending|in_progress|completed|blocked."),
+        "assignee": _string("Filter by assignee name."),
+        "team": _string("Team name (if multiple)."),
+    }), _team_task_list))
+    registry.register(ToolDef("team_task_get", "Read one task from the team's shared board.", _schema({
+        "task_id": _string("Shared task id."),
+        "team": _string("Team name (if multiple)."),
+    }, ["task_id"]), _team_task_get))
+    registry.register(ToolDef("team_task_update", "Update a shared-board task: status, assignee, description, or add dependencies.", _schema({
+        "task_id": _string("Shared task id."),
+        "status": _string("pending|in_progress|completed|blocked."),
+        "assignee": _string("Reassign to teammate."),
+        "description": _string("New description."),
+        "add_blocks": _schema_array("Task ids this now blocks."),
+        "add_blocked_by": _schema_array("Task ids that now block this."),
+        "team": _string("Team name (if multiple)."),
+    }, ["task_id"]), _team_task_update))
     registry.register(ToolDef("task_create", "Create a durable task record.", _schema({
         "prompt": _string("Task prompt."),
         "title": _string("Task title alias."),

@@ -344,6 +344,86 @@ flowchart LR
 
 ---
 
+## Teams / Teammates
+
+Subagents are one-shot: spawn → run → collect. **Teams** add long-running
+*teammates* that stay alive across turns, talk to each other, and share a task
+board — modeled on multi-agent "swarm" coordination but built on LilBot's own
+threaded subagent runtime (gates, transcripts, and persistence are all reused).
+
+State lives per-project under `.lilbot/teams/<slug>/`:
+
+- `config.json` — team + members
+- `tasks.json` — shared task board (assignee + `blocks` / `blocked_by`)
+- `mailbox/<name>.json` — per-agent inbox (file-locked, concurrency-safe)
+
+### How a team runs
+
+```mermaid
+flowchart TD
+    Lead["Lead (you)"]:::input
+    Lead -->|team_create| Team["Team: bugfix"]
+    Lead -->|"Agent(team_name, name, subagent_type)"| Impl["impl (implementer)\nlong-running thread"]
+    Lead -->|"Agent(team_name, name, subagent_type)"| Rev["rev (review)\nlong-running thread"]
+
+    Impl -->|"send_message to=lead + idle"| Box["mailbox/"]
+    Rev  -->|"send_message to=lead + idle"| Box
+    Box  -->|"drained at next loop turn"| Note["&lt;team-notification&gt; injected"]
+    Note --> Lead
+    Lead -->|"send_message wakes a teammate"| Impl
+
+    classDef input fill:#020617,stroke:#00e5ff,color:#ffffff
+    classDef default fill:#111827,stroke:#64748b,color:#ffffff
+```
+
+A teammate runs one full agent turn (same tool loop + gates as a subagent),
+reports to `lead`, then goes **idle** and polls its mailbox. The lead never
+blocks: teammate messages are drained at the top of each agent-loop turn and
+injected as `<team-notification>` coordination signals.
+
+### Tools (the model uses these autonomously)
+
+| Tool | Purpose |
+|------|---------|
+| `team_create` / `team_delete` / `team_list` | manage teams |
+| `Agent(team_name=, name=, subagent_type=)` | spawn a long-running teammate (vs. one-shot when `team_name` is omitted) |
+| `send_message` | message a teammate by name, `lead`, or `*` (broadcast); wakes idle teammates |
+| `team_task_create` / `team_task_list` / `team_task_get` / `team_task_update` | shared task board with dependencies |
+
+Every teammate automatically gets the coordination tools (`send_message`,
+`team_task_*`) on top of its role's tools, scoped to its identity via the tool
+context — so it knows who it is and which team it belongs to.
+
+### Slash commands
+
+```
+/team list                 # teams, members, live status, last activity
+/team new NAME             # create a team locally
+/team msg NAME TEXT        # send a message (wakes the teammate)
+/team rm NAME              # delete a team
+```
+
+The Flight Deck's **Work** pane (F5) shows a live **Teammates** panel:
+`name [status] activity  tools=N tok=…`.
+
+### Worktree isolation (opt-in)
+
+Pass `isolation: "worktree"` when spawning a teammate to give it its own git
+worktree under `.lilbot/worktrees/`, so concurrent teammates don't edit the same
+files. If the workspace is not a git repo, it degrades gracefully to the shared
+workspace. Worktrees are removed on `team_delete`.
+
+### Example
+
+> "Build a team: have an implementer fix the null check in `auth.py`, then a
+> reviewer verify the change."
+
+The lead creates a team, spawns `impl` and (after `impl` reports back) `rev`,
+collects both results via auto-injected notifications, and answers you — without
+ever polling.
+
+---
+
 ## MCP Dock
 
 ```mermaid

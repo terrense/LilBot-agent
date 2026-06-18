@@ -19,7 +19,21 @@ if TYPE_CHECKING:
 
 ProviderCallable = Callable[[list[dict], list[dict]], ProviderTurn]
 SUBAGENT_MAX_TOOL_STEPS = 6
+# Long-running teammates explore *and* act within a single turn, so they need a
+# larger per-turn tool budget than one-shot subagent probes.
+TEAMMATE_MAX_TOOL_STEPS = 16
 DEFAULT_SUBAGENT_MAX_CONCURRENT = 8
+
+# Coordination tools injected into every teammate so it can talk to the team and
+# use the shared task board. Registered globally in builtin.py; teammates read
+# their identity (team_name / agent_name) from a ctx clone.
+TEAM_COORDINATION_TOOL_NAMES = [
+    "send_message",
+    "team_task_create",
+    "team_task_list",
+    "team_task_get",
+    "team_task_update",
+]
 
 READ_ONLY_CODE_TOOLS = [
     "project_map",
@@ -527,6 +541,74 @@ class SubAgentManager:
             self._run(task)
         return task
 
+    def build_teammate_task(
+        self,
+        agent_type: str | None,
+        prompt: str,
+        *,
+        name: str | None = None,
+        allowed_tools: list[str] | None = None,
+        model: str | None = None,
+    ) -> SubAgentTask:
+        """Create (but do not run) a persisted task for a long-running teammate.
+
+        The teammate's tool set = its role definition's tools plus the team
+        coordination tools, so it can always message the team and use the shared
+        task board. Reuses the same creation gates as ``open``.
+        """
+        canonical = self.resolve_type(agent_type)
+        definition = self.definitions[canonical]
+        base_tools = definition.allowed_tools if allowed_tools is None else allowed_tools
+        effective = _dedupe_tools([*base_tools, *TEAM_COORDINATION_TOOL_NAMES])
+        creation_gates = self._validate_creation_gates(
+            canonical,
+            definition,
+            effective,
+            explicit_allowed_tools=allowed_tools is not None or bool(definition.allowed_tools),
+        )
+        failures = [g for g in creation_gates if g.get("status") == "failed" and int(g.get("gate_number", 0)) <= 3]
+        if failures:
+            raise SubAgentGateError(failures)
+        task_id = f"sub_{uuid4().hex[:10]}"
+        task = SubAgentTask(
+            id=task_id,
+            name=name or task_id,
+            agent_type=canonical,
+            prompt=prompt,
+            allowed_tools=effective,
+            model=model,
+            gate_results=creation_gates,
+            status="running",
+            started_at=time.time(),
+        )
+        with self._lock:
+            self.tasks[task.id] = task
+            self._persist_tasks_locked()
+        self._append_transcript(task, "teammate_spawned", {"agent_type": canonical, "name": task.name})
+        return task
+
+    def slot(self):
+        """Context manager bounding active teammate turns by max_concurrent."""
+        return self._semaphore
+
+    def worktree_available(self) -> bool:
+        """True when the workspace can host git worktrees (for teammate isolation)."""
+        if self.ctx is None:
+            return False
+        sandbox = getattr(self.ctx, "sandbox", None)
+        if sandbox is None or not shutil.which("git"):
+            return False
+        try:
+            if not sandbox.run("git rev-parse --show-toplevel", 10).ok:
+                return False
+            return sandbox.run("git worktree list --porcelain", 10).ok
+        except Exception:
+            return False
+
+    def ctx_for_task(self, task: SubAgentTask) -> Any:
+        """Public accessor for a task's worktree-scoped tool context."""
+        return self._ctx_for_task(task)
+
     def eval(
         self,
         task_ref: str,
@@ -656,64 +738,10 @@ class SubAgentManager:
                 task.error = ""
             self._persist_tasks_locked()
         self._append_transcript(task, "running", {"agent_type": task.agent_type})
-        messages = [
-            {"role": "system", "content": f"{definition.system_hint}\n\n{self._tool_policy_hint(definition, task)}\n\n{OUTPUT_CONTRACT}"},
-            {"role": "user", "content": task.prompt},
-        ]
-        transcript: list[str] = []
         try:
             if not self._prepare_worktree(task):
                 return
-            content = ""
-            tool_schemas = self._tool_schemas_for_task(definition, task)
-            steps = 0
-            while steps <= SUBAGENT_MAX_TOOL_STEPS:
-                turn = self.provider(messages, tool_schemas)
-                self._append_transcript(
-                    task,
-                    "provider_turn",
-                    {
-                        "content": turn.content,
-                        "tool_calls": [
-                            {"name": call.name, "arguments": call.arguments, "call_id": call.call_id}
-                            for call in turn.tool_calls
-                        ],
-                        "usage": turn.usage,
-                    },
-                )
-                if turn.content.strip():
-                    content = turn.content.strip()
-                    transcript.append(content)
-                if not turn.tool_calls:
-                    break
-                if steps >= SUBAGENT_MAX_TOOL_STEPS:
-                    content = self._step_limit_report(transcript)
-                    break
-                messages.append(_assistant_tool_message(turn))
-                for call in turn.tool_calls[: max(0, SUBAGENT_MAX_TOOL_STEPS - steps)]:
-                    self._append_transcript(
-                        task,
-                        "tool_started",
-                        {"name": call.name, "arguments": call.arguments, "call_id": call.call_id},
-                    )
-                    tool_output = self._execute_tool_call(definition, task, call.name, call.arguments)
-                    steps += 1
-                    transcript.append(f"{call.name}: {tool_output[:1000]}")
-                    self._append_transcript(
-                        task,
-                        "tool_finished",
-                        {"name": call.name, "call_id": call.call_id, "output": tool_output},
-                    )
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": call.call_id,
-                        "name": call.name,
-                        "content": tool_output,
-                    })
-                    if steps >= SUBAGENT_MAX_TOOL_STEPS:
-                        break
-            content = content or "(subagent returned no text)"
-            task.result = self._ensure_output_contract(content)
+            task.result = self.run_agent_turn(definition, task, task.prompt)
             completed = False
             with self._lock:
                 if task.status != "cancelled":
@@ -739,6 +767,92 @@ class SubAgentManager:
                 self._persist_tasks_locked()
             if acquired:
                 self._semaphore.release()
+
+    def run_agent_turn(
+        self,
+        definition: AgentDefinition,
+        task: SubAgentTask,
+        prompt: str,
+        *,
+        progress: Any = None,
+        run_ctx: Any = None,
+        max_steps: int | None = None,
+    ) -> str:
+        """Execute one full provider+tool loop and return the contract-wrapped result.
+
+        Extracted from ``_run`` so long-running teammates can reuse the exact same
+        gates, tool filtering, and transcript machinery for every turn. ``progress``
+        (a TeammateProgress) is updated live for the dashboard; ``run_ctx`` pins the
+        tool context (e.g. a teammate's prepared worktree) instead of re-deriving it.
+        """
+        limit = SUBAGENT_MAX_TOOL_STEPS if max_steps is None else max(1, int(max_steps))
+        messages = [
+            {"role": "system", "content": f"{definition.system_hint}\n\n{self._tool_policy_hint(definition, task)}\n\n{OUTPUT_CONTRACT}"},
+            {"role": "user", "content": prompt},
+        ]
+        transcript: list[str] = []
+        content = ""
+        tool_schemas = self._tool_schemas_for_task(definition, task)
+        steps = 0
+        while steps <= limit:
+            turn = self.provider(messages, tool_schemas)
+            if progress is not None:
+                self._record_progress_usage(progress, turn)
+            self._append_transcript(
+                task,
+                "provider_turn",
+                {
+                    "content": turn.content,
+                    "tool_calls": [
+                        {"name": call.name, "arguments": call.arguments, "call_id": call.call_id}
+                        for call in turn.tool_calls
+                    ],
+                    "usage": turn.usage,
+                },
+            )
+            if turn.content.strip():
+                content = turn.content.strip()
+                transcript.append(content)
+                if progress is not None:
+                    progress.set_message(content[:400])
+            if not turn.tool_calls:
+                break
+            if steps >= limit:
+                content = self._step_limit_report(transcript)
+                break
+            messages.append(_assistant_tool_message(turn))
+            for call in turn.tool_calls[: max(0, limit - steps)]:
+                if progress is not None:
+                    progress.record_tool_use(call.name, call.arguments)
+                self._append_transcript(
+                    task,
+                    "tool_started",
+                    {"name": call.name, "arguments": call.arguments, "call_id": call.call_id},
+                )
+                tool_output = self._execute_tool_call(definition, task, call.name, call.arguments, run_ctx=run_ctx)
+                steps += 1
+                transcript.append(f"{call.name}: {tool_output[:1000]}")
+                self._append_transcript(
+                    task,
+                    "tool_finished",
+                    {"name": call.name, "call_id": call.call_id, "output": tool_output},
+                )
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call.call_id,
+                    "name": call.name,
+                    "content": tool_output,
+                })
+                if steps >= limit:
+                    break
+        return self._ensure_output_contract(content or "(subagent returned no text)")
+
+    def _record_progress_usage(self, progress: Any, turn: Any) -> None:
+        usage = getattr(turn, "usage", None) or {}
+        try:
+            progress.record_tokens(int(usage.get("prompt_tokens", 0) or 0), int(usage.get("completion_tokens", 0) or 0))
+        except Exception:
+            pass
 
     def _ensure_output_contract(self, content: str) -> str:
         if "SUMMARY:" in content and "BLOCKERS:" in content:
@@ -1006,7 +1120,7 @@ class SubAgentManager:
             clone.config = task_config
             return clone
 
-    def _execute_tool_call(self, definition: AgentDefinition, task: SubAgentTask, name: str, arguments: dict[str, Any]) -> str:
+    def _execute_tool_call(self, definition: AgentDefinition, task: SubAgentTask, name: str, arguments: dict[str, Any], run_ctx: Any = None) -> str:
         if self.registry is None or self.ctx is None:
             return f"Tool unavailable in this subagent runtime: {name}"
         allowed = self._effective_allowed_tools(definition, task)
@@ -1034,7 +1148,7 @@ class SubAgentManager:
                 name,
                 "The role preset disallows this tool.",
             )
-        result, elapsed_ms = self.registry.execute(name, arguments or {}, self._ctx_for_task(task))
+        result, elapsed_ms = self.registry.execute(name, arguments or {}, run_ctx or self._ctx_for_task(task))
         if not result.ok and result.metadata.get("gate"):
             return self._runtime_gate_message(
                 task,

@@ -1772,6 +1772,9 @@ class DashboardUI:
             "### Subagents",
             *self._subagent_work_lines(),
             "",
+            "### Teammates",
+            *self._teammate_work_lines(),
+            "",
             "### Flow",
             *SYSTEM_MAP.splitlines(),
             "",
@@ -1820,6 +1823,29 @@ class DashboardUI:
             if worktree_status and worktree_status != "none":
                 branch = f" branch {worktree.get('branch')}" if worktree.get("branch") else ""
                 rows.append(f"  worktree: {worktree_status}{branch} {worktree.get('path') or ''}".rstrip())
+        return rows
+
+    def _teammate_work_lines(self) -> list[str]:
+        teams = getattr(getattr(self, "ctx", None), "teams", None)
+        if teams is None:
+            return ["status: unavailable"]
+        try:
+            all_teams = teams.list_teams()
+        except Exception as exc:  # noqa: BLE001
+            return [f"status: unavailable ({type(exc).__name__})"]
+        if not all_teams:
+            return ["no teams"]
+        rows: list[str] = []
+        for team in all_teams:
+            rows.append(f"team {team.name}: {len(team.members)} member(s)")
+            for m in team.members:
+                prog = getattr(m, "progress", None)
+                status = getattr(prog, "status", None) or ("idle" if m.is_active is False else "active")
+                tokens = getattr(prog, "token_count", 0) if prog else 0
+                tools = getattr(prog, "tool_use_count", 0) if prog else 0
+                activity = prog.activity_summary if prog else ""
+                tok = prog.format_tokens(tokens) if prog else str(tokens)
+                rows.append(f"- {m.name} [{status}] {activity}  tools={tools} tok={tok}")
         return rows
 
     def _toolbar(self):
