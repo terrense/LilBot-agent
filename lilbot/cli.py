@@ -16,6 +16,7 @@ from .memory import MemoryStore
 from .sandbox import PermissionManager, Sandbox
 from .skills import SkillRegistry
 from .subagents import SubAgentManager
+from .teams.manager import TeamManager
 from .tools import ToolContext, ToolRegistry, register_builtins
 from .tui.classic import LilBotUI
 from .tui.windows_console import configure_windows_console, console_font_status
@@ -67,6 +68,7 @@ SLASH_COMMANDS: tuple[SlashCommandInfo, ...] = (
     SlashCommandInfo("memory", "/memory list|search|save|delete", "Manage project memory."),
     SlashCommandInfo("agents", "/agents", "List sub-agent types and tasks."),
     SlashCommandInfo("agent", "/agent TYPE PROMPT", "Run a sub-agent task."),
+    SlashCommandInfo("team", "/team list|new NAME|msg NAME TEXT|rm NAME", "Inspect or drive agent teams.", ("teams",)),
     SlashCommandInfo("mcp", "/mcp", "List MCP-style external servers."),
     SlashCommandInfo("permissions", "/permissions ask|accept-all|deny-all", "Change permission mode."),
     SlashCommandInfo("compact", "/compact", "Compact conversation context."),
@@ -151,11 +153,14 @@ def build_runtime(cfg: LilBotConfig, ui: LilBotUI, interactive: bool = True) -> 
         max_concurrent=cfg.subagent_max_concurrent,
     )
     mcp = MCPManager(cfg.state_dir, cfg.workspace)
+    teams = TeamManager(cfg.state_dir)
     registry = ToolRegistry()
     register_builtins(registry)
-    ctx = ToolContext(sandbox, permissions, memory, skills, subagents, mcp, cfg)
+    ctx = ToolContext(sandbox, permissions, memory, skills, subagents, mcp, cfg, teams)
     subagents.configure_tools(registry, ctx)
-    return Agent(cfg, provider, registry, ctx), registry, ctx
+    agent = Agent(cfg, provider, registry, ctx)
+    agent.agent_id = "lead"
+    return agent, registry, ctx
 
 
 def normalize_model_name(value: str) -> str | None:
@@ -390,6 +395,9 @@ def handle_slash(line: str, agent: Agent, registry: ToolRegistry, ctx: ToolConte
         task = ctx.subagents.spawn(agent_type, prompt)
         ui.print(f"{task.id} [{task.status}]\n{task.result or task.error}")
         return True
+    if cmd == "team":
+        handle_team(args, agent, ctx, ui)
+        return True
     if cmd == "mcp":
         servers = ctx.mcp.list_servers()
         if not servers:
@@ -482,6 +490,60 @@ def handle_slash(line: str, agent: Agent, registry: ToolRegistry, ctx: ToolConte
             ui.error("Trace copy is only available in the dashboard UI.")
         return True
     return True
+
+
+def handle_team(args: str, agent: Agent, ctx: ToolContext, ui: LilBotUI) -> None:
+    teams = getattr(ctx, "teams", None)
+    if teams is None:
+        ui.error("Team system is unavailable in this runtime.")
+        return
+    action, _, tail = args.partition(" ")
+    action = (action or "list").strip().lower()
+    tail = tail.strip()
+
+    if action == "list":
+        rows: list[tuple[str, str, str, str]] = []
+        for team in teams.list_teams():
+            if not team.members:
+                rows.append((team.name, "-", "-", "(no members)"))
+            for m in team.members:
+                prog = getattr(m, "progress", None)
+                status = getattr(prog, "status", None) or ("idle" if m.is_active is False else "active")
+                last = getattr(prog, "last_message", None) or ""
+                rows.append((team.name, m.name, f"{m.agent_type}/{status}", " ".join(last.split())[:50]))
+        if not rows:
+            ui.print("No teams. Create one in chat (the agent calls team_create) or '/team new NAME'.")
+            return
+        ui.table("Teams", ["Team", "Member", "Type/Status", "Last"], rows)
+        return
+    if action == "new":
+        if not tail:
+            ui.error("Usage: /team new NAME")
+            return
+        team = teams.create_team(tail, "lead", "")
+        ui.print(f"Created team '{team.name}'.", "green")
+        return
+    if action in {"msg", "send"}:
+        name, _, text = tail.partition(" ")
+        if not name or not text.strip():
+            ui.error("Usage: /team msg NAME TEXT")
+            return
+        from .tools.builtin import _send_message  # reuse the tool handler
+        res = _send_message({"to": name, "message": text.strip(), "summary": text.strip()[:40]}, ctx)
+        ui.print(res.output, "green" if res.ok else "red")
+        agent.drain_team_notifications()
+        return
+    if action in {"rm", "delete", "del"}:
+        if not tail:
+            ui.error("Usage: /team rm NAME")
+            return
+        try:
+            teams.delete_team(tail)
+            ui.print(f"Deleted team '{tail}'.", "green")
+        except Exception as exc:  # noqa: BLE001
+            ui.error(str(exc))
+        return
+    ui.error("Usage: /team list|new NAME|msg NAME TEXT|rm NAME")
 
 
 def handle_memory(args: str, ctx: ToolContext, ui: LilBotUI) -> None:

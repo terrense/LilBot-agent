@@ -100,6 +100,12 @@ class ToolContext:
     subagents: Any
     mcp: Any
     config: Any
+    teams: Any = None
+    # Identity of the current agent within a team. None => the lead/root agent.
+    # Teammates run with a ctx clone where these are set, so coordination tools
+    # (SendMessage / Task*) know who is acting and which team they belong to.
+    team_name: Any = None
+    agent_name: Any = None
 
 
 class ToolRegistry:

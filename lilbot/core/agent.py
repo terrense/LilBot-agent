@@ -28,6 +28,7 @@ class Agent:
         self.provider = provider
         self.registry = registry
         self.ctx = ctx
+        self.agent_id = "lead"
         self.messages: list[dict[str, Any]] = [
             {"role": "system", "content": build_system_prompt(ctx.memory, ctx.skills)}
         ]
@@ -38,6 +39,7 @@ class Agent:
         self._maybe_compact()
         steps = self._auto_delegate(user_text)
         while steps < self.config.max_steps:
+            self._drain_team_notifications()
             render_ctx = self.ctx.subagents.get_render_context() if getattr(self.ctx, "subagents", None) else None
             turn = self.provider.complete(self.messages, self.registry.schemas(render_ctx))
             self._add_usage(turn)
@@ -71,6 +73,34 @@ class Agent:
         self.messages.append(self._assistant_content_message(final.content, final.reasoning_content))
         yield TextDelta(final.content)
         yield TurnFinished(steps, dict(self.usage))
+
+    def _drain_team_notifications(self) -> None:
+        """Inject teammate messages / idle reports addressed to the lead.
+
+        Called at the top of every agent-loop iteration so the lead learns of
+        teammate progress mid-turn without blocking or polling. Mirrors mewcode's
+        drain_lead_mailbox -> system-reminder injection.
+        """
+        teams = getattr(self.ctx, "teams", None)
+        if teams is None:
+            return
+        try:
+            notes = teams.drain_lead_mailbox()
+        except Exception:
+            return
+        for note in notes:
+            self.messages.append({
+                "role": "user",
+                "content": (
+                    "Internal LilBot team notification (coordination signal, not a new user "
+                    "request). Use it to decide next steps; reply to teammates with send_message.\n"
+                    + note
+                ),
+            })
+
+    def drain_team_notifications(self) -> None:
+        """Public hook for the UI to pull teammate updates between turns."""
+        self._drain_team_notifications()
 
     def _auto_delegate(self, user_text: str) -> int:
         """No-op: Dynamic Agent Tool Prompt Parity replaces keyword-based auto-delegation.
