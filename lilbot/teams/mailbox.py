@@ -57,7 +57,7 @@ class Mailbox:
         lock_file = self._lock_path(agent_id)
         lock_fd = None
         last_err: Exception | None = None
-        for _ in range(10):
+        for _ in range(40):
             try:
                 fd = os.open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
                 lock_fd = fd
@@ -72,6 +72,12 @@ class Mailbox:
                     pass
                 sleep_ms = 5 + random.randint(0, 95)
                 time.sleep(sleep_ms / 1000)
+            except PermissionError as e:
+                # Windows raises this (not FileExistsError) when another thread is
+                # mid-create/unlink of the lock file — transient, so retry.
+                last_err = e
+                sleep_ms = 5 + random.randint(0, 95)
+                time.sleep(sleep_ms / 1000)
             except OSError as e:
                 last_err = e
                 break
@@ -84,7 +90,10 @@ class Mailbox:
             messages = fn(messages)
             self._write_inbox(agent_id, messages)
         finally:
-            lock_file.unlink(missing_ok=True)
+            try:
+                lock_file.unlink(missing_ok=True)
+            except OSError:
+                pass  # Windows: another thread may already be reclaiming it
 
     def _read_inbox(self, agent_id: str) -> list[MailboxMessage]:
         path = self._inbox_path(agent_id)

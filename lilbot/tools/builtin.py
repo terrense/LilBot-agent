@@ -3107,7 +3107,15 @@ def _spawn_teammate(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     teams.register_member(team_name, member)
 
     if use_wt:
-        team_ctx = _dc_replace(subagents.ctx_for_task(task), team_name=team_name, agent_name=teammate_name)
+        # Isolated teammates auto-accept writes: their PathSandbox confines all
+        # file ops to their own worktree, so changes can't touch the main tree
+        # and are reviewed/merged by the lead before they matter.
+        from ..sandbox.permissions import PermissionManager
+        bypass = PermissionManager(ctx.config.state_dir, mode="accept-all", interactive=False)
+        team_ctx = _dc_replace(
+            subagents.ctx_for_task(task),
+            permissions=bypass, team_name=team_name, agent_name=teammate_name,
+        )
     else:
         team_ctx = _dc_replace(ctx, team_name=team_name, agent_name=teammate_name)
 

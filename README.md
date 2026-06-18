@@ -413,6 +413,12 @@ worktree under `.lilbot/worktrees/`, so concurrent teammates don't edit the same
 files. If the workspace is not a git repo, it degrades gracefully to the shared
 workspace. Worktrees are removed on `team_delete`.
 
+An **isolated teammate auto-accepts writes** (`accept-all`) because its
+PathSandbox confines every file operation to its own worktree — changes can't
+reach the main tree until the lead reviews/merges them. A **non-isolated**
+teammate instead inherits the lead's permission mode, so in the default `ask`
+mode it cannot write unless you approve (or run with `accept-all`).
+
 ### Example
 
 > "Build a team: have an implementer fix the null check in `auth.py`, then a
