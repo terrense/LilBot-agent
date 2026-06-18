@@ -428,6 +428,11 @@ The lead creates a team, spawns `impl` and (after `impl` reports back) `rev`,
 collects both results via auto-injected notifications, and answers you — without
 ever polling.
 
+### Learn more
+
+- Deep dive (source-grounded, interview/teaching grade): [`docs/TEAMS_EXPLAINED.md`](docs/TEAMS_EXPLAINED.md)
+- Live demo: `python experiment/teams_demo.py` (stub, no network) or `--real` (DeepSeek)
+
 ---
 
 ## MCP Dock
