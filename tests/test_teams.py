@@ -158,6 +158,72 @@ def test_shared_board_through_tools(tmp_path: Path) -> None:
     assert r.ok and r.metadata["count"] == 1
 
 
+def _git_repo(path: Path) -> None:
+    import subprocess
+    for c in (["git", "init", "-q"], ["git", "config", "user.email", "t@t"], ["git", "config", "user.name", "t"]):
+        subprocess.run(c, cwd=path, capture_output=True)
+    (path / "seed.txt").write_text("x")
+    subprocess.run(["git", "add", "-A"], cwd=path, capture_output=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=path, capture_output=True)
+
+
+def test_isolated_teammate_gets_bypass_permissions(tmp_path: Path) -> None:
+    """A worktree-isolated teammate should auto-accept writes (sandboxed to its tree)."""
+    import shutil
+
+    if not shutil.which("git"):
+        pytest.skip("git not available")
+    _git_repo(tmp_path)
+
+    captured: dict[str, object] = {}
+
+    def capture_turn(definition, task, prompt, *, progress=None, run_ctx=None, max_steps=None):  # noqa: ANN001
+        captured["mode"] = run_ctx.permissions.mode
+        captured["sandbox_root"] = str(run_ctx.sandbox.root)
+        captured["team"] = run_ctx.team_name
+        captured["agent"] = run_ctx.agent_name
+        return "SUMMARY: ok\nCHANGES: None.\nEVIDENCE: ok\nRISKS: None.\nBLOCKERS: None."
+
+    _, registry, ctx, _ = _runtime(tmp_path)
+    ctx.subagents.run_agent_turn = capture_turn  # type: ignore[assignment]
+
+    registry.execute("team_create", {"team_name": "demo"}, ctx)
+    r, _ = registry.execute(
+        "agent_open",
+        {"team_name": "demo", "name": "dev", "subagent_type": "implementer",
+         "isolation": "worktree", "prompt": "fix it"},
+        ctx,
+    )
+    assert r.ok
+    assert _wait(lambda: "mode" in captured)
+    assert captured["mode"] == "accept-all"
+    assert captured["team"] == "demo" and captured["agent"] == "dev"
+    # sandbox is scoped to the teammate's own worktree, not the main workspace
+    assert ".lilbot" in captured["sandbox_root"] and "worktrees" in captured["sandbox_root"]
+
+
+def test_non_isolated_teammate_inherits_lead_permissions(tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def capture_turn(definition, task, prompt, *, progress=None, run_ctx=None, max_steps=None):  # noqa: ANN001
+        captured["mode"] = run_ctx.permissions.mode
+        return "SUMMARY: ok\nCHANGES: None.\nEVIDENCE: ok\nRISKS: None.\nBLOCKERS: None."
+
+    _, registry, ctx, _ = _runtime(tmp_path)
+    ctx.permissions.mode = "deny-all"
+    ctx.subagents.run_agent_turn = capture_turn  # type: ignore[assignment]
+
+    registry.execute("team_create", {"team_name": "demo"}, ctx)
+    r, _ = registry.execute(
+        "agent_open",
+        {"team_name": "demo", "name": "dev", "subagent_type": "implementer", "prompt": "x"},
+        ctx,
+    )
+    assert r.ok
+    assert _wait(lambda: "mode" in captured)
+    assert captured["mode"] == "deny-all"  # inherited, not bypassed
+
+
 def test_one_shot_subagents_have_no_team_tools(tmp_path: Path) -> None:
     """Regression: existing one-shot subagents must not gain team coordination tools."""
     _, _, ctx, _ = _runtime(tmp_path)
