@@ -1,0 +1,79 @@
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from typing import Any
+
+VALID_EVENTS = {
+    "session_start",
+    "turn_start",
+    "pre_tool_use",
+    "post_tool_use",
+    "turn_end",
+    "session_end",
+}
+
+VALID_ACTIONS = {"command", "prompt", "block"}
+
+
+@dataclass
+class HookContext:
+    """Everything a hook can match on or receive as input."""
+
+    event: str
+    tool_name: str = ""
+    tool_args: dict[str, Any] = field(default_factory=dict)
+    file_path: str = ""
+    message: str = ""
+
+
+@dataclass
+class HookMatch:
+    """Predicate deciding whether a hook fires for a given context."""
+
+    tool: str = ""           # exact tool name, or "*"/"" for any
+    path_regex: str = ""     # regex tested against file_path
+
+    def matches(self, ctx: HookContext) -> bool:
+        if self.tool and self.tool != "*" and self.tool != ctx.tool_name:
+            return False
+        if self.path_regex:
+            try:
+                if not re.search(self.path_regex, ctx.file_path or ""):
+                    return False
+            except re.error:
+                return False
+        return True
+
+
+@dataclass
+class HookAction:
+    type: str                       # command | prompt | block
+    command: str = ""               # for type=command
+    message: str = ""               # for type=prompt / block
+    timeout: int = 15               # command timeout (seconds)
+
+
+@dataclass
+class HookResult:
+    success: bool
+    output: str
+
+
+@dataclass
+class Hook:
+    id: str
+    event: str
+    action: HookAction
+    match: HookMatch = field(default_factory=HookMatch)
+    # When True, a pre_tool_use hook blocks the tool (reject). Implied for
+    # action.type == "block".
+    reject: bool = False
+    run_once: bool = False
+    _executed: bool = field(default=False, init=False)
+
+    def should_run(self) -> bool:
+        return not (self.run_once and self._executed)
+
+    def mark_executed(self) -> None:
+        self._executed = True

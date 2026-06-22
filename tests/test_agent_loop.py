@@ -514,12 +514,15 @@ class AgentLoopTests(unittest.TestCase):
             provider = LoopingProvider()
             agent, _ = make_agent(tmp, provider, max_steps=2)
 
+            # Long prefix so summarization actually triggers; the tool pair sits
+            # in the recent tail so we can assert it is never orphaned.
+            filler = "x " * 2000
             agent.messages = [
                 {"role": "system", "content": "system"},
-                {"role": "user", "content": "old 1"},
-                {"role": "assistant", "content": "old 1"},
-                {"role": "user", "content": "old 2"},
-                {"role": "assistant", "content": "old 2"},
+                {"role": "user", "content": "old 1 " + filler},
+                {"role": "assistant", "content": "old 1 reply " + filler},
+                {"role": "user", "content": "old 2 " + filler},
+                {"role": "assistant", "content": "old 2 reply " + filler},
                 {"role": "user", "content": "use tools"},
                 {
                     "role": "assistant",
@@ -532,14 +535,22 @@ class AgentLoopTests(unittest.TestCase):
                 {"role": "tool", "tool_call_id": "call_a", "content": "a"},
                 {"role": "tool", "tool_call_id": "call_b", "content": "b"},
                 {"role": "assistant", "content": "after tools"},
-                {"role": "user", "content": "more 1"},
-                {"role": "assistant", "content": "more 1"},
-                {"role": "user", "content": "more 2"},
-                {"role": "assistant", "content": "more 2"},
                 {"role": "user", "content": "current"},
             ]
 
-            agent.compact()
+            message = agent.compact()
+            self.assertIn("Compacted context", message)
+            # The summary replaces the prefix; the system prompt is preserved.
+            self.assertEqual(agent.messages[0]["content"], "system")
+            self.assertEqual(agent.messages[1]["role"], "system")
+            # No orphaned tool message: every 'tool' role is preceded by an
+            # assistant tool_calls message somewhere before it.
+            for idx, msg in enumerate(agent.messages):
+                if msg.get("role") == "tool":
+                    self.assertTrue(
+                        any(agent.messages[j].get("tool_calls") for j in range(1, idx)),
+                        f"tool message at {idx} has no preceding tool_calls",
+                    )
 
         self.assertEqual(agent.messages[2]["role"], "assistant")
         self.assertEqual([message["role"] for message in agent.messages[2:5]], ["assistant", "tool", "tool"])
