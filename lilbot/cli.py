@@ -72,6 +72,8 @@ SLASH_COMMANDS: tuple[SlashCommandInfo, ...] = (
     SlashCommandInfo("mcp", "/mcp", "List MCP-style external servers."),
     SlashCommandInfo("permissions", "/permissions ask|accept-all|deny-all", "Change permission mode."),
     SlashCommandInfo("compact", "/compact", "Compact conversation context."),
+    SlashCommandInfo("sessions", "/sessions", "List saved sessions you can resume."),
+    SlashCommandInfo("resume", "/resume [id]", "Resume a saved session (latest if no id)."),
     SlashCommandInfo("status", "/status", "Show session status."),
     SlashCommandInfo("tokens", "/tokens", "Show local token and context usage.", ("usage", "token")),
     SlashCommandInfo("plan", "/plan [task]", "Enter Plan Mode locally; optional task is sent to Agent.", ("p",), "local-ui"),
@@ -132,6 +134,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--print", action="store_true", dest="print_mode", help="Run one prompt and exit.")
     parser.add_argument("--classic", action="store_true", help="Use the legacy printed Rich interface.")
     parser.add_argument("--no-rich", action="store_true")
+    parser.add_argument("--resume", nargs="?", const="__latest__", default=None,
+                        help="Resume a saved session. Bare --resume resumes the most recent; "
+                             "pass a session id to resume a specific one.")
     return parser
 
 
@@ -161,6 +166,13 @@ def build_runtime(cfg: LilBotConfig, ui: LilBotUI, interactive: bool = True) -> 
     agent = Agent(cfg, provider, registry, ctx)
     agent.agent_id = "lead"
     return agent, registry, ctx
+
+
+def maybe_resume(agent: Agent, ui: LilBotUI, resume_arg: str | None) -> None:
+    if not resume_arg:
+        return
+    session_id = None if resume_arg == "__latest__" else resume_arg
+    ui.print(agent.resume(session_id), "green")
 
 
 def normalize_model_name(value: str) -> str | None:
@@ -425,6 +437,27 @@ def handle_slash(line: str, agent: Agent, registry: ToolRegistry, ctx: ToolConte
     if cmd == "compact":
         ui.print(agent.compact(), "green")
         return True
+    if cmd == "sessions":
+        store = getattr(agent, "sessions", None)
+        infos = store.list() if store else []
+        if not infos:
+            ui.print("No saved sessions yet.")
+            return True
+        import datetime as _dt
+        rows = [
+            (
+                s.session_id,
+                _dt.datetime.fromtimestamp(s.updated_at).strftime("%Y-%m-%d %H:%M"),
+                str(s.message_count),
+                s.preview,
+            )
+            for s in infos
+        ]
+        ui.table("Sessions", ["ID", "Updated", "Msgs", "Preview"], rows)
+        return True
+    if cmd == "resume":
+        ui.print(agent.resume(args.strip() or None), "green")
+        return True
     if cmd == "status":
         ui.table("Status", ["Key", "Value"], [
             ("workspace", str(ctx.config.workspace)),
@@ -606,6 +639,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     ui = LilBotUI(enabled=not args.no_rich)
     one_shot = args.print_mode or bool(args.prompt)
     agent, registry, ctx = build_runtime(cfg, ui, interactive=not one_shot)
+    maybe_resume(agent, ui, getattr(args, "resume", None))
     if one_shot:
         prompt = " ".join(args.prompt)
         if not prompt:
