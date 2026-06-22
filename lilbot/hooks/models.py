@@ -31,11 +31,16 @@ class HookContext:
 class HookMatch:
     """Predicate deciding whether a hook fires for a given context."""
 
-    tool: str = ""           # exact tool name, or "*"/"" for any
-    path_regex: str = ""     # regex tested against file_path
+    tool: str = ""                   # single tool name, or "*"/"" for any
+    tools: list[str] = field(default_factory=list)  # match any tool in this set
+    path_regex: str = ""             # regex tested against file_path
 
     def matches(self, ctx: HookContext) -> bool:
-        if self.tool and self.tool != "*" and self.tool != ctx.tool_name:
+        names = set(self.tools)
+        if self.tool:
+            names.add(self.tool)
+        # Empty set or "*" means "any tool"; otherwise the tool must be in the set.
+        if names and "*" not in names and ctx.tool_name not in names:
             return False
         if self.path_regex:
             try:
