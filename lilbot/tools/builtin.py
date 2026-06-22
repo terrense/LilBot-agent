@@ -825,6 +825,66 @@ def _safe_branch_name(value: str) -> str:
     return text or f"lilbot-{uuid4().hex[:8]}"
 
 
+# Heavy dependency directories symlinked into a new worktree so it is usable
+# immediately without reinstalling (ported from mewcode worktree.symlink_directories).
+WORKTREE_SYMLINK_DIRS = ["node_modules", ".venv", "venv", "vendor", ".gradle", "target"]
+
+_WT_ADJECTIVES = ["bold", "bright", "calm", "cool", "deep", "fair", "fast", "fine",
+                  "keen", "kind", "lean", "mild", "neat", "pure", "safe", "swift",
+                  "warm", "wise", "grand", "vivid"]
+_WT_NOUNS = ["sketch", "draft", "spark", "bloom", "trail", "ridge", "creek", "grove",
+             "cliff", "cloud", "field", "forge", "frost", "haven", "stone", "river",
+             "tower", "delta", "flame", "orbit"]
+
+
+def _worktree_slug() -> str:
+    import datetime
+    import random
+    ts = datetime.datetime.now().strftime("%m%d-%H%M")
+    return f"{random.choice(_WT_ADJECTIVES)}-{random.choice(_WT_NOUNS)}-{ts}"
+
+
+def _create_dir_link(src: Path, dst: Path) -> tuple[bool, str]:
+    """Link dst -> src for a directory, cross-platform.
+
+    Prefers a symlink; on Windows falls back to a directory junction (mklink /J),
+    which needs no admin/developer mode. Returns (ok, kind_or_error).
+    """
+    try:
+        os.symlink(src, dst, target_is_directory=True)
+        return True, "symlink"
+    except (OSError, NotImplementedError) as exc:
+        if os.name == "nt":
+            try:
+                r = subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", str(dst), str(src)],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if r.returncode == 0:
+                    return True, "junction"
+                return False, (r.stderr or r.stdout).strip() or "mklink failed"
+            except (OSError, subprocess.TimeoutExpired) as exc2:
+                return False, str(exc2)
+        return False, str(exc)
+
+
+def _symlink_worktree_deps(main_root: Path, worktree_root: Path, dirs: list[str]) -> list[dict[str, Any]]:
+    """Link heavy dep dirs from the main checkout into a fresh worktree.
+
+    A dir is linked only when it exists in the main checkout and is absent in the
+    worktree. Returns one record per attempted link.
+    """
+    results: list[dict[str, Any]] = []
+    for name in dirs:
+        src = main_root / name
+        dst = worktree_root / name
+        if not src.is_dir() or dst.exists():
+            continue
+        ok, kind = _create_dir_link(src, dst)
+        results.append({"dir": name, "linked": ok, "kind": kind})
+    return results
+
+
 def _enter_worktree(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     supported, support = _git_worktree_support(ctx)
     if not supported:
@@ -833,6 +893,11 @@ def _enter_worktree(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     rel_path = str(args.get("path") or f".lilbot/worktrees/{name}")
     ref = str(args.get("ref") or args.get("base") or "HEAD").strip()
     branch = str(args.get("new_branch") or args.get("branch") or "").strip()
+    # Auto-generate a readable branch slug when creating without an explicit name
+    # (ported from mewcode worktree slug naming).
+    if not branch and _optional_bool(args.get("create")) is not False:
+        branch = f"lilbot/{_worktree_slug()}"
+    main_root = ctx.sandbox.root
     try:
         target = ctx.sandbox.resolve(rel_path)
     except Exception as exc:
@@ -863,7 +928,15 @@ def _enter_worktree(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     if not target.exists() or not target.is_dir():
         data = {"supported": True, "status": "error", "reason": "worktree path does not exist", "path": str(target)}
         return ToolResult(False, _json(data), data)
-    previous_root = ctx.sandbox.root
+    # Symlink heavy dependency dirs from the main checkout so the worktree is
+    # immediately usable (ported from mewcode). Opt out with symlink_deps=false.
+    symlinked: list[dict[str, Any]] = []
+    if should_create and _optional_bool(args.get("symlink_deps")) is not False:
+        dirs = args.get("symlink_directories")
+        if not isinstance(dirs, list):
+            dirs = WORKTREE_SYMLINK_DIRS
+        symlinked = _symlink_worktree_deps(Path(main_root), target.resolve(), dirs)
+    previous_root = main_root
     ctx.sandbox.root = target.resolve()
     data = {
         "supported": True,
@@ -874,6 +947,7 @@ def _enter_worktree(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         "created": should_create,
         "branch": branch or None,
         "ref": ref or None,
+        "symlinked_deps": symlinked,
         "entered_at": time.time(),
     }
     _save_state(ctx, "worktree.json", data)
@@ -988,6 +1062,48 @@ def _worktree_merge_back(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         "output": merge.output,
     }
     return ToolResult(merge.ok, _json(data), data)
+
+
+def _worktree_prune(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    """Remove stale LilBot-created worktrees under .lilbot/worktrees/.
+
+    A worktree is stale when its directory mtime is older than `max_age_hours`
+    (default 24). dry_run (default true) only reports candidates.
+    """
+    supported, support = _git_worktree_support(ctx)
+    if not supported:
+        return ToolResult(False, _json(support), support)
+    try:
+        cutoff_hours = float(args.get("max_age_hours", 24))
+    except (TypeError, ValueError):
+        cutoff_hours = 24.0
+    dry_run = _optional_bool(args.get("dry_run"))
+    try:
+        base = ctx.sandbox.resolve(".lilbot/worktrees")
+    except Exception as exc:
+        return ToolResult(False, f"Cannot resolve worktrees dir: {exc}")
+    now = time.time()
+    candidates: list[dict[str, Any]] = []
+    if base.is_dir():
+        for child in base.iterdir():
+            if not child.is_dir():
+                continue
+            age_h = (now - child.stat().st_mtime) / 3600.0
+            if age_h >= cutoff_hours:
+                candidates.append({"path": str(child), "age_hours": round(age_h, 1)})
+    if dry_run is not False:
+        return ToolResult(True, _json({
+            "status": "preflight", "max_age_hours": cutoff_hours,
+            "stale": candidates, "count": len(candidates),
+        }), {"count": len(candidates)})
+    if candidates and not _permission(ctx, "worktree:prune", f"remove {len(candidates)} stale worktree(s)"):
+        return ToolResult(False, "Permission denied.")
+    removed: list[dict[str, Any]] = []
+    for c in candidates:
+        result = ctx.sandbox.run(f"git worktree remove --force {_quote_ps(c['path'])}", 120)
+        removed.append({"path": c["path"], "ok": result.ok, "returncode": result.returncode})
+    return ToolResult(True, _json({"status": "pruned", "removed": removed, "count": len(removed)}),
+                      {"count": len(removed)})
 
 
 def _github_issue_context(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -3829,6 +3945,10 @@ def register_builtins(registry: ToolRegistry) -> None:
         "dry_run": _bool("Only report merge-back plan and diff stat.", True),
         "timeout": _integer("Timeout in seconds.", 120),
     }), _worktree_merge_back))
+    registry.register(ToolDef("worktree_prune", "Remove stale LilBot-created git worktrees under .lilbot/worktrees (older than max_age_hours; dry_run by default).", _schema({
+        "max_age_hours": _integer("Age threshold in hours.", 24),
+        "dry_run": _bool("Only report candidates without removing.", True),
+    }), _worktree_prune))
     registry.register(ToolDef("worktree_merge_back", "Alias for WorktreeMergeBack.", _schema({
         "path": _string("Worktree path, default active worktree state."),
         "source_branch": _string("Branch to merge from."),

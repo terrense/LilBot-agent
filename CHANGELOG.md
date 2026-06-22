@@ -5,7 +5,38 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/);
 this project records dated entries per improvement batch so we can track
 progress over time and in GitHub.
 
-## [Unreleased] — 2026-06-22 — Engine upgrades ported from mewcode
+## [Unreleased] — 2026-06-22 (batch 2) — Surpassing mewcode: persistence & depth
+
+The four persistence/depth areas where mewcode still led are now closed.
+Combined with batch 1, LilBot meets mewcode on engine intelligence and exceeds
+it on breadth (tools, TUI, Windows safety, hooks hot-reload). Tests: 160 → 184.
+
+### Added
+- **Session persistence + resume** — conversation + usage are written to
+  `.lilbot/sessions/<id>.json` after every turn (atomic temp-then-replace).
+  Resume the latest or a specific session via `--resume[=id]`, `/sessions`
+  (list), `/resume [id]`. (`lilbot/core/session.py`)
+- **File-based memory store** — each memory is its own frontmatter `.md` file,
+  routed by kind into user-level (`~/.lilbot/memory`: user/feedback) or
+  project-level (`.lilbot/memory`: project/reference/note) dirs, each with a
+  `MEMORY.md` index. Drop-in for `MemoryStore` (same API + `MemoryEntry`), so
+  recall/extraction/tools are unchanged; legacy `memory.jsonl` is migrated on
+  first run. (`lilbot/memory/file_store.py`)
+- **File history + rewind** — files are snapshotted before
+  write_file/edit_file/fim_edit; `/rewind [n]` undoes the last n edits (restores
+  modified files, deletes newly created ones), `/history` lists recent edits.
+  An undo for agent edits, independent of git. (`lilbot/core/history.py`)
+- **Worktree depth** — `EnterWorktree` now auto-generates a readable branch slug
+  and **symlinks heavy dependency dirs** (node_modules/.venv/vendor/…) from the
+  main checkout into the new worktree (junction fallback on Windows) so it is
+  usable without reinstalling. New `worktree_prune` removes stale worktrees.
+  (`lilbot/tools/builtin.py`)
+
+### Tests
+- Added `test_session`, `test_file_memory`, `test_file_history`,
+  `test_worktree_depth` (24 new tests).
+
+## [Unreleased] — 2026-06-22 (batch 1) — Engine upgrades ported from mewcode
 
 A batch of runtime/"engine" improvements studied from the `mewcode-python`
 reference agent and adapted to LilBot's synchronous, OpenAI-compatible
@@ -57,19 +88,10 @@ zero regressions.
 - Subagent tool filtering now selects from the full catalog (`all_schemas()`),
   so deferral never hides a tool a subagent is allowed to use.
 
-### Tests
-- Added `test_deferred_tools`, `test_offload`, `test_compaction`,
-  `test_cache_usage`, `test_hooks`, `test_memory_recall`, `test_parallel_tools`
-  (42 new tests). Updated `test_compact_does_not_orphan_tool_messages` for the
-  new compaction algorithm.
-
 ### Known limitations
 - A `pre_tool_use` path-regex hook matches on the file path inferred from a
   tool's `path`/`file_path` argument. Tools that carry the target elsewhere
   (`apply_patch` embeds it in the diff; `bash` via shell redirection) cannot be
   matched by `path_regex` — block those by tool name if needed.
-- Memory still uses the JSONL store (the intelligence layer was added on top);
-  frontmatter-file storage with physical user/project dirs is a future option.
-- Hooks: `session_start` / `session_end` events not yet wired into the loop
-  (lifecycle covers turn_start / pre_tool_use / post_tool_use / turn_end).
-- Compaction boundary is not yet persisted to disk for session resume.
+- Async streaming output and remote/cloud agents (mewcode `remote.py`) are
+  intentionally not ported — large effort, niche value for a sync CLI.
