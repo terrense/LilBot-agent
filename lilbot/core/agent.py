@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -20,6 +21,7 @@ from .delegation import (
 )
 from ..hooks import HookContext, HookEngine, load_hooks
 from ..memory import extract_memories, recall
+from .session import SessionStore
 
 MEMORY_EXTRACTION_INTERVAL = 3
 from .events import ProviderTurn, TextDelta, ToolCall, ToolFinished, ToolStarted, TurnFinished
@@ -61,6 +63,9 @@ class Agent:
         self._recent_tools: list[str] = []
         self._surfaced_memory_ids: set[str] = set()
         self._pending_recall = ""
+        # Session persistence (ported from mewcode). One file per session.
+        self.sessions = SessionStore(state_dir) if state_dir else None
+        self.session_id = time.strftime("%Y%m%d-%H%M%S")
 
     def run_turn(self, user_text: str) -> Iterator[object]:
         self._reload_hooks_if_changed()
@@ -82,6 +87,7 @@ class Agent:
                 self.messages.append(self._assistant_content_message(turn.content, turn.reasoning_content))
                 self._fire_turn_end()
                 self._maybe_extract()
+                self._persist_session()
                 yield TurnFinished(steps, dict(self.usage))
                 return
 
@@ -114,6 +120,7 @@ class Agent:
         self._maybe_extract()
         final = self._synthesize_after_step_limit()
         self.messages.append(self._assistant_content_message(final.content, final.reasoning_content))
+        self._persist_session()
         yield TextDelta(final.content)
         yield TurnFinished(steps, dict(self.usage))
 
@@ -204,6 +211,39 @@ class Agent:
                 load_hooks(self._hooks_path.parent),
                 cwd=getattr(self.config, "workspace", None),
             )
+
+    # -- Session persistence / resume (ported from mewcode) ----------------
+
+    def _persist_session(self) -> None:
+        if self.sessions is None:
+            return
+        self.sessions.save(
+            self.session_id,
+            self.messages,
+            self.usage,
+            meta={"turns": self._turn_count, "surfaced_memory_ids": sorted(self._surfaced_memory_ids)},
+        )
+
+    def resume(self, session_id: str | None = None) -> str:
+        """Load a saved session into this agent. None => most recent."""
+        if self.sessions is None:
+            return "Session persistence is unavailable (no state dir)."
+        sid = session_id or self.sessions.latest_id()
+        if not sid:
+            return "No saved session to resume."
+        data = self.sessions.load(sid)
+        if not data:
+            return f"Session '{sid}' not found."
+        messages = data.get("messages") or []
+        if not messages:
+            return f"Session '{sid}' is empty."
+        self.messages = messages
+        self.usage = dict(data.get("usage") or {})
+        self.session_id = sid
+        meta = data.get("meta") or {}
+        self._turn_count = int(meta.get("turns") or 0)
+        self._surfaced_memory_ids = set(meta.get("surfaced_memory_ids") or [])
+        return f"Resumed session '{sid}' ({len(messages)} messages)."
 
     # -- Memory recall / extraction (ported from mewcode) ------------------
 
