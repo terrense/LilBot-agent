@@ -119,3 +119,59 @@ def test_agent_blocks_tool_via_hook(tmp_path):
     assert executed["called"] is False  # tool never ran
     blocked = [m for m in agent.messages if m.get("role") == "tool" and "Blocked by hook" in str(m.get("content"))]
     assert blocked and "Refusing to write .env" in blocked[0]["content"]
+
+
+def test_hooks_hot_reload_picks_up_new_file(tmp_path):
+    from lilbot.config import LilBotConfig
+    from lilbot.core.agent import Agent
+    from lilbot.core.events import ProviderTurn, ToolCall
+    from lilbot.tools import ToolContext, ToolDef, ToolRegistry, ToolResult
+
+    (tmp_path / ".lilbot").mkdir()
+    ran = {"n": 0}
+
+    def w(args, ctx):
+        ran["n"] += 1
+        return ToolResult(True, "wrote")
+
+    registry = ToolRegistry()
+    registry.register(ToolDef("write_file", "w", {"type": "object", "properties": {}}, w))
+
+    turns = iter([
+        ProviderTurn(tool_calls=[ToolCall("write_file", {"path": ".env"})]),
+        ProviderTurn(content="done"),
+        ProviderTurn(tool_calls=[ToolCall("write_file", {"path": ".env"})]),
+        ProviderTurn(content="done"),
+    ])
+
+    class P:
+        def complete(self, m, t):
+            return next(turns)
+
+    class Mem:
+        def context(self, *a, **k):
+            return "(none)"
+
+    class Sk:
+        def list(self, *a, **k):
+            return []
+
+    cfg = LilBotConfig(workspace=tmp_path)
+    agent = Agent(cfg, P(), registry, ToolContext(None, None, Mem(), Sk(), None, None, cfg))
+
+    # Session started with no hooks.json -> first write goes through.
+    list(agent.run_turn("write env"))
+    assert ran["n"] == 1
+    assert len(agent.hooks.hooks) == 0
+
+    # Create the hooks file mid-session (no restart).
+    (tmp_path / ".lilbot" / "hooks.json").write_text(json.dumps({"hooks": [
+        {"id": "g", "event": "pre_tool_use",
+         "match": {"tool": "write_file", "path_regex": r"\.env$"},
+         "action": {"type": "block", "message": "no env"}},
+    ]}), encoding="utf-8")
+
+    # Next turn hot-reloads and blocks the write.
+    list(agent.run_turn("write env again"))
+    assert len(agent.hooks.hooks) == 1
+    assert ran["n"] == 1  # still 1 — second write was blocked

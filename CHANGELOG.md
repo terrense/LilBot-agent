@@ -36,7 +36,9 @@ zero regressions.
 - **Lifecycle hooks engine** — user automation via `.lilbot/hooks.json` on
   `turn_start`/`pre_tool_use`/`post_tool_use`/`turn_end`; `pre_tool_use` can
   block a tool call, `prompt` actions inject guidance, `command` actions run a
-  shell command and report output. (`lilbot/hooks/`)
+  shell command and report output. Hooks **hot-reload**: editing
+  `.lilbot/hooks.json` takes effect on the next turn, no restart needed.
+  (`lilbot/hooks/`, `Agent._reload_hooks_if_changed`)
 - **Memory recall + auto-extraction** — a small side-query selects the memories
   relevant to the current request (with point-in-time freshness warnings)
   instead of dumping the newest few; every 3 turns the agent distills durable
@@ -62,5 +64,6 @@ zero regressions.
 ### Notes / not yet done
 - Memory still uses the JSONL store (the intelligence layer was added on top);
   frontmatter-file storage with physical user/project dirs is a future option.
-- Hooks: `session_start` / `session_end` events not yet wired into the loop.
+- Hooks: `session_start` / `session_end` events not yet wired into the loop
+  (lifecycle covers turn_start / pre_tool_use / post_tool_use / turn_end).
 - Compaction boundary is not yet persisted to disk for session resume.

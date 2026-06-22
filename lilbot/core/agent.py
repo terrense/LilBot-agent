@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
 from ..config import LilBotConfig
@@ -51,6 +52,10 @@ class Agent:
         state_dir = getattr(config, "state_dir", None)
         workspace = getattr(config, "workspace", None)
         self.hooks = HookEngine(load_hooks(state_dir), cwd=workspace)
+        # Hot-reload support: re-read hooks.json when it changes, so edits take
+        # effect on the next turn without restarting the session.
+        self._hooks_path = (Path(state_dir) / "hooks.json") if state_dir else None
+        self._hooks_mtime = self._current_hooks_mtime()
         # Memory recall / extraction state (ported from mewcode).
         self._turn_count = 0
         self._recent_tools: list[str] = []
@@ -58,6 +63,7 @@ class Agent:
         self._pending_recall = ""
 
     def run_turn(self, user_text: str) -> Iterator[object]:
+        self._reload_hooks_if_changed()
         self.messages.append({"role": "user", "content": user_text})
         self._turn_count += 1
         self._maybe_compact()
@@ -176,6 +182,28 @@ class Agent:
     def _fire_turn_end(self) -> None:
         if self.hooks.has_hooks():
             self.hooks.run("turn_end", HookContext(event="turn_end"))
+
+    def _current_hooks_mtime(self) -> float:
+        try:
+            return self._hooks_path.stat().st_mtime if self._hooks_path else 0.0
+        except OSError:
+            return 0.0
+
+    def _reload_hooks_if_changed(self) -> None:
+        """Reload hooks.json if it appeared or changed since last turn.
+
+        Removes the "must restart to pick up hooks" friction: editing
+        .lilbot/hooks.json takes effect on the next turn.
+        """
+        if self._hooks_path is None:
+            return
+        mtime = self._current_hooks_mtime()
+        if mtime != self._hooks_mtime:
+            self._hooks_mtime = mtime
+            self.hooks = HookEngine(
+                load_hooks(self._hooks_path.parent),
+                cwd=getattr(self.config, "workspace", None),
+            )
 
     # -- Memory recall / extraction (ported from mewcode) ------------------
 
