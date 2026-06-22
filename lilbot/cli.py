@@ -12,7 +12,7 @@ from .config import LilBotConfig, load_config, save_config
 from .core.agent import Agent
 from .llm.providers import choose_provider
 from .mcp import MCPManager
-from .memory import MemoryStore
+from .memory import FileMemoryStore, MemoryStore
 from .sandbox import PermissionManager, Sandbox
 from .skills import SkillRegistry
 from .subagents import SubAgentManager
@@ -149,7 +149,15 @@ def build_runtime(cfg: LilBotConfig, ui: LilBotUI, interactive: bool = True) -> 
         prompt=lambda label: input(label),
         interactive=interactive,
     )
-    memory = MemoryStore(cfg.state_dir)
+    memory = FileMemoryStore(cfg.state_dir)
+    # One-time migration: import any legacy JSONL memories into the file store.
+    legacy = MemoryStore(cfg.state_dir)
+    if (cfg.state_dir / "memory.jsonl").exists():
+        try:
+            memory.import_from(legacy)
+            (cfg.state_dir / "memory.jsonl").rename(cfg.state_dir / "memory.jsonl.migrated")
+        except OSError:
+            pass
     skills = SkillRegistry(cfg.state_dir)
     provider = choose_provider(cfg)
     subagents = SubAgentManager(
