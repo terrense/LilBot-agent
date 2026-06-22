@@ -74,6 +74,8 @@ SLASH_COMMANDS: tuple[SlashCommandInfo, ...] = (
     SlashCommandInfo("compact", "/compact", "Compact conversation context."),
     SlashCommandInfo("sessions", "/sessions", "List saved sessions you can resume."),
     SlashCommandInfo("resume", "/resume [id]", "Resume a saved session (latest if no id)."),
+    SlashCommandInfo("history", "/history", "List recent file edits the agent made."),
+    SlashCommandInfo("rewind", "/rewind [n]", "Undo the last n file edits (default 1)."),
     SlashCommandInfo("status", "/status", "Show session status."),
     SlashCommandInfo("tokens", "/tokens", "Show local token and context usage.", ("usage", "token")),
     SlashCommandInfo("plan", "/plan [task]", "Enter Plan Mode locally; optional task is sent to Agent.", ("p",), "local-ui"),
@@ -465,6 +467,40 @@ def handle_slash(line: str, agent: Agent, registry: ToolRegistry, ctx: ToolConte
         return True
     if cmd == "resume":
         ui.print(agent.resume(args.strip() or None), "green")
+        return True
+    if cmd == "history":
+        hist = getattr(agent, "file_history", None)
+        entries = hist.list() if hist else []
+        if not entries:
+            ui.print("No file edits recorded yet.")
+            return True
+        import datetime as _dt
+        rows = [
+            (
+                str(e.seq),
+                e.rel_path,
+                e.tool,
+                ("modified" if e.existed else "created"),
+                _dt.datetime.fromtimestamp(e.ts).strftime("%H:%M:%S"),
+            )
+            for e in entries[-20:]
+        ]
+        ui.table("File history", ["#", "Path", "Tool", "Change", "Time"], rows)
+        return True
+    if cmd == "rewind":
+        hist = getattr(agent, "file_history", None)
+        if hist is None:
+            ui.print("File history is unavailable.")
+            return True
+        try:
+            n = int(args.strip()) if args.strip() else 1
+        except ValueError:
+            n = 1
+        results = hist.rewind(n)
+        if not results:
+            ui.print("Nothing to rewind.")
+        else:
+            ui.print("Rewound:\n" + "\n".join(f"- {r}" for r in results), "green")
         return True
     if cmd == "status":
         ui.table("Status", ["Key", "Value"], [

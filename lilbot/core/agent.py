@@ -21,7 +21,12 @@ from .delegation import (
 )
 from ..hooks import HookContext, HookEngine, load_hooks
 from ..memory import extract_memories, recall
+from .history import FileHistory
 from .session import SessionStore
+
+# Tools that mutate a file at a `path` arg — snapshot before they run so /rewind
+# can undo them.
+MUTATING_PATH_TOOLS = {"write_file", "edit_file", "fim_edit"}
 
 MEMORY_EXTRACTION_INTERVAL = 3
 from .events import ProviderTurn, TextDelta, ToolCall, ToolFinished, ToolStarted, TurnFinished
@@ -66,6 +71,10 @@ class Agent:
         # Session persistence (ported from mewcode). One file per session.
         self.sessions = SessionStore(state_dir) if state_dir else None
         self.session_id = time.strftime("%Y%m%d-%H%M%S")
+        # File history / rewind (ported from mewcode). Snapshots before edits.
+        self.file_history = (
+            FileHistory(state_dir, workspace) if state_dir and workspace else None
+        )
 
     def run_turn(self, user_text: str) -> Iterator[object]:
         self._reload_hooks_if_changed()
@@ -405,6 +414,7 @@ class Agent:
         block = self._pre_tool_hook(call)
         if block is not None:
             return ToolResult(False, f"Blocked by hook: {block}"), 0
+        self._snapshot_before_edit(call)
         result, elapsed_ms = self.registry.execute(call.name, call.arguments, self.ctx)
         self._record_for_recovery(call, result)
         self._post_tool_hook(call, result)
@@ -414,6 +424,13 @@ class Agent:
         max_workers = min(len(batch), max(1, getattr(self.config, "subagent_max_concurrent", 8)))
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             return list(pool.map(self._run_one_call, batch))
+
+    def _snapshot_before_edit(self, call: ToolCall) -> None:
+        if self.file_history is None or call.name not in MUTATING_PATH_TOOLS:
+            return
+        path = str(call.arguments.get("path") or call.arguments.get("file_path") or "")
+        if path:
+            self.file_history.record(path, call.name, self._turn_count)
 
     def _record_for_recovery(self, call: ToolCall, result: Any) -> None:
         """Snapshot read_file bytes and loaded skill bodies for post-compaction recovery."""
