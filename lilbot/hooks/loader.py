@@ -24,8 +24,11 @@ def _parse_hook(raw: dict[str, Any], index: int) -> Hook | None:
         timeout=int(action_raw.get("timeout") or 15),
     )
     match_raw = raw.get("match") or {}
+    tools_raw = match_raw.get("tools") or []
+    tools = [str(t) for t in tools_raw if isinstance(t, str)] if isinstance(tools_raw, list) else []
     match = HookMatch(
         tool=str(match_raw.get("tool") or ""),
+        tools=tools,
         path_regex=str(match_raw.get("path_regex") or ""),
     )
     return Hook(

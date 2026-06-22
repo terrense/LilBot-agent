@@ -25,6 +25,28 @@ def test_match_by_tool_and_path():
     assert not m.matches(HookContext(event="pre_tool_use", tool_name="read_file", file_path="a/.env"))
 
 
+def test_match_by_tool_list_catches_whole_family():
+    # A single-tool rule is trivially bypassed by an equivalent tool; a tools
+    # list closes that hole (write_file AND edit_file both blocked).
+    m = HookMatch(tools=["write_file", "edit_file", "fim_edit"], path_regex=r"\.env$")
+    for tool in ("write_file", "edit_file", "fim_edit"):
+        assert m.matches(HookContext(event="pre_tool_use", tool_name=tool, file_path=".env"))
+    # A tool not in the set is not matched.
+    assert not m.matches(HookContext(event="pre_tool_use", tool_name="read_file", file_path=".env"))
+    # Wrong path is not matched even for a listed tool.
+    assert not m.matches(HookContext(event="pre_tool_use", tool_name="edit_file", file_path="main.py"))
+
+
+def test_loader_parses_tools_list(tmp_path):
+    (tmp_path / "hooks.json").write_text(json.dumps({"hooks": [
+        {"id": "guard", "event": "pre_tool_use",
+         "match": {"tools": ["write_file", "edit_file"], "path_regex": r"\.env$"},
+         "action": {"type": "block", "message": "no"}},
+    ]}), encoding="utf-8")
+    hooks = load_hooks(tmp_path)
+    assert hooks[0].match.tools == ["write_file", "edit_file"]
+
+
 def test_pre_tool_block_returns_reason():
     hook = Hook(
         id="guard", event="pre_tool_use",

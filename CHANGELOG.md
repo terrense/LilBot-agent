@@ -10,7 +10,7 @@ progress over time and in GitHub.
 A batch of runtime/"engine" improvements studied from the `mewcode-python`
 reference agent and adapted to LilBot's synchronous, OpenAI-compatible
 architecture. LilBot's existing strengths (full tool catalog, TUI dashboard,
-PowerShell safety gate, teams/subagents) were preserved. Tests: 118 → 157,
+PowerShell safety gate, teams/subagents) were preserved. Tests: 118 → 160,
 zero regressions.
 
 ### Added
@@ -38,7 +38,9 @@ zero regressions.
   block a tool call, `prompt` actions inject guidance, `command` actions run a
   shell command and report output. Hooks **hot-reload**: editing
   `.lilbot/hooks.json` takes effect on the next turn, no restart needed.
-  (`lilbot/hooks/`, `Agent._reload_hooks_if_changed`)
+  A `match.tools` list lets one rule cover a whole family of tools (e.g.
+  write_file + edit_file + fim_edit) so a guard cannot be sidestepped by a
+  sibling tool. (`lilbot/hooks/`, `Agent._reload_hooks_if_changed`)
 - **Memory recall + auto-extraction** — a small side-query selects the memories
   relevant to the current request (with point-in-time freshness warnings)
   instead of dumping the newest few; every 3 turns the agent distills durable
@@ -58,10 +60,14 @@ zero regressions.
 ### Tests
 - Added `test_deferred_tools`, `test_offload`, `test_compaction`,
   `test_cache_usage`, `test_hooks`, `test_memory_recall`, `test_parallel_tools`
-  (39 new tests). Updated `test_compact_does_not_orphan_tool_messages` for the
+  (42 new tests). Updated `test_compact_does_not_orphan_tool_messages` for the
   new compaction algorithm.
 
-### Notes / not yet done
+### Known limitations
+- A `pre_tool_use` path-regex hook matches on the file path inferred from a
+  tool's `path`/`file_path` argument. Tools that carry the target elsewhere
+  (`apply_patch` embeds it in the diff; `bash` via shell redirection) cannot be
+  matched by `path_regex` — block those by tool name if needed.
 - Memory still uses the JSONL store (the intelligence layer was added on top);
   frontmatter-file storage with physical user/project dirs is a future option.
 - Hooks: `session_start` / `session_end` events not yet wired into the loop
