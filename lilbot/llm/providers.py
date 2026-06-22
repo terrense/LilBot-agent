@@ -18,6 +18,29 @@ class BaseProvider:
         raise NotImplementedError
 
 
+def _normalize_usage(usage: dict[str, Any]) -> dict[str, Any]:
+    """Flatten provider usage and surface prompt-cache hits as a plain int.
+
+    DeepSeek/OpenAI-compatible endpoints cache common prefixes server-side and
+    report the hit count differently:
+      * DeepSeek: ``prompt_cache_hit_tokens`` / ``prompt_cache_miss_tokens``
+      * OpenAI:   ``prompt_tokens_details.cached_tokens``
+    We normalize both into ``cache_read_tokens`` so the agent's usage accounting
+    (and the /status view) can show how much of the prompt was served from cache.
+    A stable message prefix — system prompt first, deferred-tool reminder kept at
+    the tail — is what makes these hits happen in the first place.
+    """
+    out: dict[str, Any] = {k: v for k, v in usage.items() if isinstance(v, int)}
+    cached = usage.get("prompt_cache_hit_tokens")
+    if not isinstance(cached, int):
+        details = usage.get("prompt_tokens_details")
+        if isinstance(details, dict) and isinstance(details.get("cached_tokens"), int):
+            cached = details["cached_tokens"]
+    if isinstance(cached, int):
+        out["cache_read_tokens"] = cached
+    return out
+
+
 def _truncate(text: str, limit: int = 2000) -> str:
     if len(text) <= limit:
         return text
@@ -167,7 +190,7 @@ class OpenAICompatibleProvider(BaseProvider):
             except json.JSONDecodeError:
                 args = {"raw": fn.get("arguments", "")}
             calls.append(ToolCall(fn.get("name", ""), args, call.get("id") or "tool"))
-        usage = data.get("usage") or {}
+        usage = _normalize_usage(data.get("usage") or {})
         return ProviderTurn(
             message.get("content") or "",
             calls,

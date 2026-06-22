@@ -2085,11 +2085,33 @@ def _project_map(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
 
 
 def _retrieve_tool_result(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-    path = args.get("path") or args.get("handle") or args.get("tool_result_id")
-    if not path:
-        return ToolResult(False, "LilBot stores large results inline in this phase; provide a path/handle to read.")
+    from .offload import is_within_session  # local import avoids a cycle
+
+    raw = args.get("path") or args.get("handle") or args.get("tool_result_id")
+    if not raw:
+        return ToolResult(False, "Provide the path/handle from a <persisted-output> pointer.")
+    path = Path(str(raw))
+    state_dir = getattr(getattr(ctx, "config", None), "state_dir", None)
+
+    # Persisted tool-result files live under .lilbot/session and are managed by
+    # LilBot itself — read them directly rather than through the workspace
+    # sandbox (they may sit outside the model-visible tree).
+    if is_within_session(path, state_dir) and path.is_file():
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            return ToolResult(False, f"Could not read persisted result: {exc}")
+        offset = max(0, int(args.get("offset", 0) or 0))
+        limit = int(args.get("limit", 12000) or 12000)
+        chunk = text[offset: offset + limit] if limit > 0 else text[offset:]
+        truncated = offset + len(chunk) < len(text)
+        meta = {"path": str(path), "offset": offset, "chars": len(chunk), "truncated": truncated, "total_chars": len(text)}
+        suffix = "\n... more available; call again with a higher offset ..." if truncated else ""
+        return ToolResult(True, chunk + suffix, meta)
+
+    # Otherwise treat it as an ordinary workspace path.
     read_args = dict(args)
-    read_args["path"] = str(path)
+    read_args["path"] = str(raw)
     read_args.setdefault("limit", 12000)
     return _read_file(read_args, ctx)
 
@@ -4286,3 +4308,112 @@ def register_builtins(registry: ToolRegistry) -> None:
     registry.register(ToolDef("multi_tool_use_parallel", "Execute multiple LilBot tool calls and return structured results.", _schema({
         "tool_uses": _schema_array("Tool call objects with recipient_name and parameters."),
     }, ["tool_uses"]), lambda args, ctx: _parallel_tool(args, registry, ctx)))
+
+    # ToolSearch loads the schemas of deferred (lazily-loaded) tools on demand.
+    # It is never itself deferred. Ported from mewcode's ToolSearch.
+    registry.register(ToolDef(
+        "ToolSearch",
+        "Load the full schema of tools that are not loaded by default. "
+        "Most of LilBot's ~150 tools are deferred to keep each turn small; only "
+        "their names are advertised. To use a deferred tool, first call ToolSearch "
+        "with query 'select:<name>[,<name>...]' (exact names) to load it, or pass "
+        "keywords to search by relevance. After the schema is returned, call the "
+        "tool normally on the next step.",
+        _schema({
+            "query": _string("Either 'select:name1,name2' for exact names, or keywords to search deferred tools."),
+            "max_results": _integer("Maximum results for a keyword search.", 5),
+        }, ["query"]),
+        lambda args, ctx: _tool_search_load(args, registry),
+        criteria=ToolCapability.READ,
+    ))
+
+    # Mark read-only tools so the agent can run independent ones in parallel.
+    for name in READ_ONLY_TOOLS:
+        tool = registry.get(name)
+        if tool is not None and not tool.criteria:
+            tool.criteria = ToolCapability.READ
+
+    # Allowlist: keep the daily-driver tools loaded every turn; defer the rest.
+    registry.defer_all_except(CORE_TOOLS)
+
+
+# Pure read-only tools: no writes, no code execution, no approval. The agent may
+# run a run of these concurrently (ported from mewcode's is_concurrency_safe).
+READ_ONLY_TOOLS: set[str] = {
+    "read_file", "list_dir", "glob", "grep", "grep_files", "file_search", "project_map",
+    "git_status", "git_diff", "git_log", "git_show", "git_blame",
+    "web_search", "fetch_url", "web_fetch", "web_run",
+    "retrieve_tool_result", "handle_read",
+    "memory_list", "memory_search", "skill_list",
+    "agent_list", "agent_status", "agent_transcript",
+    "lsp_symbols", "symbols", "lsp_definition", "definition",
+    "lsp_workspace_symbols", "workspace_symbols", "lsp_references", "references",
+    "lsp_diagnostics", "diagnostics_symbols", "lsp_rename_preview", "rename_preview",
+    "diagnostics", "validate_data", "get_goal",
+    "checklist_list", "todo_list", "task_list", "task_read",
+    "team_list", "team_task_list", "team_task_get",
+    "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource", "mcp_read_resource",
+    "pr_attempt_list", "pr_attempt_read", "slop_ledger_query",
+    "github_issue_context", "github_pr_context", "ToolSearch",
+}
+
+
+# Tools that stay loaded on every turn. Everything else is deferred and loaded
+# on demand via ToolSearch. Keep this list tight — it is the per-turn tool budget.
+CORE_TOOLS: set[str] = {
+    # Files & search
+    "list_dir", "read_file", "write_file", "edit_file", "glob", "grep", "apply_patch",
+    # Shell & tests
+    "bash", "run_tests",
+    # Web
+    "web_search", "fetch_url",
+    # Memory (recall surfaces the rest automatically)
+    "memory_save", "memory_search",
+    # Skills
+    "Skill", "skill_list",
+    # Subagents & teams (core verbs only)
+    "Agent", "Task", "agent_eval", "team_create", "team_list", "send_message",
+    # Git (read-only inspection)
+    "git_status", "git_diff", "git_log",
+    # Project understanding
+    "project_map",
+    # Planning & checklist
+    "EnterPlanMode", "ExitPlanMode", "checklist_write", "checklist_update", "checklist_list",
+    # Large-result handles & tool discovery
+    "retrieve_tool_result", "handle_read", "ToolSearch",
+}
+
+
+def _tool_search_load(args: dict[str, Any], registry: ToolRegistry) -> ToolResult:
+    query = str(args.get("query") or "").strip()
+    if not query:
+        return ToolResult(False, "ToolSearch requires a 'query'.")
+    try:
+        max_results = int(args.get("max_results") or 5)
+    except (TypeError, ValueError):
+        max_results = 5
+
+    if query.startswith("select:"):
+        names = [n for n in re.split(r"[\s,]+", query[len("select:"):]) if n]
+        schemas = registry.find_deferred_by_names(names)
+    else:
+        schemas = registry.search_deferred(query, max_results)
+
+    if not schemas:
+        available = registry.deferred_tool_names()
+        return ToolResult(
+            False,
+            f'No matching deferred tools for "{query}". '
+            f"Deferred tools: {', '.join(available) if available else '(none)'}",
+            {"deferred": available},
+        )
+
+    for schema in schemas:
+        registry.mark_discovered(schema["name"])
+
+    loaded = [s["name"] for s in schemas]
+    body = (
+        f"Loaded {len(schemas)} tool schema(s); you can now call: {', '.join(loaded)}.\n\n"
+        + _json({"tools": schemas})
+    )
+    return ToolResult(True, body, {"loaded": loaded})

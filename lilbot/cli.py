@@ -274,14 +274,18 @@ def _token_rows(agent: Agent, ctx: ToolContext) -> list[tuple[str, str]]:
     prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
     completion_tokens = int(usage.get("completion_tokens", 0) or 0)
     total_tokens = int(usage.get("total_tokens", prompt_tokens + completion_tokens) or 0)
+    cache_read = int(usage.get("cache_read_tokens", 0) or 0)
+    cache_rate = f"{(cache_read / prompt_tokens * 100):.0f}%" if prompt_tokens else "0%"
     return [
         ("messages", str(len(messages))),
         ("approx_context_tokens", str(_estimate_message_tokens(messages))),
+        ("context_window", str(getattr(ctx.config, "context_window", 128_000))),
         ("prompt_tokens", str(prompt_tokens)),
+        ("cache_read_tokens", f"{cache_read} ({cache_rate} of prompt)"),
         ("completion_tokens", str(completion_tokens)),
         ("total_tokens", str(total_tokens)),
-        ("compact_after_messages", str(ctx.config.compact_after_messages)),
-        ("max_steps", str(ctx.config.max_steps)),
+        ("compact_after_messages", str(getattr(ctx.config, "compact_after_messages", 28))),
+        ("max_steps", str(getattr(ctx.config, "max_steps", 20))),
     ]
 
 

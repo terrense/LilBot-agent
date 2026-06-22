@@ -89,6 +89,27 @@ class ToolDef:
     handler: Callable[[dict[str, Any], "ToolContext"], ToolResult]
     criteria: frozenset = ToolCapability.NONE
     approval_requirement: str = ApprovalRequirement.Auto
+    # When True, this tool's schema is NOT sent to the model on every turn.
+    # Its name is advertised in a lightweight reminder, and the model must load
+    # the full schema on demand via the ToolSearch tool. This keeps the per-turn
+    # tool payload small even though LilBot registers ~150 tools. Ported from
+    # mewcode's deferred-tool / ToolSearch mechanism.
+    should_defer: bool = False
+
+    @property
+    def concurrency_safe(self) -> bool:
+        """True when this tool is pure read-only and can run in a parallel batch.
+
+        Mirrors mewcode's is_concurrency_safe: a tool is safe to run alongside
+        others only if it neither writes files, executes code, nor requires
+        approval. Used by the agent loop to fan out independent read calls.
+        """
+        unsafe = {
+            ToolCapability.WritesFiles,
+            ToolCapability.ExecutesCode,
+            ToolCapability.RequiresApproval,
+        }
+        return ToolCapability.ReadOnly in self.criteria and not (self.criteria & unsafe)
 
 
 @dataclass
@@ -111,9 +132,83 @@ class ToolContext:
 class ToolRegistry:
     def __init__(self):
         self._tools: dict[str, ToolDef] = {}
+        # Deferred tools whose schema has been loaded on demand (via ToolSearch
+        # or by being called directly). Once discovered, a tool is rendered in
+        # schemas() like any normal tool for the rest of the session.
+        self._discovered: set[str] = set()
 
     def register(self, tool: ToolDef) -> None:
         self._tools[tool.name] = tool
+
+    # -- Deferred-tool support (ported from mewcode) ----------------------
+
+    def defer_all_except(self, core: set[str]) -> None:
+        """Mark every registered tool deferred unless it is in the core set.
+
+        Allowlist approach: the daily-driver tools stay loaded each turn; the
+        long tail (LSP, github, automation, rlm, slop ledger, aliases, …) is
+        loaded on demand. New tools added later default to deferred unless
+        explicitly added to the core set — keeping the per-turn payload bounded.
+        """
+        for name, tool in self._tools.items():
+            tool.should_defer = name not in core
+
+    def mark_discovered(self, name: str) -> None:
+        resolved = self.resolve(name)
+        if resolved:
+            self._discovered.add(resolved)
+
+    def _visible(self, tool: ToolDef) -> bool:
+        return (not tool.should_defer) or (tool.name in self._discovered)
+
+    def deferred_tool_names(self) -> list[str]:
+        return sorted(
+            t.name
+            for t in self._tools.values()
+            if t.should_defer and t.name not in self._discovered
+        )
+
+    def all_schemas(self) -> list[dict[str, Any]]:
+        """Every registered tool's schema, ignoring deferral.
+
+        schemas() answers "what to advertise to the lead agent this turn";
+        all_schemas() is the full catalog used for resolution and for building a
+        subagent's tool set (a subagent narrows tools via its own allowed-tools
+        list, so deferral must not hide candidates from it).
+        """
+        return [self._schema_of(tool) for tool in self.list()]
+
+    def _schema_of(self, tool: ToolDef) -> dict[str, Any]:
+        return {
+            "name": tool.name,
+            "description": tool.description,
+            "input_schema": tool.input_schema,
+            "criteria": sorted(tool.criteria) if tool.criteria else [],
+        }
+
+    def find_deferred_by_names(self, names: list[str]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for raw in names:
+            resolved = self.resolve(raw.strip())
+            tool = self._tools.get(resolved or "")
+            if tool is not None:
+                out.append(self._schema_of(tool))
+        return out
+
+    def search_deferred(self, query: str, max_results: int = 5) -> list[dict[str, Any]]:
+        terms = [t.lower() for t in re.split(r"[\s,]+", query) if t.strip()]
+        scored: list[tuple[int, ToolDef]] = []
+        for tool in self._tools.values():
+            if not tool.should_defer or tool.name in self._discovered:
+                continue
+            blob = f"{tool.name} {tool.description}".lower()
+            score = sum(blob.count(term) for term in terms)
+            # Name hits weigh more than description hits.
+            score += sum(3 for term in terms if term in tool.name.lower())
+            if score:
+                scored.append((score, tool))
+        scored.sort(key=lambda item: (item[0], item[1].name), reverse=True)
+        return [self._schema_of(tool) for _, tool in scored[: max(1, max_results)]]
 
     def get(self, name: str) -> ToolDef | None:
         return self._tools.get(name) or self._tools.get(self.resolve(name) or "")
@@ -147,13 +242,7 @@ class ToolRegistry:
         listings and active subagent status — CodeWhale-style single source of truth.
         """
         schemas = [
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "input_schema": tool.input_schema,
-                "criteria": sorted(tool.criteria) if tool.criteria else [],
-            }
-            for tool in self.list()
+            self._schema_of(tool) for tool in self.list() if self._visible(tool)
         ]
         if subagent_render_context is not None:
             self._render_agent_descriptions(schemas, subagent_render_context)
@@ -189,6 +278,10 @@ class ToolRegistry:
         tool = self.get(resolved_name)
         if not tool:
             return ToolResult(False, f"Unknown tool: {name}"), 0
+        # If the model called a deferred tool directly (without ToolSearch),
+        # honor it and reveal its schema for subsequent turns — no regression.
+        if tool.should_defer and tool.name not in self._discovered:
+            self._discovered.add(tool.name)
         plan_gate = _plan_approval_gate(resolved_name, ctx)
         if plan_gate is not None:
             return plan_gate, 0
@@ -200,9 +293,16 @@ class ToolRegistry:
         except Exception as exc:  # pragma: no cover - defensive boundary
             result = ToolResult(False, f"Tool error: {type(exc).__name__}: {exc}")
         elapsed_ms = int((perf_counter() - started) * 1000)
-        if len(result.output) > 12000:
-            result.output = result.output[:12000] + "\n... truncated ..."
-            result.metadata["truncated"] = True
+        # Offload large outputs to disk with a recoverable preview instead of
+        # silently dropping the tail (ported from mewcode). retrieve_tool_result
+        # / handle_read can read the persisted file back.
+        from .offload import maybe_offload  # local import avoids a cycle
+
+        state_dir = getattr(getattr(ctx, "config", None), "state_dir", None)
+        new_output, extra = maybe_offload(result.output, state_dir)
+        if extra:
+            result.output = new_output
+            result.metadata.update(extra)
         return result, elapsed_ms
 
 

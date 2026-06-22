@@ -948,7 +948,7 @@ class SubAgentManager:
             return True
         if self.registry is None:
             return True
-        registered = {str(schema.get("name") or "") for schema in self.registry.schemas()}
+        registered = {str(schema.get("name") or "") for schema in self.registry.all_schemas()}
         for candidate in self._resolve_tool_family(name):
             if candidate in registered:
                 return True
@@ -964,7 +964,7 @@ class SubAgentManager:
         if not allowed:
             return []
         schemas = []
-        for schema in self.registry.schemas():
+        for schema in self.registry.all_schemas():
             name = str(schema.get("name") or "")
             if self._tool_denied_by_specs(name, SUBAGENT_ALWAYS_DISALLOWED_TOOLS):
                 continue

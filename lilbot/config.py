@@ -24,6 +24,7 @@ class LilBotConfig:
     font_size: int = DEFAULT_TUI_FONT_SIZE
     subagent_max_concurrent: int = DEFAULT_SUBAGENT_MAX_CONCURRENT
     compact_after_messages: int = 28
+    context_window: int = 128_000
     verbose: bool = False
 
     @property
@@ -121,6 +122,8 @@ def apply_env_overrides(cfg: LilBotConfig) -> LilBotConfig:
         cfg.max_steps = DEFAULT_MAX_STEPS
     if _env("LILBOT_SUBAGENT_MAX_CONCURRENT"):
         cfg.subagent_max_concurrent = max(1, _env_int("LILBOT_SUBAGENT_MAX_CONCURRENT", cfg.subagent_max_concurrent))
+    if _env("LILBOT_CONTEXT_WINDOW"):
+        cfg.context_window = max(8_000, _env_int("LILBOT_CONTEXT_WINDOW", cfg.context_window))
     return cfg
 
 
