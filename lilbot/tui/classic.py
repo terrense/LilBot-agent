@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Iterable
 
 from ..core.events import TextDelta, ToolFinished, ToolStarted, TurnFinished
+from ..security import redact_args, redact_secrets
 
 try:
     from rich import box
@@ -169,32 +170,35 @@ class LilBotUI:
 
     def event(self, event: object) -> None:
         if isinstance(event, TextDelta):
+            text = redact_secrets(event.text)
             if self.enabled:
-                self.console.print(Panel(event.text, title="[bold bright_cyan]LilBot[/]", border_style="bright_cyan", box=self._box))
+                self.console.print(Panel(text, title="[bold bright_cyan]LilBot[/]", border_style="bright_cyan", box=self._box))
             else:
-                self.print(event.text)
+                self.print(text)
         elif isinstance(event, ToolStarted):
             self.tool_count += 1
+            args = redact_args(event.arguments)
             if self.enabled:
                 timestamp = datetime.now().strftime("%H%M%S")
                 body = Text()
                 body.append(f"run {timestamp}-{self.tool_count:02d}  ", style="dim")
                 body.append(event.name, style="bold bright_cyan")
-                body.append(f"  {event.arguments}", style="white")
+                body.append(f"  {args}", style="white")
                 self.console.print(Panel(body, title=f"[bold]step {self.tool_count}[/]", border_style="cyan", box=self._box))
             else:
-                self.print(f"tool {event.name} {event.arguments}", "cyan")
+                self.print(f"tool {event.name} {args}", "cyan")
         elif isinstance(event, ToolFinished):
             mark = "ok" if event.ok else "error"
             style = "green" if event.ok else "red"
+            output = redact_secrets(event.output)
             if self.enabled:
                 title = f"[bold {style}]{mark}[/] [white]{event.name}[/] [dim]{event.elapsed_ms}ms[/]"
-                renderable = Syntax(event.output, "diff", theme="monokai") if event.output.startswith("---") else event.output
+                renderable = Syntax(output, "diff", theme="monokai") if output.startswith("---") else output
                 self.console.print(Panel(renderable or "(no output)", title=title, border_style=style, box=self._box))
             else:
                 self.print(f"{mark} {event.name} {event.elapsed_ms}ms", style)
-                if event.output:
-                    self.print(event.output)
+                if output:
+                    self.print(output)
         elif isinstance(event, TurnFinished):
             self.print(f"completed {event.steps} steps", "bold green")
 

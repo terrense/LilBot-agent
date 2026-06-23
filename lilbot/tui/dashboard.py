@@ -14,6 +14,7 @@ from typing import Iterable
 from ..core.agent import Agent
 from ..cli import handle_slash, run_prompt, slash_command_runs_agent, slash_commands_matching
 from ..core.events import TextDelta, ToolFinished, ToolStarted, TurnFinished
+from ..security import redact_args, redact_secrets
 from ..tools import ToolContext, ToolRegistry
 
 try:
@@ -691,8 +692,9 @@ class DashboardUI:
 
     def event(self, event: object) -> None:
         if isinstance(event, TextDelta):
+            text = redact_secrets(event.text)
             if event.interim:
-                summary = _summarize_interim_text(event.text)
+                summary = _summarize_interim_text(text)
                 if summary:
                     self._append("")
                     self._append("╭─ ◌ planning")
@@ -702,23 +704,24 @@ class DashboardUI:
             else:
                 self._append("")
                 self._append("LILBOT")
-                self._append(_format_markdown_tables(event.text))
+                self._append(_format_markdown_tables(text))
         elif isinstance(event, ToolStarted):
             self.tool_count += 1
             stamp = datetime.now().strftime("%H%M%S")
             arg_limit = 120 if event.name == "bash" else 220
-            args = _compact_json(event.arguments, arg_limit)
+            redacted_args = redact_args(event.arguments)
+            args = _compact_json(redacted_args, arg_limit)
             self.work_items = [
                 f"step {self.tool_count}",
                 f"tool  {event.name}",
-                f"args  {_compact_json(event.arguments, 90 if event.name == 'bash' else 150)}",
+                f"args  {_compact_json(redacted_args, 90 if event.name == 'bash' else 150)}",
             ]
             self._append("")
             self._append(f"╭─ ▷ run {stamp}-{self.tool_count:02d}  {event.name}")
             self._append(f"│ args {args}")
         elif isinstance(event, ToolFinished):
             mark = "done" if event.ok else "error"
-            summary = _summarize_tool_output(event.name, event.output, event.metadata, event.ok)
+            summary = _summarize_tool_output(event.name, redact_secrets(event.output), event.metadata, event.ok)
             for line in summary:
                 self._append(f"│ {line}")
             self._append(f"╰─ {mark} {event.name} {event.elapsed_ms}ms")
