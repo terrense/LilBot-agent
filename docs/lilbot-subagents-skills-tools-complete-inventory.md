@@ -2,7 +2,7 @@
 
 更新时间：2026-06-15
 
-项目根目录：`F:\Experiment_laborotory\collection-claude-code-source-code-main\LilBot-agent-code`
+项目根目录：`F:\Experiment_laborotory\collection-lilbot-source-code-main\LilBot-agent-code`
 
 当前数量：
 
@@ -115,27 +115,27 @@ Skill frontmatter 当前支持：
 | Name | Description | Mode | Allowed Tools | Project Position | How To Use | My Notes |
 |---|---|---:|---|---|---|---|
 | `batch` | Break a large request into a tracked batch of smaller tasks. | inline | `update_plan`, `checklist_write`, `checklist_update`, `checklist_add`, `task_create`, `task_list`, `agent_open`, `agent_eval`, `agent_close` | `lilbot/skills/bundled/batch/SKILL.md` | `Skill({"skill":"batch","args":"large migration"})` | 适合 PM 式拆批。是你要求“spec 模式”的核心技能之一。 |
-| `claude-api` | Help with Anthropic Claude API usage, models, and integration patterns. | fork | `web_search`, `fetch_url`, `read_file`, `grep_files` | `lilbot/skills/bundled/claude-api/SKILL.md` | `Skill({"skill":"claude-api","args":"tool use migration"})` | 涉及 API 当前信息时必须查官方资料；本 skill 已要求验证。 |
+| `claude-api` | Help with  Claude API usage, models, and integration patterns. | fork | `web_search`, `fetch_url`, `read_file`, `grep_files` | `lilbot/skills/bundled/claude-api/SKILL.md` | `Skill({"skill":"claude-api","args":"tool use migration"})` | 涉及 API 当前信息时必须查官方资料；本 skill 已要求验证。 |
 | `claude-in-chrome` | Coordinate browser-assisted work when a Chrome/browser connector is available. | inline | `mcp_servers`, `mcp_call`, `web_search`, `fetch_url` | `lilbot/skills/bundled/claude-in-chrome/SKILL.md` | `Skill({"skill":"claude-in-chrome","args":"inspect page"})` | 目前依赖 MCP/browser connector；没有 connector 时会降级说明。 |
 | `commit` | Prepare a concise commit plan and suggested commit message. | inline | none declared | `lilbot/skills/bundled/commit.md` | `/skill commit` | 老 LilBot skill。后续可补 git diff 读取和 conventional commit 格式。 |
 | `debug` | Investigate a bug or failing behavior and isolate the likely cause. | fork | `read_file`, `list_dir`, `grep_files`, `file_search`, `git_status`, `git_diff`, `run_tests`, `agent_open`, `agent_eval` | `lilbot/skills/bundled/debug/SKILL.md` | `Skill({"skill":"debug","args":"test X failing"})` | 适合先调查再动手，避免一上来乱改。 |
-| `delegate` | Use subagents to split exploration, implementation, review, and verification work. | inline | none declared | `lilbot/skills/bundled/delegate/SKILL.md` | `/skill delegate "..."` | CodeWhale 对齐 skill。下一步可自动生成 agent plan。 |
+| `delegate` | Use subagents to split exploration, implementation, review, and verification work. | inline | none declared | `lilbot/skills/bundled/delegate/SKILL.md` | `/skill delegate "..."` |  对齐 skill。下一步可自动生成 agent plan。 |
 | `documents` | Create, inspect, edit, or convert document-style deliverables. | inline | none declared | `lilbot/skills/bundled/documents/SKILL.md` | `/skill documents "..."` | 文档工作流入口，依赖 pandoc/office 能力继续增强。 |
 | `feishu` | Work with Feishu or Lark bots, docs, sheets, bitables, approval flows, and API setup. | inline | none declared | `lilbot/skills/bundled/feishu/SKILL.md` | `/skill feishu "..."` | 目前是指导型 skill；真实 Feishu API 需要 connector/tool。 |
 | `keybindings-help` | Explain or design keyboard shortcut bindings. | inline | `read_file`, `list_dir`, `grep_files` | `lilbot/skills/bundled/keybindings-help/SKILL.md` | hidden; use through `load_skill({"name":"keybindings-help"})` | `user-invocable:false`，不在普通列表里主动暴露。 |
 | `loop` | Set up a recurring check or repeated agent workflow. | inline | `automation_create`, `automation_list`, `automation_update`, `automation_delete`, `task_create`, `update_plan` | `lilbot/skills/bundled/loop/SKILL.md` | `Skill({"skill":"loop","args":"watch CI daily"})` | 当前 automation 是 durable record，不是完整调度 daemon。 |
 | `lorem-ipsum` | Generate placeholder copy with controllable tone and length. | inline | none declared | `lilbot/skills/bundled/lorem-ipsum/SKILL.md` | `Skill({"skill":"lorem-ipsum","args":"3 short UI cards"})` | 低风险内容生成 skill。 |
-| `mcp-builder` | Design, build, configure, or debug Model Context Protocol servers. | inline | none declared | `lilbot/skills/bundled/mcp-builder/SKILL.md` | `/skill mcp-builder "..."` | CodeWhale 对齐。后续要结合 MCP discovery/schema。 |
+| `mcp-builder` | Design, build, configure, or debug Model Context Protocol servers. | inline | none declared | `lilbot/skills/bundled/mcp-builder/SKILL.md` | `/skill mcp-builder "..."` |  对齐。后续要结合 MCP discovery/schema。 |
 | `pdf` | Read, extract, split, merge, rotate, watermark, fill, OCR, or create PDF files. | inline | none declared | `lilbot/skills/bundled/pdf/SKILL.md` | `/skill pdf "extract pages"` | 依赖 `pdftotext`、OCR、pandoc 等本地工具时会报告状态。 |
 | `plan` | Break a task into implementation steps, decisions, and verification. | inline | none declared | `lilbot/skills/bundled/plan.md` | `/skill plan "..."` | 轻量计划 skill。后续应和 plan-mode tool 合并。 |
-| `plugin-creator` | Scaffold or plan LilBot/CodeWhale-style local plugins. | inline | none declared | `lilbot/skills/bundled/plugin-creator/SKILL.md` | `/skill plugin-creator "..."` | 插件生态入口。当前插件执行沙箱还要补。 |
+| `plugin-creator` | Scaffold or plan LilBot/local plugins. | inline | none declared | `lilbot/skills/bundled/plugin-creator/SKILL.md` | `/skill plugin-creator "..."` | 插件生态入口。当前插件执行沙箱还要补。 |
 | `presentations` | Create, edit, inspect, or convert slide decks and PPTX-style presentations. | inline | none declared | `lilbot/skills/bundled/presentations/SKILL.md` | `/skill presentations "..."` | Office 类工作流，后续接 python-pptx。 |
 | `remember` | Decide whether user information should become durable memory. | inline | `memory_save`, `memory_search`, `memory_list` | `lilbot/skills/bundled/remember/SKILL.md` | `Skill({"skill":"remember","args":"..."})` | 有边界：只保存稳定偏好/项目事实，不保存瞬时任务。 |
 | `review` | Review code or a change request for bugs, risks, and missing tests. | inline | none declared | `lilbot/skills/bundled/review.md` | `/skill review "..."` | 老 LilBot review skill。后续要自动读取 diff。 |
 | `run-skill-generator` | Generate a complete skill package from a short request. | fork | `skill_list`, `load_skill`, `write_file`, `edit_file`, `list_dir` | `lilbot/skills/bundled/run-skill-generator/SKILL.md` | `Skill({"skill":"run-skill-generator","args":"..."})` | 用来批量扩展技能库。需要写权限。 |
 | `schedule` | Schedule a future task, reminder, or remote-style agent action. | inline | `automation_create`, `automation_list`, `automation_update`, `automation_delete`, `request_user_input` | `lilbot/skills/bundled/schedule/SKILL.md` | `Skill({"skill":"schedule","args":"tomorrow 9am check logs"})` | 当前只持久化记录，真正唤醒机制后续补。 |
 | `simplify` | Simplify code, prose, or a plan without changing its intent. | inline | `read_file`, `grep_files`, `edit_file`, `run_tests` | `lilbot/skills/bundled/simplify/SKILL.md` | `Skill({"skill":"simplify","args":"this module"})` | 适合小范围重构。 |
-| `skill-creator` | Create or improve LilBot skills and decide when a skill is the right abstraction. | inline | none declared | `lilbot/skills/bundled/skill-creator/SKILL.md` | `/skill skill-creator "..."` | CodeWhale 对齐 skill。 |
+| `skill-creator` | Create or improve LilBot skills and decide when a skill is the right abstraction. | inline | none declared | `lilbot/skills/bundled/skill-creator/SKILL.md` | `/skill skill-creator "..."` |  对齐 skill。 |
 | `skill-installer` | Install, update, trust, or inspect local/community skill folders. | inline | none declared | `lilbot/skills/bundled/skill-installer/SKILL.md` | `/skill skill-installer "..."` | 后续要加信任记录和来源校验。 |
 | `skillify` | Turn a repeated workflow into a reusable LilBot SKILL.md. | fork | `read_file`, `list_dir`, `grep_files`, `write_file`, `edit_file`, `load_skill`, `skill_list` | `lilbot/skills/bundled/skillify/SKILL.md` | `Skill({"skill":"skillify","args":"..."})` | Claude inspired。用于把重复工作产品化。 |
 | `spreadsheets` | Create, inspect, clean, analyze, or convert spreadsheet and tabular files. | inline | none declared | `lilbot/skills/bundled/spreadsheets/SKILL.md` | `/skill spreadsheets "..."` | 后续接 openpyxl/csv validation。 |
@@ -173,12 +173,12 @@ tool_name({"required_arg": "value"})
 | Category | Name | Description | Required Args | How To Use | Project Position | My Notes |
 |---|---|---|---|---|---|---|
 | Agent | `Agent` | Launch a Claude-style subagent. | `prompt` | `Agent({"prompt":"...","subagent_type":"explore"})` | `lilbot/tools/builtin.py` | Compat; Claude-style entry. |
-| Skill | `Skill` | Execute a skill within the main conversation, Claude Code style. | `skill` | `Skill({"skill":"verify","args":"..."})` | `lilbot/tools/builtin.py` | Compat; currently renders/loads skill, true fork execution is next. |
+| Skill | `Skill` | Execute a skill within the main conversation, LilBot style. | `skill` | `Skill({"skill":"verify","args":"..."})` | `lilbot/tools/builtin.py` | Compat; currently renders/loads skill, true fork execution is next. |
 | Agent | `Task` | Legacy Claude-style alias for Agent. | `prompt` | `Task({"prompt":"..."})` | `lilbot/tools/builtin.py` | Compat; mirrors Claude legacy `Task`. |
 | Agent | `agent_close` | Cancel or close a subagent session. | none | `agent_close({"name":"scan"})` | `lilbot/tools/builtin.py` | Phase 1; cancellation is local status update. |
 | Agent | `agent_eval` | Fetch, wait on, or message a subagent session. | none | `agent_eval({"name":"scan","block":true})` | `lilbot/tools/builtin.py` | Phase 1; transcript slicing still needed. |
 | Agent | `agent_list` | List sub-agent types and tasks. | none | `agent_list({})` | `lilbot/tools/builtin.py` | Core inventory view. |
-| Agent | `agent_open` | Open a named CodeWhale-style subagent session. | `prompt` | `agent_open({"type":"review","prompt":"..."})` | `lilbot/tools/builtin.py` | Core subagent entry. |
+| Agent | `agent_open` | Open a named subagent session. | `prompt` | `agent_open({"type":"review","prompt":"..."})` | `lilbot/tools/builtin.py` | Core subagent entry. |
 | Agent | `agent_spawn` | Spawn a lightweight sub-agent. | `prompt` | `agent_spawn({"agent_type":"planner","prompt":"..."})` | `lilbot/tools/builtin.py` | Compat old LilBot name. |
 | Agent | `agent_status` | Check a sub-agent task. | `task_id` | `agent_status({"task_id":"sub_x"})` | `lilbot/tools/builtin.py` | Compat status lookup. |
 | Workspace | `apply_patch` | Apply a unified diff to the workspace with permission approval. | `patch` | `apply_patch({"patch":"..."})` | `lilbot/tools/builtin.py` | Core write path; pure Python fallback still planned. |
@@ -299,7 +299,7 @@ My current reading:
   The next serious quality jump is to make `allowed-tools`, forked skill
   execution, subagent transcripts, worktree isolation, LSP, and PowerShell
   safety real instead of just compatible names.
-- CodeWhale parity gave us breadth. Claude Code origin gives us the next target:
+-  parity gave us breadth. LilBot origin gives us the next target:
   custom agents, skill ecosystem, task lifecycle, permissions, hooks, and
   product-level workflows.
 

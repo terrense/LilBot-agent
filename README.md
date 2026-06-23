@@ -23,7 +23,7 @@ LilBot is now past the empty-shell stage. The project has a working local agent
 loop, OpenAI-compatible provider layer, tool registry, workspace sandbox,
 permission manager, durable memory, markdown skills, subagents, MCP-style
 adapters, a Windows-first TUI, and a growing compatibility surface inspired by
-CodeWhale and Claude Code.
+ and LilBot.
 
 The main quality focus has shifted from adding more compatible names to making
 core capabilities enforceable and durable:
@@ -40,7 +40,7 @@ core capabilities enforceable and durable:
 - Subagent lifecycle now has a configurable concurrency cap, persisted task
   restart resume, transcript-cursor reads, structured dashboard progress, and
   optional subagent-level `worktree` isolation.
-- `agent_open`, `Agent`, and `Task` now expose CodeWhale-style dynamic tool
+- `agent_open`, `Agent`, and `Task` now expose dynamic tool
   descriptions: active built-in/custom agents, when-to-use guidance, full tool
   allowlists, active subagent status, and continue-existing-agent guidance are
   rendered into the tool schemas seen by the parent model.
@@ -209,7 +209,7 @@ flowchart TB
 | Layer | Main Files | Current State |
 |---|---|---|
 | CLI and runtime wiring | `lilbot/cli.py`, `lilbot/__main__.py` | Builds config, provider, registry, sandbox, memory, skills, subagents, MCP, TUI, and the typed slash-command fast path. |
-| Agent loop | `lilbot/core/agent.py`, `lilbot/core/delegation.py`, `lilbot/core/events.py`, `lilbot/core/prompts.py` | Runs provider turns, executes tools, tracks usage, compacts history, and exposes live CodeWhale-style Agent tool schemas so the parent model can choose subagents during normal tool-calling. |
+| Agent loop | `lilbot/core/agent.py`, `lilbot/core/delegation.py`, `lilbot/core/events.py`, `lilbot/core/prompts.py` | Runs provider turns, executes tools, tracks usage, compacts history, and exposes live Agent tool schemas so the parent model can choose subagents during normal tool-calling. |
 | Provider layer | `lilbot/llm/providers.py` | Supports the local rule model and OpenAI-compatible providers such as DeepSeek. |
 | Tool bus | `lilbot/tools/registry.py`, `lilbot/tools/builtin.py` | Registers schemas and handlers for workspace, git, shell, memory, skills, subagents, tasks, automation, MCP, web, LSP/navigation, worktree merge-back, document/media probes, compatibility aliases, and central plan-approval gating. |
 | Safety boundary | `lilbot/sandbox/workspace.py`, `lilbot/sandbox/permissions.py` | Enforces workspace path boundaries and ask/accept-all/deny-all permission modes. |
@@ -474,7 +474,7 @@ flowchart TB
 Python 3.10 is OK. The project is tested with Python 3.10.20 on Windows.
 
 ```powershell
-cd F:\Experiment_laborotory\collection-claude-code-source-code-main\LilBot-agent-code
+cd F:\Experiment_laborotory\collection-lilbot-source-code-main\LilBot-agent-code
 conda activate LilBot
 pip install -r requirements.txt
 pip check
@@ -682,7 +682,7 @@ they still leave room for parent synthesis.
 
 ### Delegation Theory
 
-CodeWhale/Claude-style delegation does not try to hard-code every possible
+/Claude-style delegation does not try to hard-code every possible
 task category in the host runtime. The product pattern is:
 
 ```text
@@ -692,7 +692,7 @@ agent descriptions + tool prompt
      lifecycle, transcripts, and isolation
 ```
 
-Clean-room notes from the local CodeWhale/Claude Code source audit:
+Clean-room notes from the local /LilBot source audit:
 
 - `AgentTool/prompt.ts` dynamically renders available agent types, their
   `whenToUse` descriptions, and tool limits into the tool prompt, so the parent
@@ -707,7 +707,7 @@ Clean-room notes from the local CodeWhale/Claude Code source audit:
 
 LilBot now follows that split more closely. `ToolRegistry.schemas()` asks the
 subagent manager for live render context, then `lilbot/subagents/render.py`
-injects CodeWhale-style lines into `agent_open`, `Agent`, and `Task`:
+injects lines into `agent_open`, `Agent`, and `Task`:
 
 ```text
 - researcher: Use for web research ... (Tools: web_search, fetch_url, ...)
@@ -817,7 +817,7 @@ pretending worktree isolation happened.
   `lsp_diagnostics`, and `lsp_rename_preview`.
 - Updated the Work panel to show subagent last event, event count, resume count,
   transcript handle, worktree branch, and worktree path.
-- Added CodeWhale-style dynamic Agent tool prompt parity: `agent_open`,
+- Added dynamic Agent tool prompt parity: `agent_open`,
   `Agent`, and `Task` now render live agent types, when-to-use guidance, full
   tool allowlists, active subagent status, and continue-existing-agent guidance
   into the tool schemas seen by the parent model.
@@ -827,7 +827,7 @@ pretending worktree isolation happened.
   writing fallback.
 - Expanded the left Agent dashboard card so the information page shows more of
   the tool and skill inventory instead of leaving a large blank area.
-- Re-audited the local CodeWhale/Claude Code `AgentTool` source and documented
+- Re-audited the local /LilBot `AgentTool` source and documented
   the split between dynamic model-side agent selection and host-side safety,
   permission, lifecycle, transcript, and isolation enforcement.
 - Added `tests/test_delegation_matrix.py` plus
@@ -856,7 +856,7 @@ pretending worktree isolation happened.
 Recommended next batch:
 
 1. Agent listing attachment and continuation UX.
-   - Mirror CodeWhale's optional agent-list attachment path so changing custom
+   - Mirror the optional agent-list attachment path so changing custom
      agents does not always mutate the tool schema.
    - Add a stronger "continue existing agent" workflow around `agent_eval`
      follow-up messages and dashboard transcript handles.

@@ -1,7 +1,7 @@
 # SPEC: LilBot Teams & Teammates（团队 / 长驻队友）
 
 状态：草案，待评审
-来源：借鉴 `mewcode-python/mewcode/teams/*` + `agents/task_manager.py`，适配 LilBot 架构
+为 LilBot 设计
 作者：与 Claude 协作
 日期：2026-06-18
 
@@ -10,7 +10,7 @@
 ## 0. 目标与非目标
 
 ### 目标
-给 LilBot 增加 mewcode 风格的**团队（team）+ 长驻队友（teammate）**能力：
+给 LilBot 增加**团队（team）+ 长驻队友（teammate）**能力：
 
 1. **Team**：一个有名字的协作组，含一个 lead（主代理）+ 若干 member（队友），持久化到磁盘。
 2. **长驻队友**：队友跑完一轮后**不退出**，进入 idle，等待 lead 下发新任务或 shutdown。区别于现有"一次性 subagent"。
@@ -29,7 +29,7 @@
 - ✅ `SubAgentManager` 的创建门禁 gates 与运行时 gate。
 - ✅ subagent-tasks.json 持久化 + 重启恢复 + transcript。
 - ✅ `subagents/render.py` 动态工具描述渲染。
-- ✅ 现有线程模型（不引入 asyncio；mewcode 的 asyncio 长驻循环改写为线程版）。
+- ✅ 现有线程模型（不引入 asyncio；用线程实现（不引入 asyncio））。
 
 ---
 
@@ -39,11 +39,11 @@
 lilbot/
   teams/                      ← 新增模块
     __init__.py
-    models.py                 ← AgentTeam / TeammateInfo（照抄 mewcode，路径换 .lilbot）
-    mailbox.py                ← 文件邮箱 + 文件锁（照抄 mewcode）
-    shared_task.py            ← 共享任务板（照抄 mewcode）
-    registry.py               ← AgentNameRegistry 单例（照抄 mewcode）
-    progress.py               ← TeammateProgress（照抄 mewcode，供 dashboard 用）
+    models.py                 ← AgentTeam / TeammateInfo
+    mailbox.py                ← 文件邮箱 + 文件锁
+    shared_task.py            ← 共享任务板
+    registry.py               ← AgentNameRegistry 单例
+    progress.py               ← TeammateProgress
     manager.py                ← TeamManager（改写：复用 LilBot worktree + 线程）
     spawn_inprocess.py        ← 长驻队友线程循环（asyncio→threading 改写）
   tools/
@@ -61,7 +61,7 @@ lilbot/
 - `tasks.json`      —— SharedTaskStore
 - `mailbox/<agent_id>.json`(+ `.lock`) —— 每个代理一个收件箱
 
-> 说明：mewcode 用 `~/.mewcode/teams`（用户级）。LilBot 改用 **workspace 级** `.lilbot/teams`，与现有 subagent 持久化（`.lilbot/agents`、`.lilbot/subagent-tasks.json`）保持一致，便于按项目隔离与清理。
+> 说明： 用 `~/./teams`（用户级）。LilBot 改用 **workspace 级** `.lilbot/teams`，与现有 subagent 持久化（`.lilbot/agents`、`.lilbot/subagent-tasks.json`）保持一致，便于按项目隔离与清理。
 
 ---
 
@@ -98,7 +98,7 @@ lilbot/
 
 ## 3. TeamManager（改写）
 
-参照 `mewcode/teams/manager.py`，**去掉 tmux/iterm2 pane 逻辑**，worktree 复用 LilBot。
+参照 `/teams/manager.py`，**去掉 tmux/iterm2 pane 逻辑**，worktree 复用 LilBot。
 
 构造：`TeamManager(state_dir: Path, subagents: SubAgentManager)`
 - 内部：`_teams, _task_stores, _mailboxes, _inprocess_handles, _teammate_team_map`。
@@ -120,13 +120,13 @@ lilbot/
   ```
 - `get_all_teammate_progress() -> list[TeammateProgress]`（dashboard 用）。
 
-> lead_agent_id：LilBot 的主 `Agent` 目前没有 agent_id。**新增**一个稳定 id：`Agent.agent_id = "lead"`（固定字符串即可，单 lead 场景）。mewcode 的 LEAD_NAME 也是 `"lead"`，邮箱按 `"lead"` 收件。统一用 `"lead"` 简化。
+> lead_agent_id：LilBot 的主 `Agent` 目前没有 agent_id。**新增**一个稳定 id：`Agent.agent_id = "lead"`（固定字符串即可，单 lead 场景）。 的 LEAD_NAME 也是 `"lead"`，邮箱按 `"lead"` 收件。统一用 `"lead"` 简化。
 
 ---
 
 ## 4. 长驻队友执行（spawn_inprocess.py，asyncio→threading 改写）
 
-mewcode 用 `asyncio.Task` + `await asyncio.sleep` 轮询邮箱。LilBot 用线程改写：
+ 用 `asyncio.Task` + `await asyncio.sleep` 轮询邮箱。LilBot 用线程改写：
 
 ```
 class InProcessTeammateHandle:
@@ -183,7 +183,7 @@ def spawn_inprocess_teammate(run_one_turn, name, mailbox, team_manager, team_nam
   8. 返回：队友名、agent_id、worktree、"系统将在其 idle/完成时通知 lead"。
 
 ### 5.2 新增工具
-- **TeamCreate** `{team_name, description?}` → `ctx.teams.create_team(name, "lead", desc)`。描述里写清「用 Agent + team_name 派队友」「队友 idle 正常，发消息即唤醒」「消息会自动作为提醒回流」——照抄 mewcode `TeamCreateTool.description`。
+- **TeamCreate** `{team_name, description?}` → `ctx.teams.create_team(name, "lead", desc)`。描述里写清「用 Agent + team_name 派队友」「队友 idle 正常，发消息即唤醒」「消息会自动作为提醒回流」——实现 `TeamCreateTool.description`。
 - **TeamDelete** `{team_name}` → `ctx.teams.delete_team`。
 - **SendMessage** `{to, message, summary?, message_type?, metadata?}`：
   - lead 侧实例：`from_agent="lead"`。
@@ -193,7 +193,7 @@ def spawn_inprocess_teammate(run_one_turn, name, mailbox, team_manager, team_nam
 
 ### 5.3 注册
 - 主注册表常驻：`TeamCreate, TeamDelete, SendMessage`（lead 用）。
-- 协调工具（TaskCreate 等 + 队友侧 SendMessage）**不进主注册表**，由 `_spawn_teammate` 为每个队友单独构造、塞进该队友的私有 registry（类比 mewcode `build_teammate_tools`）。
+- 协调工具（TaskCreate 等 + 队友侧 SendMessage）**不进主注册表**，由 `_spawn_teammate` 为每个队友单独构造、塞进该队友的私有 registry（类比  `build_teammate_tools`）。
 
 ### 5.4 gates 兼容
 - 队友的工具集仍走 `SubAgentManager` 的 `SUBAGENT_ALWAYS_DISALLOWED_TOOLS` 等 gates。
