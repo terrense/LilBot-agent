@@ -40,6 +40,14 @@ per milestone. Tests start at 184.
   toggle via `config.auto_allow_safe_commands`.
 - Tests: `test_execpolicy` (35). Suite 200 → 235.
 
+### M4 — Cycle memory + recall_archive (added)
+- New `lilbot/core/cycles.py`: each compaction now archives a dated briefing to
+  `.lilbot/archives/cycle-<ts>.md` instead of discarding the summarized prefix
+  (port of CodeWhale's cycle_manager). The previously writer-less `recall_archive`
+  tool now finds them (sorted newest-first, keyword filter), so knowledge from
+  earlier in a long session is recoverable.
+- Tests: `test_cycles` (5). Suite 235 → 240.
+
 ## [Unreleased] — 2026-06-22 (batch 2) — Surpassing mewcode: persistence & depth
 
 The four persistence/depth areas where mewcode still led are now closed.
