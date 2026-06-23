@@ -25,6 +25,7 @@ class LilBotConfig:
     subagent_max_concurrent: int = DEFAULT_SUBAGENT_MAX_CONCURRENT
     compact_after_messages: int = 28
     context_window: int = 128_000
+    auto_diagnostics: bool = True
     verbose: bool = False
 
     @property

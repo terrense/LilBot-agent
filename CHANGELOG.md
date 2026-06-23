@@ -20,7 +20,15 @@ per milestone. Tests start at 184.
 - Directly fixes the incident where a DeepSeek API key was printed into the
   visible trace and a `.env` diff. False-positive guards: numeric config values
   (e.g. `MAX_TOKENS=128000`) and `AUTHOR=` are left untouched.
-- Tests: `test_secrets` (9). Suite 184 → 193.
+- Tests: `test_secrets` (10). Suite 184 → 193.
+
+### M2 — Auto diagnostics injection after edits (added)
+- After `write_file`/`edit_file`/`fim_edit` on a code file, the agent runs the
+  diagnostics tool (LSP where available, Python-syntax fallback) on the edited
+  files and injects any errors/warnings as a one-shot system reminder for the
+  next LLM call — closing CodeWhale's self-correction loop. Gated by file
+  extension, capped at 5 files/turn, toggle via `config.auto_diagnostics`.
+- Tests: `test_auto_diagnostics` (6). Suite 193 → 200.
 
 ## [Unreleased] — 2026-06-22 (batch 2) — Surpassing mewcode: persistence & depth
 
