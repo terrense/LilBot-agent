@@ -1,6 +1,6 @@
 """Process-wide name -> agent_id registry for addressing teammates by name.
 
-Ported from mewcode's teams/registry.py. In-process teammates run as threads
+teams/registry.py. In-process teammates run as threads
 in this process, so a process-local singleton is sufficient. (A multi-process
 backend would need a file-backed store instead.)
 """

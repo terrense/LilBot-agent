@@ -1,4 +1,4 @@
-"""Tests for the file-based memory store (ported from mewcode memdir)."""
+"""Tests for the file-based memory store."""
 from __future__ import annotations
 
 from lilbot.memory import FileMemoryStore, MemoryStore

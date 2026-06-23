@@ -1,4 +1,4 @@
-"""Tests for M2 — auto diagnostics injection after edits (CodeWhale loop)."""
+"""Tests for M2 — auto diagnostics injection after edits ( loop)."""
 from __future__ import annotations
 
 from lilbot.config import LilBotConfig

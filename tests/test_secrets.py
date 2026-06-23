@@ -1,4 +1,4 @@
-"""Tests for secret redaction (M1 — surpass CodeWhale, fixes the trace leak).
+"""Tests for secret redaction (M1).
 
 All secret-shaped fixtures are ASSEMBLED at runtime from fragments so the source
 file contains no contiguous secret literal (avoids tripping secret scanners) and

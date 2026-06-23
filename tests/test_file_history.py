@@ -1,4 +1,4 @@
-"""Tests for file history / rewind (ported from mewcode filehistory)."""
+"""Tests for file history / rewind."""
 from __future__ import annotations
 
 from lilbot.core.history import FileHistory

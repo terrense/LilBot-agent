@@ -1,6 +1,6 @@
 ---
 name: plugin-creator
-description: Scaffold or plan LilBot/CodeWhale-style local plugins.
+description: Scaffold or plan LilBot-style local plugins.
 mode: inline
 ---
 # Plugin Creator

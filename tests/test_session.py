@@ -1,4 +1,4 @@
-"""Tests for session persistence + resume (ported from mewcode)."""
+"""Tests for session persistence + resume."""
 from __future__ import annotations
 
 from pathlib import Path

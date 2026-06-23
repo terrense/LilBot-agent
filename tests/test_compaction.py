@@ -1,4 +1,4 @@
-"""Tests for two-layer compaction + RecoveryState (ported from mewcode)."""
+"""Tests for two-layer compaction + RecoveryState."""
 from __future__ import annotations
 
 from lilbot.core.compaction import (

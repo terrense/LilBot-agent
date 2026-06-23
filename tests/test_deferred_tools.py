@@ -1,4 +1,4 @@
-"""Tests for deferred tool loading + ToolSearch (ported from mewcode)."""
+"""Tests for deferred tool loading + ToolSearch."""
 from __future__ import annotations
 
 from lilbot.tools import ToolRegistry, register_builtins

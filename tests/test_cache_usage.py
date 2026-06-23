@@ -1,4 +1,4 @@
-"""Prompt-cache usage normalization (adapted from mewcode for OpenAI-compat)."""
+"""Prompt-cache usage normalization (adapted from  for OpenAI-compat)."""
 from __future__ import annotations
 
 from lilbot.llm.providers import _normalize_usage

@@ -1,4 +1,4 @@
-"""Tests for large tool-result offload + recovery (ported from mewcode)."""
+"""Tests for large tool-result offload + recovery."""
 from __future__ import annotations
 
 from types import SimpleNamespace

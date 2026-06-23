@@ -1,6 +1,6 @@
 """Shared task board for a team.
 
-Ported from mewcode's teams/shared_task.py. A small JSON-backed kanban with
+teams/shared_task.py. A small JSON-backed kanban with
 ``assignee`` and ``blocks`` / ``blocked_by`` dependencies. Every read reloads
 from disk so concurrent teammate threads see a consistent view.
 """

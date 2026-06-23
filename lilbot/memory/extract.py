@@ -1,4 +1,4 @@
-"""Periodic memory extraction (ported from mewcode's auto_memory.extract).
+"""Periodic memory extraction.
 
 Every few turns the agent asks the model to distill durable facts from the
 recent conversation and writes them to the JSONL store. Extraction is
@@ -16,7 +16,7 @@ from .store import MemoryStore
 Extractor = Callable[[str, str], str]
 
 VALID_KINDS = {"user", "feedback", "project", "reference", "note"}
-# kind -> scope routing, mirroring mewcode (user/feedback follow the user).
+# kind -> scope routing, mirroring  (user/feedback follow the user).
 _USER_SCOPE = {"user", "feedback"}
 
 MAX_NEW_PER_RUN = 5

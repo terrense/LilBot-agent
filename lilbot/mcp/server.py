@@ -1,4 +1,4 @@
-"""MCP server mode (port of CodeWhale's mcp_server — the inverse of M7).
+"""MCP server mode.
 
 LilBot can expose its own tools to *other* MCP clients (editors, other agents)
 over JSON-RPC 2.0 on stdio. For safety, only read-only tools are exposed by

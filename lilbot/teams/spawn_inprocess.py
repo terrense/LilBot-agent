@@ -1,4 +1,4 @@
-"""In-process long-running teammate loop (threading port of mewcode's asyncio version).
+"""In-process long-running teammate loop (threading asyncio version).
 
 A teammate runs one full agent turn (reusing ``SubAgentManager.run_agent_turn`` so
 it inherits gates / tool filtering / transcript), then goes idle, notifies the lead,
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-IDLE_POLL_INTERVAL = 0.5  # seconds, matches mewcode IdlePollInterval
+IDLE_POLL_INTERVAL = 0.5  # seconds, matches  IdlePollInterval
 SHUTDOWN_PREFIX = "[shutdown]"
 
 

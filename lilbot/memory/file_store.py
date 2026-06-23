@@ -1,4 +1,4 @@
-"""File-based memory store (ported from mewcode's memdir/paths design).
+"""File-based memory store.
 
 Each memory is its own ``.md`` file with YAML-ish frontmatter, organized into
 two directories by kind:

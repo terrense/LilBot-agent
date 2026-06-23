@@ -1,4 +1,4 @@
-"""Two-layer context compaction with recovery (ported from mewcode).
+"""Two-layer context compaction with recovery.
 
 LilBot's original compaction joined truncated message strings into a flat
 summary. This module replaces that with:

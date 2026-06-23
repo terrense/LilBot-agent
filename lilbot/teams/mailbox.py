@@ -1,6 +1,6 @@
 """File-based mailbox for inter-agent messaging.
 
-Ported from mewcode's teams/mailbox.py. Each agent gets a ``{agent_id}.json``
+teams/mailbox.py. Each agent gets a ``{agent_id}.json``
 inbox under *base_dir*, guarded by a companion ``.lock`` file (O_EXCL create,
 10 retries, 10s staleness reclaim) so concurrent teammate threads — and even
 separate processes — can append safely.

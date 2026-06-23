@@ -1,6 +1,6 @@
 """TeamManager: lifecycle + persistence + notification routing for teams.
 
-Adapted from mewcode's teams/manager.py. Differences vs mewcode:
+py. Differences vs a generic design:
 - in-process backend only (no tmux/iterm2 pane spawning/killing);
 - persistence root is workspace-level ``<state_dir>/teams`` (see models.py);
 - worktree cleanup shells out via the provided sandbox-less subprocess fallback.

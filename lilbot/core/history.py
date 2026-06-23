@@ -1,4 +1,4 @@
-"""File history / rewind (ported from mewcode's filehistory).
+"""File history / rewind.
 
 Before the agent runs a file-mutating tool (write_file / edit_file / fim_edit),
 it snapshots the target file's current bytes. ``/rewind`` then restores the

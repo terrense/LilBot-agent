@@ -1,4 +1,4 @@
-"""Lifecycle hooks for LilBot (ported from mewcode's hook engine).
+"""Lifecycle hooks for LilBot.
 
 Hooks let users attach automation to agent lifecycle events without modifying
 code. They are defined in ``.lilbot/hooks.json`` and run synchronously:

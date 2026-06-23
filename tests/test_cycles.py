@@ -1,4 +1,4 @@
-"""Tests for M4 — cycle memory archive + recall_archive (port from CodeWhale)."""
+"""Tests for M4 — cycle memory archive + recall_archive."""
 from __future__ import annotations
 
 from types import SimpleNamespace

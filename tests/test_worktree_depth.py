@@ -1,4 +1,4 @@
-"""Tests for deepened worktree helpers (ported from mewcode worktree)."""
+"""Tests for deepened worktree helpers."""
 from __future__ import annotations
 
 import re
