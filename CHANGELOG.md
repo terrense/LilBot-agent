@@ -57,8 +57,20 @@ per milestone. Tests start at 184.
   surfaced in `/tokens` (`tool_catalog_fp`, `tools_visible`).
 - Tests: `test_catalog_cache` (5). Suite 240 → 245.
 
-Status: M1–M5 complete (engine). M6 (TUI polish) is intentionally deferred to a
-collaborative session with the maintainer.
+### M7 — Real MCP client (added)
+- New `lilbot/mcp/client.py`: a synchronous JSON-RPC-2.0-over-stdio MCP client
+  (persistent subprocess + reader thread, no async dependency) — `initialize`
+  handshake, `tools/list` discovery, `tools/call`. `MCPManager` now
+  `connect_all()` + `register_discovered_tools()`, registering each MCP tool as
+  a first-class **deferred** tool `mcp__<server>__<tool>` so the model can use
+  any MCP server (GitHub, filesystem, …) like a built-in tool without manual
+  `mcp_call`. Wired into `build_runtime` (best-effort, never blocks startup).
+  Closes the MCP gap vs both mewcode and CodeWhale.
+- Tests: `test_mcp_client` (4, incl. a fake stdio MCP server). Suite 245 → 249.
+
+Status: M1–M5 + M7 complete. M6 (TUI polish) is deferred to a collaborative
+session with the maintainer. M8 (MCP server mode — expose LilBot's tools to
+other MCP clients) is an optional follow-up.
 
 ## [Unreleased] — 2026-06-22 (batch 2) — Surpassing mewcode: persistence & depth
 

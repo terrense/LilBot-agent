@@ -173,6 +173,17 @@ def build_runtime(cfg: LilBotConfig, ui: LilBotUI, interactive: bool = True) -> 
     register_builtins(registry)
     ctx = ToolContext(sandbox, permissions, memory, skills, subagents, mcp, cfg, teams)
     subagents.configure_tools(registry, ctx)
+    # M7: connect configured MCP servers and register their tools as first-class
+    # deferred tools (mcp__<server>__<tool>). Best-effort — never blocks startup.
+    try:
+        registered = mcp.connect_and_register(registry)
+        if registered and getattr(cfg, "verbose", False):
+            ui.print(f"MCP: registered {registered} tool(s) from configured servers.", "dim")
+        for err in getattr(mcp, "connect_errors", []):
+            if getattr(cfg, "verbose", False):
+                ui.print(f"MCP: {err}", "yellow")
+    except Exception:
+        pass
     agent = Agent(cfg, provider, registry, ctx)
     agent.agent_id = "lead"
     return agent, registry, ctx
