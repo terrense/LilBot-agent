@@ -137,7 +137,7 @@ while steps < self.config.max_steps:
 
 **(a) 邮箱 `mailbox/`(`teams/mailbox.py`)** —— 点对点 + 广播。
 核心 `_with_lock`:`os.open(..., O_CREAT|O_EXCL)` 抢 `.lock` 文件做互斥,10s 过期自动回收(防死锁),失败重试。经典**文件锁**。
-> **实战坑**:Windows 多线程争锁,`os.open` 可能抛 `PermissionError`(非 FileExistsError),原版 mewcode 未处理会崩写线程丢消息。本仓库当瞬时争用**重试**修掉(commit `aba5aa1`)。这是"移植开源代码要注意跨平台语义差异"的好例子。
+> **实战坑**:Windows 多线程争锁,`os.open` 可能抛 `PermissionError`(非 FileExistsError),原版  未处理会崩写线程丢消息。本仓库当瞬时争用**重试**修掉(commit `aba5aa1`)。这是"移植开源代码要注意跨平台语义差异"的好例子。
 
 **(b) 共享任务板 `tasks.json`(`teams/shared_task.py`)** —— `SharedTask` 带 `assignee`、`blocks`/`blocked_by` 依赖,状态 pending/in_progress/completed/blocked。每次操作前 `_load()` 重读磁盘保证一致视图。
 
@@ -177,9 +177,9 @@ Subagent 用 `_ctx_for_task` 跑(共享或 worktree 沙箱)。Teammate 在此之
 team_ctx = replace(ctx, team_name=team_name, agent_name=teammate_name)
 ```
 
-因为本仓库用了 **"全局无状态工具 + ctx 读身份"**(而非 mewcode 的"每队友建私有 registry")。`send_message`/`team_task_*` 从 `ctx.team_name / ctx.agent_name` 知道"我是谁",`lead` 则两者为 None。
+因为本仓库用了 **"全局无状态工具 + ctx 读身份"**(而非  的"每队友建私有 registry")。`send_message`/`team_task_*` 从 `ctx.team_name / ctx.agent_name` 知道"我是谁",`lead` 则两者为 None。
 
-**面试官追问:为什么不照搬 mewcode 给每个队友建独立 registry?**
+**面试官追问:为什么不照搬  给每个队友建独立 registry?**
 > lilbot 工具本就是"无状态 handler 读 ToolContext",顺着走把身份放进 ctx 克隆即可,代码更少、还让 lead 自动获得这些工具。移植不是复制粘贴,要尊重宿主架构。
 
 **权限安全边界**(commit `aba5aa1`):隔离队友的 `team_ctx` 把 `permissions` 换成 `accept-all`,**但仅当它在自己的 worktree 里**——`PathSandbox(worktree_root)` 已把写操作锁死在那棵独立工作树内,改动碰不到主线,需经 lead 审阅合并才生效。**沙箱隔离 = 放权的安全前提**。非隔离队友继承 lead 权限(默认 ask 写不了)。
@@ -190,7 +190,7 @@ team_ctx = replace(ctx, team_name=team_name, agent_name=teammate_name)
 
 ## 6. 并发模型:为什么是线程 + 信号量
 
-- lilbot 的 provider 是**同步** httpx 调用,所以队友用 `threading.Thread`(daemon)而非 asyncio(顺应宿主;mewcode 是 asyncio 版)。
+- lilbot 的 provider 是**同步** httpx 调用,所以队友用 `threading.Thread`(daemon)而非 asyncio(顺应宿主; 是 asyncio 版)。
 - 并发上限:`run_one_turn` 用 `with subagents.slot()`(`BoundedSemaphore`)只包住**活跃的那一轮**,队友 idle 时**不占槽**,避免长驻把并发池占满。这是"长驻 + 限流"如何共存的答案。
 
 **面试官追问:多个队友线程并发调同一个 provider,线程安全吗?**
@@ -200,7 +200,7 @@ team_ctx = replace(ctx, team_name=team_name, agent_name=teammate_name)
 
 ## 7. 持久化与清理
 
-- **Subagent**:`subagent-tasks.json` + transcripts + **重启恢复**(`_resume_recovered_tasks`)——本仓库比 mewcode 强(mewcode 后台任务重启即丢),迁移时特意保留。
+- **Subagent**:`subagent-tasks.json` + transcripts + **重启恢复**(`_resume_recovered_tasks`)——本仓库比  强( 后台任务重启即丢),迁移时特意保留。
 - **Teammate**:团队三件套(config/tasks/mailbox)持久在 `.lilbot/teams/<slug>/`;`team_delete` 时 `handle.cancel()`(置 stop event 停 while)+ 清 worktree(`_cleanup_worktree` 在 workspace 根跑 `git worktree remove`)+ 清邮箱目录。
 
 ---

@@ -1,124 +1,37 @@
-# Changelog
+# 更新日志（CHANGELOG）
 
-All notable changes to LilBot are recorded here.
-Format loosely follows [Keep a Changelog](https://keepachangelog.com/);
-this project records dated entries per improvement batch so we can track
-progress over time and in GitHub.
+本文件记录 LilBot 的重要改动，按批次 + 日期归档，方便回溯。
 
-## [Unreleased] — 2026-06-23 (batch 3) — Surpassing CodeWhale
+---
 
-Studying the CodeWhale (Rust) agent and closing the depth gaps that mattered,
-adapted to LilBot's Python architecture. Roadmap M1–M6; this section is updated
-per milestone. Tests start at 184.
+## 2026-06-23 —— 安全 / 纠错 / 协议增强
 
-### M1 — Secret redaction (added)
-- New `lilbot/security/secrets.py`: masks API keys (`sk-…`, GitHub `ghp_…`,
-  AWS `AKIA…`, Google `AIza…`, Slack, JWT, Bearer), private-key blocks, and
-  secret-looking `KEY=value` assignments, **before anything reaches the screen /
-  trace / logs**. Applied at the TUI presentation layer (classic + dashboard);
-  the model's own context keeps raw values so functionality is unaffected.
-- Directly fixes the incident where a DeepSeek API key was printed into the
-  visible trace and a `.env` diff. False-positive guards: numeric config values
-  (e.g. `MAX_TOKENS=128000`) and `AUTHOR=` are left untouched.
-- Tests: `test_secrets` (10). Suite 184 → 193.
+测试数 184 → 257，无回归。
 
-### M2 — Auto diagnostics injection after edits (added)
-- After `write_file`/`edit_file`/`fim_edit` on a code file, the agent runs the
-  diagnostics tool (LSP where available, Python-syntax fallback) on the edited
-  files and injects any errors/warnings as a one-shot system reminder for the
-  next LLM call — closing CodeWhale's self-correction loop. Gated by file
-  extension, capped at 5 files/turn, toggle via `config.auto_diagnostics`.
-- Tests: `test_auto_diagnostics` (6). Suite 193 → 200.
+- **密钥脱敏**：在内容送到屏幕 / trace / 日志之前，自动给 API key、token、私钥、`KEY=value` 形式的密钥打码。模型自身上下文仍保留原值，不影响功能。误报防护：纯数字配置（如 `MAX_TOKENS=128000`）和 `AUTHOR=` 不打码。文件：`lilbot/security/secrets.py`。
+- **编辑后自动诊断注入**：`write_file/edit_file/fim_edit` 改完代码文件后，自动跑诊断（有 LSP 用 LSP，Python 走语法兜底），把错误作为一次性提示喂给下一轮，模型自我纠错。按扩展名筛选、每轮最多 5 个文件，`config.auto_diagnostics` 可关。文件：`lilbot/core/agent.py`。
+- **命令安全引擎**：危险命令（`rm -rf /`/`~`/`*`/`.`、fork 炸弹、`mkfs`、`dd` 写设备、`curl|sh`、`shutdown`）硬拦；已知只读命令（`git status -s`、`ls -la`、`cat`…，忽略 flag）自动放行省去审批。普通子目录删除不拦；复合命令不自动放行。`config.auto_allow_safe_commands` 可关。文件：`lilbot/sandbox/execpolicy.py`。
+- **周期记忆 + recall_archive**：每次上下文压缩把摘要归档到 `.lilbot/archives/cycle-<时间>.md`，`recall_archive` 工具可按关键词检索，长会话不再"压完即忘"。文件：`lilbot/core/cycles.py`。
+- **工具目录缓存**：缓存可见工具的序列化目录，仅当工具集变化才重建，使发给模型的 `tools` 字节稳定、提升前缀缓存命中。`/tokens` 新增 `tool_catalog_fp`、`tools_visible`。文件：`lilbot/tools/registry.py`。
+- **MCP 客户端**：同步 JSON-RPC over stdio 客户端（持久子进程 + 读线程，无异步依赖），`initialize` 握手 + `tools/list` 自动发现 + `tools/call`。把每个发现的工具注册成一等延迟工具 `mcp__<server>__<tool>`，模型像用内置工具一样用任意 MCP server。文件：`lilbot/mcp/client.py`。
+- **MCP 服务端**：`python -m lilbot --mcp-server` 把 LilBot 工具暴露给别的 MCP 客户端（默认只读，`.lilbot/mcp_server.json` 的 `expose_tools` 可调）。客户端 + 服务端组成双向 MCP 节点。文件：`lilbot/mcp/server.py`。
 
-### M3 — Command-safety engine (added)
-- New `lilbot/sandbox/execpolicy.py` (port of CodeWhale's execpolicy): hard-deny
-  catastrophic shell commands (`rm -rf /`/`~`/`*`/`.`, fork bombs, `mkfs`, `dd`
-  to a device, `curl|sh`, `shutdown`, …) and arity-aware **auto-allow** of known
-  read-only commands (`git status -s`, `ls -la`, `cat`, … — flags ignored) so
-  safe inspection skips approval prompts. Normal sub-dir deletes are NOT denied;
-  compound commands are never auto-allowed. Wired into `_shell_permission`;
-  toggle via `config.auto_allow_safe_commands`.
-- Tests: `test_execpolicy` (35). Suite 200 → 235.
+详见 `docs/TECH_REPORT_M1-M8.md`（技术报告）与 `docs/VERIFY_M1-M8.md`（验证指南）。
 
-### M4 — Cycle memory + recall_archive (added)
-- New `lilbot/core/cycles.py`: each compaction now archives a dated briefing to
-  `.lilbot/archives/cycle-<ts>.md` instead of discarding the summarized prefix
-  (port of CodeWhale's cycle_manager). The previously writer-less `recall_archive`
-  tool now finds them (sorted newest-first, keyword filter), so knowledge from
-  earlier in a long session is recoverable.
-- Tests: `test_cycles` (5). Suite 235 → 240.
+---
 
-### M5 — Tool-catalog prefix-cache stability (added)
-- `ToolRegistry` now caches the serialized visible-tool catalog (port of
-  CodeWhale's `OnceLock` tool serialization), rebuilt only when the visible set
-  changes, so the `tools` payload is byte-stable across turns — keeping
-  DeepSeek/OpenAI prefix caching warm. Render-context (dynamic agent
-  descriptions) mutates a copy, never the cache. New `catalog_fingerprint()`
-  surfaced in `/tokens` (`tool_catalog_fp`, `tools_visible`).
-- Tests: `test_catalog_cache` (5). Suite 240 → 245.
+## 2026-06-22 —— 引擎与持久化增强
 
-### M7 — Real MCP client (added)
-- New `lilbot/mcp/client.py`: a synchronous JSON-RPC-2.0-over-stdio MCP client
-  (persistent subprocess + reader thread, no async dependency) — `initialize`
-  handshake, `tools/list` discovery, `tools/call`. `MCPManager` now
-  `connect_all()` + `register_discovered_tools()`, registering each MCP tool as
-  a first-class **deferred** tool `mcp__<server>__<tool>` so the model can use
-  any MCP server (GitHub, filesystem, …) like a built-in tool without manual
-  `mcp_call`. Wired into `build_runtime` (best-effort, never blocks startup).
-  Closes the MCP gap vs both mewcode and CodeWhale.
-- Tests: `test_mcp_client` (4, incl. a fake stdio MCP server). Suite 245 → 249.
+测试数 118 → 184。
 
-### M8 — MCP server mode (added)
-- New `lilbot/mcp/server.py`: LilBot can expose its own tools to *other* MCP
-  clients over stdio JSON-RPC (`initialize`/`tools/list`/`tools/call`). Run with
-  `python -m lilbot --mcp-server`. **Read-only tools only by default** (safety);
-  widen/narrow via `.lilbot/mcp_server.json` → `expose_tools`. With M7+M8,
-  LilBot is now a bidirectional MCP peer (the M7 client and M8 server are tested
-  driving each other end-to-end).
-- Tests: `test_mcp_server` (8). Suite 249 → 257.
-
-Status: M1–M5, M7, M8 complete. M6 (TUI polish) is deferred to a collaborative
-session with the maintainer. Full technical report: `docs/TECH_REPORT_M1-M8.md`;
-hands-on verification guide: `docs/VERIFY_M1-M8.md`.
-
-## [Unreleased] — 2026-06-22 (batch 2) — Surpassing mewcode: persistence & depth
-
-The four persistence/depth areas where mewcode still led are now closed.
-Tests: 160 → 184.
-
-### Added
-- **Session persistence + resume** — conversation + usage written to
-  `.lilbot/sessions/<id>.json` each turn; `--resume[=id]`, `/sessions`, `/resume`.
-- **File-based memory store** — frontmatter `.md` per memory, user/project dirs,
-  `MEMORY.md` index; drop-in for `MemoryStore`; migrates legacy `memory.jsonl`.
-- **File history + rewind** — snapshot before write/edit/fim; `/rewind [n]`,
-  `/history`.
-- **Worktree depth** — auto branch slug + symlink heavy dep dirs into new
-  worktrees (junction fallback on Windows); `worktree_prune`.
-
-## [Unreleased] — 2026-06-22 (batch 1) — Engine upgrades ported from mewcode
-
-Runtime/"engine" improvements adapted to LilBot's synchronous, OpenAI-compatible
-architecture. Existing strengths (full tool catalog, TUI, PowerShell safety,
-teams/subagents) preserved. Tests: 118 → 160.
-
-### Added
-- **Deferred tool loading + `ToolSearch`** — per-turn tool schema 145 → 33.
-- **Large tool-result offload** — disk + 2 KB preview instead of truncation.
-- **Two-layer auto-compaction + RecoveryState** — structured summary, kept tail,
-  recovery attachment, circuit breaker.
-- **Prompt-cache usage reporting** — normalize DeepSeek/OpenAI cache hits.
-- **Lifecycle hooks engine** — `.lilbot/hooks.json`, pre_tool_use can block,
-  hot-reload, `match.tools` family rules.
-- **Memory recall + auto-extraction** — LLM relevance recall with freshness;
-  periodic extraction.
-- **Parallel read-only tool execution** — thread pool, order preserved.
-
-### Changed
-- `LilBotConfig.context_window` (default 128 000) drives compaction threshold.
-- Subagent tool filtering uses the full catalog (`all_schemas()`).
-
-### Known limitations
-- Hook path-regex matches on inferred `path`/`file_path`; `apply_patch`/`bash`
-  carry the target elsewhere — block by tool name if needed.
-- Async streaming and remote/cloud agents intentionally not ported.
+- **延迟工具加载 + ToolSearch**：每轮只发约 33 个常用工具的 schema，其余按需用 `ToolSearch` 加载，单轮工具负载下降约 77%。
+- **大工具结果落盘**：超 16KB 的结果写入 `.lilbot/session/tool-results/` 并给 2KB 预览，`retrieve_tool_result`/`handle_read` 可回读，不再硬截断丢数据。
+- **两层上下文压缩 + 恢复**：结构化摘要 + 保留近期原文尾部 + 恢复附件（重附最近读过的文件 / 技能）+ 熔断器。
+- **缓存命中上报**：归一化 DeepSeek/OpenAI 前缀缓存命中数，`/tokens` 可见。
+- **生命周期 Hooks**：`.lilbot/hooks.json`，`pre_tool_use` 可拦截工具调用，支持热加载、一条规则匹配一组工具。
+- **记忆智能召回 + 自动提取**：用小旁路查询挑相关记忆（带新鲜度提示）注入；每 3 轮自动提炼可长期记忆。
+- **只读工具并行**：连续只读工具用线程池并发，保序；写 / 执行类仍串行。
+- **会话持久化 + resume**：每轮把对话写入 `.lilbot/sessions/`，`--resume`、`/sessions`、`/resume` 可续。
+- **文件式记忆**：每条记忆一个 frontmatter `.md`，用户级 / 项目级分目录 + `MEMORY.md` 索引。
+- **文件历史 + rewind**：编辑前快照，`/rewind [n]` 撤销最近 n 次编辑，`/history` 查看。
+- **Worktree 增强**：自动生成分支名、把重依赖目录软链进新 worktree（Windows 用 junction）、`worktree_prune` 清理过期 worktree。
