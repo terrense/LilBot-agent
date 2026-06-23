@@ -28,6 +28,14 @@ from .session import SessionStore
 # can undo them.
 MUTATING_PATH_TOOLS = {"write_file", "edit_file", "fim_edit"}
 
+# File extensions worth running diagnostics on after an edit (M2 — CodeWhale's
+# LSP-injection self-correction loop). Others are skipped to avoid noise/latency.
+DIAGNOSABLE_EXTS = {
+    ".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java",
+    ".c", ".cc", ".cpp", ".h", ".hpp", ".vue", ".rb", ".php",
+}
+MAX_DIAGNOSED_FILES = 5
+
 MEMORY_EXTRACTION_INTERVAL = 3
 from .events import ProviderTurn, TextDelta, ToolCall, ToolFinished, ToolStarted, TurnFinished
 from .prompts import build_system_prompt
@@ -75,11 +83,15 @@ class Agent:
         self.file_history = (
             FileHistory(state_dir, workspace) if state_dir and workspace else None
         )
+        # Auto diagnostics injection (M2 — CodeWhale self-correction loop).
+        self._edited_this_turn: list[str] = []
+        self._pending_diagnostics = ""
 
     def run_turn(self, user_text: str) -> Iterator[object]:
         self._reload_hooks_if_changed()
         self.messages.append({"role": "user", "content": user_text})
         self._turn_count += 1
+        self._edited_this_turn = []
         self._maybe_compact()
         self._maybe_recall(user_text)
         if self.hooks.has_hooks():
@@ -124,6 +136,9 @@ class Agent:
                         "name": call.name,
                         "content": result.output,
                     })
+            # After this turn's tool batch, diagnose freshly edited files so the
+            # next LLM call sees type/syntax errors and can self-correct.
+            self._run_post_edit_diagnostics()
 
         self._fire_turn_end()
         self._maybe_extract()
@@ -157,6 +172,10 @@ class Agent:
 
         if self._pending_recall:
             extras.append({"role": "system", "content": self._pending_recall})
+
+        if self._pending_diagnostics:
+            extras.append({"role": "system", "content": self._pending_diagnostics})
+            self._pending_diagnostics = ""  # one-shot: show on the next call only
 
         for msg in self.hooks.drain_prompt_messages():
             extras.append({"role": "system", "content": f"Hook guidance: {msg}"})
@@ -417,6 +436,10 @@ class Agent:
         self._snapshot_before_edit(call)
         result, elapsed_ms = self.registry.execute(call.name, call.arguments, self.ctx)
         self._record_for_recovery(call, result)
+        if call.name in MUTATING_PATH_TOOLS and getattr(result, "ok", False):
+            path = str(call.arguments.get("path") or call.arguments.get("file_path") or "")
+            if path:
+                self._edited_this_turn.append(path)
         self._post_tool_hook(call, result)
         return result, elapsed_ms
 
@@ -424,6 +447,48 @@ class Agent:
         max_workers = min(len(batch), max(1, getattr(self.config, "subagent_max_concurrent", 8)))
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             return list(pool.map(self._run_one_call, batch))
+
+    def _run_post_edit_diagnostics(self) -> None:
+        """Diagnose files edited this turn; stash errors for the next LLM call.
+
+        Ported from CodeWhale's LSP-injection loop: after an edit, run the
+        diagnostics tool (LSP where available, Python-syntax fallback) and feed
+        any problems back so the model can self-correct on the next step.
+        """
+        if not getattr(self.config, "auto_diagnostics", True) or not self._edited_this_turn:
+            return
+        # Unique, diagnosable, capped.
+        seen: list[str] = []
+        for p in self._edited_this_turn:
+            ext = ("." + p.rsplit(".", 1)[-1].lower()) if "." in p else ""
+            if ext in DIAGNOSABLE_EXTS and p not in seen:
+                seen.append(p)
+        self._edited_this_turn = []
+        if not seen:
+            return
+
+        lines: list[str] = []
+        for path in seen[:MAX_DIAGNOSED_FILES]:
+            try:
+                result, _ = self.registry.execute("lsp_diagnostics", {"path": path}, self.ctx)
+            except Exception:
+                continue
+            meta = getattr(result, "metadata", {}) or {}
+            diags = meta.get("diagnostics") or []
+            problems = [d for d in diags if str(d.get("severity")) in ("error", "warning")]
+            if not problems:
+                continue
+            lines.append(f"{path}:")
+            for d in problems[:10]:
+                lines.append(
+                    f"  L{d.get('line', '?')} [{d.get('severity')}] "
+                    f"{d.get('message', '')} ({d.get('source', '')})"
+                )
+        if lines:
+            self._pending_diagnostics = (
+                "Diagnostics for files you just edited (fix these before continuing; "
+                "if a warning is intentional, say so):\n" + "\n".join(lines)
+            )
 
     def _snapshot_before_edit(self, call: ToolCall) -> None:
         if self.file_history is None or call.name not in MUTATING_PATH_TOOLS:
