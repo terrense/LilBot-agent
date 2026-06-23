@@ -136,9 +136,39 @@ class ToolRegistry:
         # or by being called directly). Once discovered, a tool is rendered in
         # schemas() like any normal tool for the rest of the session.
         self._discovered: set[str] = set()
+        # Cached serialized catalog for byte-stable prefix caching (M5, ported
+        # from CodeWhale's OnceLock tool serialization). Keyed by the visible
+        # tool set; rebuilt only when that set changes.
+        self._catalog_cache: list[dict[str, Any]] | None = None
+        self._catalog_sig: frozenset[str] | None = None
 
     def register(self, tool: ToolDef) -> None:
         self._tools[tool.name] = tool
+        self._catalog_cache = None  # invalidate
+
+    def _visible_signature(self) -> frozenset[str]:
+        return frozenset(t.name for t in self._tools.values() if self._visible(t))
+
+    def _base_catalog(self) -> list[dict[str, Any]]:
+        """Visible-tool schemas, cached and reused while the set is unchanged.
+
+        Returning the same canonical list across turns keeps the serialized
+        `tools` payload byte-stable, which is what lets DeepSeek/OpenAI prefix
+        caching stay warm. Discovering a deferred tool changes the signature and
+        rebuilds the cache.
+        """
+        sig = self._visible_signature()
+        if self._catalog_cache is None or self._catalog_sig != sig:
+            self._catalog_cache = [self._schema_of(t) for t in self.list() if self._visible(t)]
+            self._catalog_sig = sig
+        return self._catalog_cache
+
+    def catalog_fingerprint(self) -> str:
+        """Stable hash of the visible tool catalog — equal across turns when the
+        tool set is unchanged, different after a deferred tool is discovered."""
+        import hashlib
+        blob = json.dumps(self._base_catalog(), sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
     # -- Deferred-tool support (ported from mewcode) ----------------------
 
@@ -241,9 +271,12 @@ class ToolRegistry:
         the agent_open and agent_eval descriptions are dynamically expanded with live agent type
         listings and active subagent status — CodeWhale-style single source of truth.
         """
-        schemas = [
-            self._schema_of(tool) for tool in self.list() if self._visible(tool)
-        ]
+        base = self._base_catalog()
+        if subagent_render_context is None:
+            return base
+        # Copy each schema before the dynamic agent-description mutation so the
+        # cached canonical catalog stays byte-stable.
+        schemas = [dict(s) for s in base]
         if subagent_render_context is not None:
             self._render_agent_descriptions(schemas, subagent_render_context)
         return schemas

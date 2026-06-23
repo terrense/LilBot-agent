@@ -48,6 +48,18 @@ per milestone. Tests start at 184.
   earlier in a long session is recoverable.
 - Tests: `test_cycles` (5). Suite 235 → 240.
 
+### M5 — Tool-catalog prefix-cache stability (added)
+- `ToolRegistry` now caches the serialized visible-tool catalog (port of
+  CodeWhale's `OnceLock` tool serialization), rebuilt only when the visible set
+  changes, so the `tools` payload is byte-stable across turns — keeping
+  DeepSeek/OpenAI prefix caching warm. Render-context (dynamic agent
+  descriptions) mutates a copy, never the cache. New `catalog_fingerprint()`
+  surfaced in `/tokens` (`tool_catalog_fp`, `tools_visible`).
+- Tests: `test_catalog_cache` (5). Suite 240 → 245.
+
+Status: M1–M5 complete (engine). M6 (TUI polish) is intentionally deferred to a
+collaborative session with the maintainer.
+
 ## [Unreleased] — 2026-06-22 (batch 2) — Surpassing mewcode: persistence & depth
 
 The four persistence/depth areas where mewcode still led are now closed.
