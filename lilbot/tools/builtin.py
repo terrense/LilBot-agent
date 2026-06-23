@@ -200,6 +200,18 @@ def _shell_permission(ctx: ToolContext, action: str, description: str, command: 
     safety = _shell_safety(ctx, command, background=background)
     if safety and safety.get("blocked"):
         return False, safety, ToolResult(False, str(safety.get("summary") or "PowerShell safety gate blocked command."), {"powershell_safety": safety})
+    # Command-safety engine (M3, ported from CodeWhale execpolicy): hard-deny
+    # catastrophic commands; auto-allow known safe read-only ones (arity-aware,
+    # flags ignored) to skip pointless approval prompts.
+    from ..sandbox.execpolicy import classify
+    decision, reason = classify(command)
+    if decision == "deny":
+        meta = {"command_safety": {"decision": "deny", "reason": reason}}
+        if safety:
+            meta["powershell_safety"] = safety
+        return False, safety, ToolResult(False, f"Blocked by command-safety: {reason}.", meta)
+    if decision == "allow" and getattr(getattr(ctx, "config", None), "auto_allow_safe_commands", True):
+        return True, safety, None
     prompt = description
     if safety:
         prompt = f"{description} | {safety.get('summary')}"

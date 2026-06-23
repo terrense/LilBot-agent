@@ -26,6 +26,7 @@ class LilBotConfig:
     compact_after_messages: int = 28
     context_window: int = 128_000
     auto_diagnostics: bool = True
+    auto_allow_safe_commands: bool = True
     verbose: bool = False
 
     @property
