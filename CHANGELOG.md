@@ -30,6 +30,16 @@ per milestone. Tests start at 184.
   extension, capped at 5 files/turn, toggle via `config.auto_diagnostics`.
 - Tests: `test_auto_diagnostics` (6). Suite 193 → 200.
 
+### M3 — Command-safety engine (added)
+- New `lilbot/sandbox/execpolicy.py` (port of CodeWhale's execpolicy): hard-deny
+  catastrophic shell commands (`rm -rf /`/`~`/`*`/`.`, fork bombs, `mkfs`, `dd`
+  to a device, `curl|sh`, `shutdown`, …) and arity-aware **auto-allow** of known
+  read-only commands (`git status -s`, `ls -la`, `cat`, … — flags ignored) so
+  safe inspection skips approval prompts. Normal sub-dir deletes are NOT denied;
+  compound commands are never auto-allowed. Wired into `_shell_permission`;
+  toggle via `config.auto_allow_safe_commands`.
+- Tests: `test_execpolicy` (35). Suite 200 → 235.
+
 ## [Unreleased] — 2026-06-22 (batch 2) — Surpassing mewcode: persistence & depth
 
 The four persistence/depth areas where mewcode still led are now closed.
