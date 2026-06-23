@@ -418,7 +418,7 @@ class SubAgentManager:
         """Snapshot of agent types and active tasks for dynamic tool descriptions.
 
         Used by ToolRegistry.schemas() to render agent_open/agent_eval descriptions
-        with live agent type listings and active subagent status — CodeWhale-style
+        with live agent type listings and active subagent status — 
         tool description parity (single source of truth, no keyword heuristics).
         """
         return {

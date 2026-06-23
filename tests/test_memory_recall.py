@@ -1,4 +1,4 @@
-"""Tests for LLM memory recall + extraction (ported from mewcode)."""
+"""Tests for LLM memory recall + extraction."""
 from __future__ import annotations
 
 import json

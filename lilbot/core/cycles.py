@@ -1,4 +1,4 @@
-"""Cycle memory archive (ported from CodeWhale's cycle_manager + recall_archive).
+"""Cycle memory archive.
 
 When the conversation is compacted, the summarized prefix used to be discarded.
 This archives each compaction as a "cycle" — a dated briefing written to

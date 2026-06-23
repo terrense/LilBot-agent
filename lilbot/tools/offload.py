@@ -1,4 +1,4 @@
-"""Large tool-result offloading (ported from mewcode's context manager).
+"""Large tool-result offloading.
 
 Instead of hard-truncating a big tool result and losing the tail forever,
 LilBot writes the full output to ``.lilbot/session/tool-results/<id>.txt`` and

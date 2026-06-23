@@ -1,4 +1,4 @@
-"""Session persistence + resume (ported from mewcode's session transcript).
+"""Session persistence + resume.
 
 LilBot kept the whole conversation only in memory, so closing the process lost
 it. This stores each session's messages + usage to

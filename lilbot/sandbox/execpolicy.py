@@ -1,4 +1,4 @@
-"""Command-safety / execution policy (ported from CodeWhale's execpolicy crate).
+"""Command-safety / execution policy.
 
 Two jobs, evaluated before a shell command runs:
 

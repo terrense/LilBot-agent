@@ -1,4 +1,4 @@
-"""Tests for M5 — tool-catalog prefix-cache stability (port from CodeWhale)."""
+"""Tests for M5 — tool-catalog prefix-cache stability."""
 from __future__ import annotations
 
 from lilbot.tools import ToolRegistry, register_builtins

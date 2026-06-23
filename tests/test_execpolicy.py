@@ -1,4 +1,4 @@
-"""Tests for M3 — command-safety engine (ported from CodeWhale execpolicy)."""
+"""Tests for M3 — command-safety engine."""
 from __future__ import annotations
 
 import pytest

@@ -1,6 +1,6 @@
 """Render live subagent metadata into tool descriptions.
 
-This mirrors the CodeWhale/Claude Code pattern: the parent model sees the
+The design: the parent model sees the
 available agent types, when to use them, and their tool limits directly in the
 Agent tool description. The runtime still enforces the limits.
 """

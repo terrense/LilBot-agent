@@ -1,6 +1,6 @@
-"""Synchronous MCP stdio client (port of mewcode's async MCPClient).
+"""Synchronous MCP stdio client.
 
-mewcode uses the official async `mcp` SDK; LilBot is synchronous, so this is a
+ uses the official async `mcp` SDK; LilBot is synchronous, so this is a
 minimal, dependency-free JSON-RPC-2.0-over-stdio client: a persistent subprocess
 plus a background reader thread. It performs the MCP `initialize` handshake,
 then supports `tools/list` discovery and `tools/call`.

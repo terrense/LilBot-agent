@@ -1,7 +1,7 @@
-"""LLM-based memory recall + freshness (ported from mewcode's memory/recall).
+"""LLM-based memory recall + freshness.
 
 LilBot stores memories in a flat JSONL store. On its own that store only does
-keyword search. This module adds the part mewcode had and LilBot lacked:
+keyword search. This module adds the part  had and LilBot lacked:
 
   * a small side-query that asks the model which memories are actually relevant
     to the current user request (rather than dumping the newest few), and

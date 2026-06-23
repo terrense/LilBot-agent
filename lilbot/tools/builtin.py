@@ -200,7 +200,7 @@ def _shell_permission(ctx: ToolContext, action: str, description: str, command: 
     safety = _shell_safety(ctx, command, background=background)
     if safety and safety.get("blocked"):
         return False, safety, ToolResult(False, str(safety.get("summary") or "PowerShell safety gate blocked command."), {"powershell_safety": safety})
-    # Command-safety engine (M3, ported from CodeWhale execpolicy): hard-deny
+    # Command-safety engine (M3): hard-deny
     # catastrophic commands; auto-allow known safe read-only ones (arity-aware,
     # flags ignored) to skip pointless approval prompts.
     from ..sandbox.execpolicy import classify
@@ -838,7 +838,7 @@ def _safe_branch_name(value: str) -> str:
 
 
 # Heavy dependency directories symlinked into a new worktree so it is usable
-# immediately without reinstalling (ported from mewcode worktree.symlink_directories).
+# immediately without reinstalling.
 WORKTREE_SYMLINK_DIRS = ["node_modules", ".venv", "venv", "vendor", ".gradle", "target"]
 
 _WT_ADJECTIVES = ["bold", "bright", "calm", "cool", "deep", "fair", "fast", "fine",
@@ -906,7 +906,7 @@ def _enter_worktree(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     ref = str(args.get("ref") or args.get("base") or "HEAD").strip()
     branch = str(args.get("new_branch") or args.get("branch") or "").strip()
     # Auto-generate a readable branch slug when creating without an explicit name
-    # (ported from mewcode worktree slug naming).
+    #.
     if not branch and _optional_bool(args.get("create")) is not False:
         branch = f"lilbot/{_worktree_slug()}"
     main_root = ctx.sandbox.root
@@ -941,7 +941,7 @@ def _enter_worktree(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         data = {"supported": True, "status": "error", "reason": "worktree path does not exist", "path": str(target)}
         return ToolResult(False, _json(data), data)
     # Symlink heavy dependency dirs from the main checkout so the worktree is
-    # immediately usable (ported from mewcode). Opt out with symlink_deps=false.
+    # immediately usable. Opt out with symlink_deps=false.
     symlinked: list[dict[str, Any]] = []
     if should_create and _optional_bool(args.get("symlink_deps")) is not False:
         dirs = args.get("symlink_directories")
@@ -2973,7 +2973,7 @@ def _agent_list(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
 def _plan_delegation(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     """Return the semantic delegation planning prompt for structured subagent planning.
 
-    CodeWhale-style: the tool provides evidence; the LLM makes the decision.
+    : the tool provides evidence; the LLM makes the decision.
     This returns the delegation planning system prompt so the LLM can use it
     as a reference for structuring parallel agent_open calls. Most of the time
     the LLM will read the dynamic agent_open description directly instead.
@@ -3840,7 +3840,7 @@ def register_builtins(registry: ToolRegistry) -> None:
         "args": _string("Arguments injected into {{args}}."),
         "background": _bool("For forked skills, run in background and return immediately.", False),
     }, ["name"]), _skill_run))
-    registry.register(ToolDef("Skill", "Execute a skill within the main conversation, Claude Code style.", _schema({
+    registry.register(ToolDef("Skill", "Execute a skill within the main conversation, LilBot style.", _schema({
         "skill": _string("Skill name."),
         "args": _string("Optional skill arguments."),
         "background": _bool("For forked skills, run in background and return immediately.", False),
@@ -4454,7 +4454,7 @@ def register_builtins(registry: ToolRegistry) -> None:
     }, ["tool_uses"]), lambda args, ctx: _parallel_tool(args, registry, ctx)))
 
     # ToolSearch loads the schemas of deferred (lazily-loaded) tools on demand.
-    # It is never itself deferred. Ported from mewcode's ToolSearch.
+    # It is never itself deferred. ToolSearch.
     registry.register(ToolDef(
         "ToolSearch",
         "Load the full schema of tools that are not loaded by default. "
@@ -4482,7 +4482,7 @@ def register_builtins(registry: ToolRegistry) -> None:
 
 
 # Pure read-only tools: no writes, no code execution, no approval. The agent may
-# run a run of these concurrently (ported from mewcode's is_concurrency_safe).
+# run a run of these concurrently.
 READ_ONLY_TOOLS: set[str] = {
     "read_file", "list_dir", "glob", "grep", "grep_files", "file_search", "project_map",
     "git_status", "git_diff", "git_log", "git_show", "git_blame",

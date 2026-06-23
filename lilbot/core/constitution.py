@@ -1,11 +1,10 @@
 """
-LilBot Constitution — transplanted from CodeWhale's tiered rule hierarchy.
+LilBot Constitution — a tiered rule hierarchy.
 
-This is a direct structural port. Every section exists because CodeWhale's
+Every section exists because the
 LLM behavior is driven by its specificity — not by magic, but by explicit rules.
 
-The only addition is a concrete usage example at the top, matching CodeWhale's
-practice of showing the LLM exactly what to do.
+The only addition is a concrete usage example at the top.
 """
 
 from __future__ import annotations

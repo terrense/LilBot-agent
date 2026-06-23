@@ -1,4 +1,4 @@
-"""Tests for the lifecycle hook engine (ported from mewcode)."""
+"""Tests for the lifecycle hook engine."""
 from __future__ import annotations
 
 import json

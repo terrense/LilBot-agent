@@ -1,4 +1,4 @@
-"""Tests for parallel read-only tool execution (ported from mewcode)."""
+"""Tests for parallel read-only tool execution."""
 from __future__ import annotations
 
 import time

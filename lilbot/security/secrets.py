@@ -22,7 +22,7 @@ _PRIVATE_KEY = re.compile(
 )
 
 _TOKEN_PATTERNS: list[re.Pattern[str]] = [
-    # OpenAI / DeepSeek / Anthropic style (sk-, sk-proj-, sk-ant-)
+    # OpenAI / DeepSeek /  style (sk-, sk-proj-, sk-ant-)
     re.compile(r"\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{16,}\b"),
     # GitHub tokens
     re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b"),

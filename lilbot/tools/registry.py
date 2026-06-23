@@ -9,11 +9,11 @@ from typing import Any, Callable
 from ..sandbox import SandboxError
 
 
-# ── Direct port from CodeWhale's tools crate ──────────────────────────────
-# These enums are transplanted 1:1 from crates/tools/src/lib.rs
+# ── Direct tools crate ──────────────────────────────
+# Tool capability + approval-requirement enums.
 
 class ToolCapability:
-    """Tool capability flags — exactly CodeWhale's enum (lines 19-32)."""
+    """Tool capability flags."""
     ReadOnly = "read_only"
     WritesFiles = "writes_files"
     ExecutesCode = "executes_code"
@@ -32,7 +32,7 @@ class ToolCapability:
 
 
 class ApprovalRequirement:
-    """Tool approval mode — exactly CodeWhale's enum (lines 34-44)."""
+    """Tool approval mode."""
     Auto = "auto"           # Never needs approval: safe read-only operations
     Suggest = "suggest"     # Suggest but allow skip
     Required = "required"   # Always require explicit user approval
@@ -92,15 +92,14 @@ class ToolDef:
     # When True, this tool's schema is NOT sent to the model on every turn.
     # Its name is advertised in a lightweight reminder, and the model must load
     # the full schema on demand via the ToolSearch tool. This keeps the per-turn
-    # tool payload small even though LilBot registers ~150 tools. Ported from
-    # mewcode's deferred-tool / ToolSearch mechanism.
+    # tool payload small even though LilBot registers ~150 tools.
     should_defer: bool = False
 
     @property
     def concurrency_safe(self) -> bool:
         """True when this tool is pure read-only and can run in a parallel batch.
 
-        Mirrors mewcode's is_concurrency_safe: a tool is safe to run alongside
+        Mirrors the is_concurrency_safe: a tool is safe to run alongside
         others only if it neither writes files, executes code, nor requires
         approval. Used by the agent loop to fan out independent read calls.
         """
@@ -136,8 +135,7 @@ class ToolRegistry:
         # or by being called directly). Once discovered, a tool is rendered in
         # schemas() like any normal tool for the rest of the session.
         self._discovered: set[str] = set()
-        # Cached serialized catalog for byte-stable prefix caching (M5, ported
-        # from CodeWhale's OnceLock tool serialization). Keyed by the visible
+        # Cached serialized catalog for byte-stable prefix caching (M5). Keyed by the visible
         # tool set; rebuilt only when that set changes.
         self._catalog_cache: list[dict[str, Any]] | None = None
         self._catalog_sig: frozenset[str] | None = None
@@ -170,7 +168,7 @@ class ToolRegistry:
         blob = json.dumps(self._base_catalog(), sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
-    # -- Deferred-tool support (ported from mewcode) ----------------------
+    # -- Deferred-tool support ----------------------
 
     def defer_all_except(self, core: set[str]) -> None:
         """Mark every registered tool deferred unless it is in the core set.
@@ -269,7 +267,7 @@ class ToolRegistry:
 
         When subagent_render_context is provided (from SubAgentManager.get_render_context()),
         the agent_open and agent_eval descriptions are dynamically expanded with live agent type
-        listings and active subagent status — CodeWhale-style single source of truth.
+        listings and active subagent status — single source of truth.
         """
         base = self._base_catalog()
         if subagent_render_context is None:
@@ -327,7 +325,7 @@ class ToolRegistry:
             result = ToolResult(False, f"Tool error: {type(exc).__name__}: {exc}")
         elapsed_ms = int((perf_counter() - started) * 1000)
         # Offload large outputs to disk with a recoverable preview instead of
-        # silently dropping the tail (ported from mewcode). retrieve_tool_result
+        # silently dropping the tail. retrieve_tool_result
         # / handle_read can read the persisted file back.
         from .offload import maybe_offload  # local import avoids a cycle
 

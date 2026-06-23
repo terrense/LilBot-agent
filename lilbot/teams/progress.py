@@ -1,6 +1,6 @@
 """Per-teammate progress tracker for the dashboard.
 
-Ported from mewcode's teams/progress.py. Thread-safe (the in-process teammate
+teams/progress.py. Thread-safe (the in-process teammate
 loop writes from its own thread while the dashboard reads). Tool descriptions
 use LilBot tool names. The ``_lock`` field is excluded from any serialization.
 """

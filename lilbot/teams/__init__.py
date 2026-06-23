@@ -1,6 +1,6 @@
 """Team / teammate coordination layer (in-process backend).
 
-Ported and adapted from mewcode's ``teams`` package. Provides long-running
+Ported and adapted from the ``teams`` package. Provides long-running
 teammates, file-based mailboxes, a shared task board, and name addressing on top
 of LilBot's existing subagent runtime.
 """

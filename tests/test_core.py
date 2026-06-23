@@ -287,7 +287,7 @@ secret
         self.assertFalse(result.metadata["supported"])
         self.assertEqual(result.metadata["status"], "unsupported")
 
-    def test_codewhale_style_subagent_lifecycle(self):
+    def test_subagent_lifecycle(self):
         from lilbot.core.events import ProviderTurn
         from lilbot.subagents import SubAgentManager
 

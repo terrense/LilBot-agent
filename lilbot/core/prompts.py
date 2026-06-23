@@ -8,7 +8,7 @@ from .constitution import build_constitution
 def build_system_prompt(memory: MemoryStore, skills: SkillRegistry) -> str:
     """Build the full system prompt: Constitution + Skills + Memory.
 
-    The Constitution (transplanted from CodeWhale) provides the tiered
+    The Constitution provides the tiered
     rule hierarchy that drives planning, parallelization, and delegation.
     Skills and memory are appended as supporting context.
     """

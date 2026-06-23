@@ -1,8 +1,8 @@
 """Team / teammate data models.
 
-Ported from mewcode's teams/models.py, adapted to LilBot:
+teams/models.py, adapted to LilBot:
 - persistence root is workspace-level ``<state_dir>/teams/<slug>`` instead of
-  the user-level ``~/.mewcode/teams`` so teams are isolated per project, matching
+  the user-level ``~/./teams`` so teams are isolated per project, matching
   the existing ``.lilbot/agents`` layout.
 - only the in-process backend is supported (tmux/iterm2 dropped).
 """

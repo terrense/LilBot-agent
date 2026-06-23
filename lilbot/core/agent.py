@@ -29,8 +29,7 @@ from .session import SessionStore
 # can undo them.
 MUTATING_PATH_TOOLS = {"write_file", "edit_file", "fim_edit"}
 
-# File extensions worth running diagnostics on after an edit (M2 — CodeWhale's
-# LSP-injection self-correction loop). Others are skipped to avoid noise/latency.
+# File extensions worth running diagnostics on after an edit (M2). Others are skipped to avoid noise/latency.
 DIAGNOSABLE_EXTS = {
     ".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java",
     ".c", ".cc", ".cpp", ".h", ".hpp", ".vue", ".rb", ".php",
@@ -61,10 +60,10 @@ class Agent:
             {"role": "system", "content": build_system_prompt(ctx.memory, ctx.skills)}
         ]
         self.usage: dict[str, int] = {}
-        # Context compaction state (ported from mewcode).
+        # Context compaction state.
         self.recovery = RecoveryState()
         self.compact_breaker = CompactCircuitBreaker()
-        # Lifecycle hooks (ported from mewcode). Loaded from .lilbot/hooks.json.
+        # Lifecycle hooks. Loaded from .lilbot/hooks.json.
         state_dir = getattr(config, "state_dir", None)
         workspace = getattr(config, "workspace", None)
         self.hooks = HookEngine(load_hooks(state_dir), cwd=workspace)
@@ -72,22 +71,22 @@ class Agent:
         # effect on the next turn without restarting the session.
         self._hooks_path = (Path(state_dir) / "hooks.json") if state_dir else None
         self._hooks_mtime = self._current_hooks_mtime()
-        # Memory recall / extraction state (ported from mewcode).
+        # Memory recall / extraction state.
         self._turn_count = 0
         self._recent_tools: list[str] = []
         self._surfaced_memory_ids: set[str] = set()
         self._pending_recall = ""
-        # Session persistence (ported from mewcode). One file per session.
+        # Session persistence. One file per session.
         self.sessions = SessionStore(state_dir) if state_dir else None
         self.session_id = time.strftime("%Y%m%d-%H%M%S")
-        # File history / rewind (ported from mewcode). Snapshots before edits.
+        # File history / rewind. Snapshots before edits.
         self.file_history = (
             FileHistory(state_dir, workspace) if state_dir and workspace else None
         )
-        # Auto diagnostics injection (M2 — CodeWhale self-correction loop).
+        # Auto diagnostics injection (M2).
         self._edited_this_turn: list[str] = []
         self._pending_diagnostics = ""
-        # Cycle memory archive (M4 — CodeWhale cycle_manager). Each compaction
+        # Cycle memory archive (M4). Each compaction
         # archives a briefing recoverable via the recall_archive tool.
         self.cycles = CycleArchive(state_dir) if state_dir else None
 
@@ -244,7 +243,7 @@ class Agent:
                 cwd=getattr(self.config, "workspace", None),
             )
 
-    # -- Session persistence / resume (ported from mewcode) ----------------
+    # -- Session persistence / resume ----------------
 
     def _persist_session(self) -> None:
         if self.sessions is None:
@@ -277,7 +276,7 @@ class Agent:
         self._surfaced_memory_ids = set(meta.get("surfaced_memory_ids") or [])
         return f"Resumed session '{sid}' ({len(messages)} messages)."
 
-    # -- Memory recall / extraction (ported from mewcode) ------------------
+    # -- Memory recall / extraction ------------------
 
     def _provider_is_capable(self) -> bool:
         """The offline rule provider returns canned text; skip LLM meta-queries."""
@@ -353,7 +352,7 @@ class Agent:
         """Inject teammate messages / idle reports addressed to the lead.
 
         Called at the top of every agent-loop iteration so the lead learns of
-        teammate progress mid-turn without blocking or polling. Mirrors mewcode's
+        teammate progress mid-turn without blocking or polling. Mirrors 's
         drain_lead_mailbox -> system-reminder injection.
         """
         teams = getattr(self.ctx, "teams", None)
@@ -421,8 +420,7 @@ class Agent:
         """Group a run of consecutive read-only calls so they can run in parallel.
 
         Order is preserved: a concurrency-safe call extends the current safe
-        batch; anything else starts its own singleton batch. Ported from
-        mewcode's partition_tool_calls.
+        batch; anything else starts its own singleton batch.
         """
         batches: list[list[ToolCall]] = []
         for call in calls:
@@ -455,7 +453,7 @@ class Agent:
     def _run_post_edit_diagnostics(self) -> None:
         """Diagnose files edited this turn; stash errors for the next LLM call.
 
-        Ported from CodeWhale's LSP-injection loop: after an edit, run the
+        LSP-injection loop: after an edit, run the
         diagnostics tool (LSP where available, Python-syntax fallback) and feed
         any problems back so the model can self-correct on the next step.
         """
