@@ -298,7 +298,15 @@ def _token_rows(agent: Agent, ctx: ToolContext) -> list[tuple[str, str]]:
     total_tokens = int(usage.get("total_tokens", prompt_tokens + completion_tokens) or 0)
     cache_read = int(usage.get("cache_read_tokens", 0) or 0)
     cache_rate = f"{(cache_read / prompt_tokens * 100):.0f}%" if prompt_tokens else "0%"
+    registry = getattr(agent, "registry", None)
+    try:
+        catalog_fp = registry.catalog_fingerprint() if registry else "n/a"
+        visible_tools = len(registry.schemas()) if registry else 0
+    except Exception:
+        catalog_fp, visible_tools = "n/a", 0
     return [
+        ("tools_visible", str(visible_tools)),
+        ("tool_catalog_fp", catalog_fp),
         ("messages", str(len(messages))),
         ("approx_context_tokens", str(_estimate_message_tokens(messages))),
         ("context_window", str(getattr(ctx.config, "context_window", 128_000))),
