@@ -139,6 +139,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume", nargs="?", const="__latest__", default=None,
                         help="Resume a saved session. Bare --resume resumes the most recent; "
                              "pass a session id to resume a specific one.")
+    parser.add_argument("--mcp-server", action="store_true", dest="mcp_server",
+                        help="Run as an MCP server over stdio, exposing LilBot's tools to other "
+                             "MCP clients (read-only tools by default).")
     return parser
 
 
@@ -700,6 +703,13 @@ def main(argv: Iterable[str] | None = None) -> int:
     cfg = load_config(args.workspace)
     cfg = apply_args(cfg, args)
     ui = LilBotUI(enabled=not args.no_rich)
+    if getattr(args, "mcp_server", False):
+        # MCP server mode (M8): expose LilBot's tools to other MCP clients over
+        # stdio. No TUI; build the runtime non-interactively and serve.
+        _agent, registry, ctx = build_runtime(cfg, ui, interactive=False)
+        from .mcp.server import LilBotMCPServer, load_expose_config
+        LilBotMCPServer(registry, ctx, load_expose_config(cfg.state_dir)).serve()
+        return 0
     one_shot = args.print_mode or bool(args.prompt)
     agent, registry, ctx = build_runtime(cfg, ui, interactive=not one_shot)
     maybe_resume(agent, ui, getattr(args, "resume", None))

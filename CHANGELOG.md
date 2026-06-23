@@ -68,9 +68,18 @@ per milestone. Tests start at 184.
   Closes the MCP gap vs both mewcode and CodeWhale.
 - Tests: `test_mcp_client` (4, incl. a fake stdio MCP server). Suite 245 → 249.
 
-Status: M1–M5 + M7 complete. M6 (TUI polish) is deferred to a collaborative
-session with the maintainer. M8 (MCP server mode — expose LilBot's tools to
-other MCP clients) is an optional follow-up.
+### M8 — MCP server mode (added)
+- New `lilbot/mcp/server.py`: LilBot can expose its own tools to *other* MCP
+  clients over stdio JSON-RPC (`initialize`/`tools/list`/`tools/call`). Run with
+  `python -m lilbot --mcp-server`. **Read-only tools only by default** (safety);
+  widen/narrow via `.lilbot/mcp_server.json` → `expose_tools`. With M7+M8,
+  LilBot is now a bidirectional MCP peer (the M7 client and M8 server are tested
+  driving each other end-to-end).
+- Tests: `test_mcp_server` (8). Suite 249 → 257.
+
+Status: M1–M5, M7, M8 complete. M6 (TUI polish) is deferred to a collaborative
+session with the maintainer. Full technical report: `docs/TECH_REPORT_M1-M8.md`;
+hands-on verification guide: `docs/VERIFY_M1-M8.md`.
 
 ## [Unreleased] — 2026-06-22 (batch 2) — Surpassing mewcode: persistence & depth
 
