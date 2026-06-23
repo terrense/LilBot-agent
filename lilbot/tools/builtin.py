@@ -3685,12 +3685,24 @@ def _recall_archive(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     if not archive.exists():
         return ToolResult(True, "(no archives)")
     query = str(args.get("query") or "").lower()
-    rows = []
+    try:
+        limit = max(1, int(args.get("limit", 5)))
+    except (TypeError, ValueError):
+        limit = 5
+    entries = []
     for path in archive.glob("*.md"):
-        text = path.read_text(encoding="utf-8", errors="ignore")
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
         if not query or query in text.lower():
-            rows.append(f"{path.name}: {text[:300]}")
-    return ToolResult(True, "\n".join(rows) if rows else "(no matches)")
+            entries.append((mtime, path.name, text))
+    entries.sort(key=lambda e: e[0], reverse=True)
+    if not entries:
+        return ToolResult(True, "(no matches)", {"count": 0})
+    rows = [f"## {name}\n{text.strip()[:600]}" for _, name, text in entries[:limit]]
+    return ToolResult(True, "\n\n".join(rows), {"count": len(entries), "shown": min(limit, len(entries))})
 
 
 def _tool_search(args: dict[str, Any], registry: ToolRegistry, *, regex: bool) -> ToolResult:

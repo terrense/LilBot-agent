@@ -21,6 +21,7 @@ from .delegation import (
 )
 from ..hooks import HookContext, HookEngine, load_hooks
 from ..memory import extract_memories, recall
+from .cycles import CycleArchive
 from .history import FileHistory
 from .session import SessionStore
 
@@ -86,6 +87,9 @@ class Agent:
         # Auto diagnostics injection (M2 — CodeWhale self-correction loop).
         self._edited_this_turn: list[str] = []
         self._pending_diagnostics = ""
+        # Cycle memory archive (M4 — CodeWhale cycle_manager). Each compaction
+        # archives a briefing recoverable via the recall_archive tool.
+        self.cycles = CycleArchive(state_dir) if state_dir else None
 
     def run_turn(self, user_text: str) -> Iterator[object]:
         self._reload_hooks_if_changed()
@@ -537,6 +541,11 @@ class Agent:
         )
         if result is None:
             return "Nothing to compact yet." if manual else ""
+        # Archive the summarized prefix as a cycle before replacing history, so
+        # the knowledge is recoverable later via recall_archive.
+        if self.cycles is not None and len(result.messages) > 1:
+            briefing = str(result.messages[1].get("content") or "")
+            self.cycles.archive(briefing, result.summarized, result.before_tokens)
         self.messages = result.messages
         return (
             f"Compacted context: ~{result.before_tokens:,} -> ~{result.after_tokens:,} est. tokens "
