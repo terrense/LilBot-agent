@@ -28,6 +28,9 @@ class LilBotConfig:
     auto_diagnostics: bool = True
     auto_allow_safe_commands: bool = True
     verbose: bool = False
+    # Stream model output token-by-token to the UI. Falls back to a single
+    # final block automatically for providers without a streaming transport.
+    stream_output: bool = True
 
     @property
     def state_dir(self) -> Path:
@@ -126,6 +129,8 @@ def apply_env_overrides(cfg: LilBotConfig) -> LilBotConfig:
         cfg.subagent_max_concurrent = max(1, _env_int("LILBOT_SUBAGENT_MAX_CONCURRENT", cfg.subagent_max_concurrent))
     if _env("LILBOT_CONTEXT_WINDOW"):
         cfg.context_window = max(8_000, _env_int("LILBOT_CONTEXT_WINDOW", cfg.context_window))
+    if _env("LILBOT_STREAM"):
+        cfg.stream_output = _env("LILBOT_STREAM").strip().lower() not in {"0", "false", "no", "off"}
     return cfg
 
 

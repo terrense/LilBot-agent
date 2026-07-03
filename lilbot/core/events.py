@@ -25,6 +25,22 @@ class ProviderTurn:
 class TextDelta:
     text: str
     interim: bool = False
+    # True when this is one incremental chunk of a live model stream (rendered
+    # inline/growing rather than as a finished block). Additive: defaults False
+    # so every existing producer/consumer keeps its current behavior.
+    streaming: bool = False
+
+
+@dataclass
+class StreamEvent:
+    """One event from a provider's streaming completion.
+
+    Incremental deltas set ``text`` or ``reasoning``; the terminal event carries
+    the fully-assembled ``final`` turn (content, tool_calls, usage).
+    """
+    text: str = ""
+    reasoning: str = ""
+    final: "ProviderTurn | None" = None
 
 
 @dataclass
