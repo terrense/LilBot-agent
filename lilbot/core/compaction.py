@@ -43,6 +43,23 @@ _CHARS_PER_TOKEN = 4.0
 RECOVERY_FILE_LIMIT = 5
 RECOVERY_CHARS_PER_FILE = 4_000
 
+# Local tool-result prune (microcompact). Clearing stale tool outputs is far
+# cheaper than an LLM summary and keeps the message structure intact, so the
+# provider's prefix cache survives better than a full summary rewrite. We try
+# this first; only escalate to a summary when pruning alone isn't enough.
+PRUNED_TOOL_RESULT_PLACEHOLDER = "[old tool result cleared to save context]"
+
+# Summary-call resilience. A single transient provider hiccup should not burn a
+# compaction opportunity: retry with exponential backoff, and only trip the
+# circuit breaker once every attempt has failed.
+MAX_SUMMARY_RETRIES = 3
+RETRY_BASE_DELAY_S = 0.35
+
+# Don't pay for an LLM summary (which rewrites the whole prefix and breaks the
+# provider's cache) unless the reclaimable prefix is genuinely large. Scales
+# with the model's window; a manual /compact bypasses this scaled floor.
+SUMMARIZE_FLOOR_FRACTION = 0.02
+
 
 def estimate_tokens_text(text: str) -> int:
     return int(len(text) / _CHARS_PER_TOKEN) if text else 0
@@ -178,6 +195,56 @@ def _align_keep_start(messages: list[dict[str, Any]], keep_start: int) -> int:
     return keep_start
 
 
+# --- local prune (microcompact) ---------------------------------------------
+
+def prune_tool_results(body: list[dict[str, Any]], keep_start: int) -> tuple[list[dict[str, Any]], int]:
+    """Clear stale ``tool`` result bodies that sit before the kept tail.
+
+    Returns ``(new_body, chars_saved)``. Only messages with ``role == "tool"``
+    at an index below ``keep_start`` are touched; the recent tail keeps its tool
+    output verbatim. Already-cleared placeholders are left alone so re-running
+    prune is idempotent. Other fields (``tool_call_id``, ``name``) are preserved
+    so the assistant/tool pairing stays valid.
+    """
+    saved = 0
+    out: list[dict[str, Any]] = []
+    for i, msg in enumerate(body):
+        if i < keep_start and msg.get("role") == "tool":
+            content = str(msg.get("content") or "")
+            if content and content != PRUNED_TOOL_RESULT_PLACEHOLDER:
+                saved += len(content)
+                msg = {**msg, "content": PRUNED_TOOL_RESULT_PLACEHOLDER}
+        out.append(msg)
+    return out, saved
+
+
+# --- reactive overflow detection --------------------------------------------
+
+_OVERFLOW_MARKERS = (
+    "context_length_exceeded",
+    "context length",
+    "prompt is too long",
+    "prompt_too_long",
+    "too many tokens",
+    "maximum context length",
+    "reduce the length",
+    "string too long",
+)
+
+
+def is_context_overflow_error(message: str) -> bool:
+    """Best-effort check for a provider "prompt too long" / 413-style error.
+
+    Lets the agent react to a live overflow by compacting and retrying instead
+    of failing the turn — the reactive counterpart to the proactive token-budget
+    trigger.
+    """
+    if not message:
+        return False
+    text = message.lower()
+    return any(marker in text for marker in _OVERFLOW_MARKERS)
+
+
 # --- summary prompt ---------------------------------------------------------
 
 SUMMARY_SYSTEM = "You are a conversation-summarizer. Output plain text only. Do not call any tools."
@@ -242,10 +309,38 @@ class CompactResult:
     after_tokens: int
     summarized: int
     kept: int
+    # Characters removed by the local tool-result prune (0 when none).
+    pruned: int = 0
+    # How the budget was reclaimed: "prune" (no LLM call) or "summarize".
+    method: str = "summarize"
 
 
 # A summarizer takes (system_prompt, prefix_text) and returns the summary text.
 Summarizer = Callable[[str, str], str]
+
+
+def _summarize_with_retry(
+    summarizer: Summarizer,
+    prefix_text: str,
+    max_retries: int,
+    base_delay: float,
+) -> str:
+    """Call the summarizer with exponential backoff.
+
+    Returns the first non-empty summary, or "" when every attempt failed. Never
+    raises — the caller treats "" as a failure and trips the circuit breaker.
+    """
+    prompt = f"{SUMMARY_INSTRUCTION}\n\n--- conversation ---\n{prefix_text}"
+    for attempt in range(max(1, max_retries)):
+        if attempt > 0 and base_delay > 0:
+            time.sleep(base_delay * (2 ** (attempt - 1)))
+        try:
+            out = summarizer(SUMMARY_SYSTEM, prompt)
+        except Exception:
+            continue
+        if out and out.strip():
+            return out
+    return ""
 
 
 def auto_compact(
@@ -276,19 +371,51 @@ def auto_compact(
             return None
 
     keep_start = compute_keep_start(body)
+
+    # --- Layer 1: local tool-result prune (microcompact) --------------------
+    # Clear stale tool outputs in the to-summarize prefix first. If that alone
+    # brings us back under budget, skip the LLM summary entirely: it's cheaper
+    # and it preserves message identity, so the prefix cache survives.
+    pruned_chars = 0
+    pruned_body, saved = prune_tool_results(body, keep_start)
+    if saved > 0:
+        pruned_chars = saved
+        candidate = [system, *pruned_body]
+        after_prune = estimate_tokens(candidate)
+        # In auto mode, stop here when pruning cleared the pressure. Manual
+        # /compact always proceeds to a summary so the user gets a real handoff.
+        if not manual and after_prune < compute_threshold(context_window):
+            if breaker is not None:
+                breaker.record_success()
+            return CompactResult(
+                messages=candidate,
+                before_tokens=before,
+                after_tokens=after_prune,
+                summarized=0,
+                kept=len(pruned_body),
+                pruned=pruned_chars,
+                method="prune",
+            )
+        # Not enough on its own — summarize the (now smaller) pruned prefix.
+        body = pruned_body
+
+    # --- Layer 2: LLM summary of the older prefix ---------------------------
     to_summarize = body[:keep_start]
     keep_tail = body[keep_start:]
 
-    if keep_start <= 0 or estimate_tokens(to_summarize) < MIN_SUMMARIZE_PREFIX_TOKENS:
+    # Window-aware summary floor: rewriting the prefix (and breaking the cache)
+    # is only worth it for a sizable reclaim. Manual /compact keeps the small
+    # fixed floor so an explicit request still works on short conversations.
+    summary_floor = (
+        MIN_SUMMARIZE_PREFIX_TOKENS
+        if manual
+        else max(MIN_SUMMARIZE_PREFIX_TOKENS, int(context_window * SUMMARIZE_FLOOR_FRACTION))
+    )
+    if keep_start <= 0 or estimate_tokens(to_summarize) < summary_floor:
         return None
 
     prefix_text = render_prefix_for_summary(to_summarize)
-    try:
-        summary = summarizer(SUMMARY_SYSTEM, f"{SUMMARY_INSTRUCTION}\n\n--- conversation ---\n{prefix_text}")
-    except Exception:
-        if breaker is not None:
-            breaker.record_failure()
-        return None
+    summary = _summarize_with_retry(summarizer, prefix_text, MAX_SUMMARY_RETRIES, RETRY_BASE_DELAY_S)
     if not summary or not summary.strip():
         if breaker is not None:
             breaker.record_failure()
@@ -317,4 +444,6 @@ def auto_compact(
         after_tokens=estimate_tokens(new_messages),
         summarized=len(to_summarize),
         kept=len(keep_tail),
+        pruned=pruned_chars,
+        method="summarize",
     )

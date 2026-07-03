@@ -13,6 +13,7 @@ from .compaction import (
     RecoveryState,
     auto_compact,
     estimate_tokens,
+    is_context_overflow_error,
 )
 from .delegation import (
     parse_semantic_delegation_plan,
@@ -103,7 +104,7 @@ class Agent:
         while steps < self.config.max_steps:
             self._drain_team_notifications()
             render_ctx = self.ctx.subagents.get_render_context() if getattr(self.ctx, "subagents", None) else None
-            turn = self.provider.complete(self._provider_messages(), self.registry.schemas(render_ctx))
+            turn = self._complete_with_overflow_recovery(render_ctx)
             self._add_usage(turn)
             if turn.content:
                 yield TextDelta(turn.content, interim=bool(turn.tool_calls))
@@ -540,11 +541,18 @@ class Agent:
         if result is None:
             return "Nothing to compact yet." if manual else ""
         # Archive the summarized prefix as a cycle before replacing history, so
-        # the knowledge is recoverable later via recall_archive.
-        if self.cycles is not None and len(result.messages) > 1:
+        # the knowledge is recoverable later via recall_archive. Only a
+        # summary carries a briefing at messages[1]; a prune-only pass has no
+        # summary to archive.
+        if result.method == "summarize" and self.cycles is not None and len(result.messages) > 1:
             briefing = str(result.messages[1].get("content") or "")
             self.cycles.archive(briefing, result.summarized, result.before_tokens)
         self.messages = result.messages
+        if result.method == "prune":
+            return (
+                f"Pruned context: ~{result.before_tokens:,} -> ~{result.after_tokens:,} est. tokens "
+                f"(cleared {result.pruned:,} chars of old tool output, no summary needed)."
+            )
         return (
             f"Compacted context: ~{result.before_tokens:,} -> ~{result.after_tokens:,} est. tokens "
             f"(summarized {result.summarized} msgs, kept {result.kept})."
@@ -570,6 +578,22 @@ class Agent:
         self.compact(manual=False)
         if len(self.messages) > self.config.compact_after_messages * 4:
             self.compact(manual=True)
+
+    def _complete_with_overflow_recovery(self, render_ctx: object) -> ProviderTurn:
+        """Call the provider; on a live context-overflow error, compact once and retry.
+
+        The proactive token trigger runs before each turn, but tool output added
+        mid-turn can still push a single request over the window. Rather than
+        failing the turn, force a compaction and re-issue the request once.
+        """
+        try:
+            return self.provider.complete(self._provider_messages(), self.registry.schemas(render_ctx))
+        except Exception as exc:
+            if not is_context_overflow_error(str(exc)):
+                raise
+            # Reactive compaction: bypass the token floor and summarize now.
+            self.compact(manual=True)
+            return self.provider.complete(self._provider_messages(), self.registry.schemas(render_ctx))
 
     def _add_usage(self, turn: ProviderTurn) -> None:
         for key, value in turn.usage.items():
