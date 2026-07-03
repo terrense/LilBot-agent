@@ -57,6 +57,10 @@ class LilBotUI:
         self.enabled = enabled and Console is not None
         self.console = Console(highlight=False) if self.enabled else None
         self.tool_count = 0
+        # Live-stream state: buffer chunks and flush whole lines so secrets are
+        # redacted per complete line (a split token isn't yet a matchable secret).
+        self._streaming = False
+        self._stream_buffer = ""
 
     @property
     def _box(self):
@@ -168,7 +172,47 @@ class LilBotUI:
         for row in rows:
             print(" | ".join(str(item) for item in row))
 
+    def _stream_chunk(self, text: str) -> None:
+        """Render one live chunk, flushing on line boundaries.
+
+        The first chunk prints a header; each completed line is redacted and
+        printed as it lands so long answers appear progressively instead of
+        after the whole turn finishes.
+        """
+        if not self._streaming:
+            self._streaming = True
+            self._stream_buffer = ""
+            if self.enabled:
+                self.console.print("[bold bright_cyan]LilBot[/]")
+            else:
+                print("LilBot:")
+        self._stream_buffer += text
+        while "\n" in self._stream_buffer:
+            line, self._stream_buffer = self._stream_buffer.split("\n", 1)
+            self._emit_stream_line(line)
+
+    def _emit_stream_line(self, line: str) -> None:
+        safe = redact_secrets(line)
+        if self.enabled:
+            self.console.print(safe, markup=False, highlight=False)
+        else:
+            print(safe)
+
+    def _end_stream(self) -> None:
+        """Flush any trailing partial line and close the live region."""
+        if not self._streaming:
+            return
+        if self._stream_buffer:
+            self._emit_stream_line(self._stream_buffer)
+        self._stream_buffer = ""
+        self._streaming = False
+
     def event(self, event: object) -> None:
+        if isinstance(event, TextDelta) and event.streaming:
+            self._stream_chunk(event.text)
+            return
+        # Any non-streaming event marks the end of a live stream.
+        self._end_stream()
         if isinstance(event, TextDelta):
             text = redact_secrets(event.text)
             if self.enabled:

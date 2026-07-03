@@ -104,9 +104,10 @@ class Agent:
         while steps < self.config.max_steps:
             self._drain_team_notifications()
             render_ctx = self.ctx.subagents.get_render_context() if getattr(self.ctx, "subagents", None) else None
-            turn = self._complete_with_overflow_recovery(render_ctx)
+            turn, streamed = yield from self._stream_turn(render_ctx)
             self._add_usage(turn)
-            if turn.content:
+            # When the text already streamed live, don't re-emit it as a block.
+            if turn.content and not streamed:
                 yield TextDelta(turn.content, interim=bool(turn.tool_calls))
             if not turn.tool_calls:
                 self.messages.append(self._assistant_content_message(turn.content, turn.reasoning_content))
@@ -579,21 +580,59 @@ class Agent:
         if len(self.messages) > self.config.compact_after_messages * 4:
             self.compact(manual=True)
 
-    def _complete_with_overflow_recovery(self, render_ctx: object) -> ProviderTurn:
-        """Call the provider; on a live context-overflow error, compact once and retry.
+    def _stream_turn(self, render_ctx: object):
+        """Drive one model completion as a stream, with reactive overflow recovery.
 
-        The proactive token trigger runs before each turn, but tool output added
-        mid-turn can still push a single request over the window. Rather than
-        failing the turn, force a compaction and re-issue the request once.
+        Yields ``TextDelta`` chunks live (when streaming is enabled) and returns
+        ``(turn, streamed)`` via ``yield from``. On a live context-overflow error
+        — raised at request start, before any text is yielded — compact once and
+        retry, so mid-turn growth past the window doesn't crash the turn.
         """
         try:
-            return self.provider.complete(self._provider_messages(), self.registry.schemas(render_ctx))
+            result = yield from self._drive_stream(
+                self._provider_messages(), self.registry.schemas(render_ctx)
+            )
         except Exception as exc:
             if not is_context_overflow_error(str(exc)):
                 raise
             # Reactive compaction: bypass the token floor and summarize now.
             self.compact(manual=True)
-            return self.provider.complete(self._provider_messages(), self.registry.schemas(render_ctx))
+            result = yield from self._drive_stream(
+                self._provider_messages(), self.registry.schemas(render_ctx)
+            )
+        return result
+
+    def _drive_stream(self, messages: list[dict[str, Any]], schemas: list[dict[str, Any]]):
+        """Consume the provider's stream, emitting live deltas; return (turn, streamed).
+
+        Falls back to a single blocking call for duck-typed providers that only
+        implement ``complete``. ``streamed`` is True only when incremental text
+        was actually surfaced to the UI, so the caller knows whether to also emit
+        a final block.
+        """
+        stream_fn = getattr(self.provider, "complete_stream", None)
+        if stream_fn is None:
+            turn = self.provider.complete(messages, schemas)
+            return turn, False
+
+        show = bool(getattr(self.config, "stream_output", True))
+        final: ProviderTurn | None = None
+        parts: list[str] = []
+        streamed = False
+        for event in stream_fn(messages, schemas):
+            if getattr(event, "final", None) is not None:
+                final = event.final
+                continue
+            text = getattr(event, "text", "")
+            if text:
+                parts.append(text)
+                if show:
+                    streamed = True
+                    yield TextDelta(text, interim=True, streaming=True)
+            # reasoning deltas are consumed (drive the stream) but not displayed.
+        if final is None:
+            final = ProviderTurn(content="".join(parts))
+        return final, streamed
 
     def _add_usage(self, turn: ProviderTurn) -> None:
         for key, value in turn.usage.items():

@@ -514,6 +514,10 @@ class DashboardUI:
         ]
         self.work_items: list[str] = ["No active work."]
         self.tool_count = 0
+        # Live-stream state: the last trace line grows as chunks arrive;
+        # `_stream_line` holds its raw (un-redacted) text across chunks.
+        self._stream_active = False
+        self._stream_line = ""
         self.busy = False
         self.wave_index = 0
         self.auto_scroll = True
@@ -690,7 +694,41 @@ class DashboardUI:
         self._append('+ 2    console.log("Hello, LilBot!");')
         self._append("  3  }")
 
+    def _stream_chunk(self, text: str) -> None:
+        """Grow the trace live as streamed chunks arrive.
+
+        The trace is a flat line buffer, so the model streams into its last line:
+        newline-separated segments become discrete lines and the tail keeps
+        extending. Redaction runs per line, so a secret split across chunks is
+        only shown once the full line (and its match) has landed.
+        """
+        if not self._stream_active:
+            self._stream_active = True
+            self._stream_line = ""
+            self.lines.append("")
+            self.lines.append("LILBOT")
+            self.lines.append("")  # the live, growing line (always self.lines[-1])
+        buf = self._stream_line + text
+        parts = buf.split("\n")
+        self.lines[-1] = redact_secrets(parts[0])
+        for segment in parts[1:]:
+            self.lines.append(redact_secrets(segment))
+        self._stream_line = parts[-1]
+        self.lines = self.lines[-TRACE_MAX_LINES:]
+        self._refresh()
+
+    def _end_stream(self) -> None:
+        if not getattr(self, "_stream_active", False):
+            return
+        self._stream_active = False
+        self._stream_line = ""
+
     def event(self, event: object) -> None:
+        if isinstance(event, TextDelta) and event.streaming:
+            self._stream_chunk(event.text)
+            return
+        # Any non-streaming event marks the end of a live stream.
+        self._end_stream()
         if isinstance(event, TextDelta):
             text = redact_secrets(event.text)
             if event.interim:

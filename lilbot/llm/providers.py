@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterable, Iterator
 
 from ..config import LilBotConfig
-from ..core.events import ProviderTurn, ToolCall
+from ..core.events import ProviderTurn, StreamEvent, ToolCall
 
 
 class ProviderError(RuntimeError):
@@ -16,6 +16,16 @@ class ProviderError(RuntimeError):
 class BaseProvider:
     def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> ProviderTurn:
         raise NotImplementedError
+
+    def complete_stream(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> Iterator[StreamEvent]:
+        """Default: no real streaming — run the blocking call and emit the turn.
+
+        Providers without an incremental transport (rule-based, test fakes) keep
+        working: the agent sees a single terminal event and renders one block.
+        """
+        yield StreamEvent(final=self.complete(messages, tools))
 
 
 def _normalize_usage(usage: dict[str, Any]) -> dict[str, Any]:
@@ -96,6 +106,97 @@ def _looks_like_web_query(text: str) -> bool:
     return any(term in lower for term in terms)
 
 
+def _http_timeout() -> Any:
+    """Split timeout: fail fast on a stalled connect, stay patient on reads.
+
+    A dead network no longer blocks the whole 120s window with zero feedback;
+    a genuinely slow (but alive) generation still gets a generous read budget,
+    and with streaming the read clock resets on every chunk.
+    """
+    import httpx
+
+    return httpx.Timeout(120.0, connect=10.0)
+
+
+def _iter_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
+    """Parse an OpenAI-compatible SSE line stream into StreamEvents.
+
+    Pure and transport-free (takes any iterable of raw SSE lines) so it can be
+    unit-tested without a live socket. Yields incremental ``text`` / ``reasoning``
+    deltas as they arrive, then one terminal event carrying the assembled turn.
+    """
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    tool_slots: dict[int, dict[str, str]] = {}
+    usage: dict[str, Any] = {}
+
+    for raw in lines:
+        if not raw:
+            continue
+        line = raw.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[len("data:"):].strip()
+        if payload == "[DONE]":
+            break
+        try:
+            obj = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+
+        raw_usage = obj.get("usage")
+        if isinstance(raw_usage, dict) and raw_usage:
+            usage = _normalize_usage(raw_usage)
+
+        choices = obj.get("choices") or []
+        if not choices:
+            continue
+        delta = choices[0].get("delta") or {}
+
+        text = delta.get("content")
+        if text:
+            content_parts.append(text)
+            yield StreamEvent(text=text)
+
+        reasoning = delta.get("reasoning_content")
+        if reasoning:
+            reasoning_parts.append(reasoning)
+            yield StreamEvent(reasoning=reasoning)
+
+        for call in delta.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            index = call.get("index", 0)
+            slot = tool_slots.setdefault(index, {"id": "", "name": "", "args": ""})
+            if call.get("id"):
+                slot["id"] = str(call["id"])
+            fn = call.get("function") or {}
+            if fn.get("name"):
+                slot["name"] = str(fn["name"])
+            if fn.get("arguments"):
+                slot["args"] += str(fn["arguments"])
+
+    calls: list[ToolCall] = []
+    for index in sorted(tool_slots):
+        slot = tool_slots[index]
+        if not slot["name"]:
+            continue
+        try:
+            args = json.loads(slot["args"] or "{}")
+        except json.JSONDecodeError:
+            args = {"raw": slot["args"]}
+        calls.append(ToolCall(slot["name"], args, slot["id"] or "tool"))
+
+    yield StreamEvent(
+        final=ProviderTurn(
+            "".join(content_parts),
+            calls,
+            usage,
+            "".join(reasoning_parts),
+        )
+    )
+
+
 class RuleBasedProvider(BaseProvider):
     """Offline provider for testing the agent shell without API keys."""
 
@@ -169,7 +270,7 @@ class OpenAICompatibleProvider(BaseProvider):
             "Content-Type": "application/json",
         }
         url = f"{self.config.base_url.rstrip('/')}/chat/completions"
-        with httpx.Client(timeout=120) as client:
+        with httpx.Client(timeout=_http_timeout()) as client:
             response = client.post(url, headers=headers, json=body)
             try:
                 response.raise_for_status()
@@ -197,6 +298,52 @@ class OpenAICompatibleProvider(BaseProvider):
             usage,
             str(message.get("reasoning_content") or ""),
         )
+
+    def complete_stream(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> Iterator[StreamEvent]:
+        try:
+            import httpx
+        except ImportError as exc:  # pragma: no cover - dependency hint
+            raise ProviderError("httpx is required for OpenAI-compatible provider") from exc
+        if not self.config.api_key:
+            raise ProviderError("missing LILBOT_API_KEY or OPENAI_API_KEY")
+
+        body: dict[str, Any] = {
+            "model": self.config.model,
+            "messages": self._messages(messages),
+            "stream": True,
+            # Ask the server to include a usage block on the final SSE chunk so
+            # cache-hit accounting survives the streaming path.
+            "stream_options": {"include_usage": True},
+        }
+        if tools:
+            body["tools"] = [self._tool_schema(tool) for tool in tools]
+            body["tool_choice"] = "auto"
+        headers = {
+            "Authorization": f"Bearer {self.config.api_key}",
+            "Content-Type": "application/json",
+        }
+        url = f"{self.config.base_url.rstrip('/')}/chat/completions"
+        try:
+            with httpx.Client(timeout=_http_timeout()) as client:
+                with client.stream("POST", url, headers=headers, json=body) as response:
+                    if response.status_code >= 400:
+                        response.read()
+                        detail = _response_error_detail(response)
+                        raise ProviderError(
+                            f"{self.config.provider} chat stream failed: "
+                            f"{response.status_code} {response.reason_phrase} "
+                            f"for {response.request.url} (model={self.config.model}). {detail}"
+                        )
+                    yield from _iter_stream_events(response.iter_lines())
+        except ProviderError:
+            raise
+        except httpx.HTTPError as exc:
+            raise ProviderError(
+                f"{self.config.provider} chat stream failed for {url} "
+                f"(model={self.config.model}): {exc}"
+            ) from exc
 
     def _messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         clean: list[dict[str, Any]] = []
