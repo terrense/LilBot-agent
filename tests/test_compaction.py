@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 from lilbot.core.compaction import (
+    PRUNED_TOOL_RESULT_PLACEHOLDER,
     CompactCircuitBreaker,
     RecoveryState,
     auto_compact,
     compute_keep_start,
     compute_threshold,
     estimate_tokens,
+    is_context_overflow_error,
+    prune_tool_results,
 )
 
 
@@ -113,4 +116,81 @@ def test_failed_summarizer_records_breaker_failure():
     msgs = _msgs(20_000)
     out = auto_compact(msgs, boom, context_window=128_000, manual=True, breaker=breaker)
     assert out is None
+    # Retries are exhausted first, then exactly one breaker failure is recorded.
     assert breaker.consecutive_failures == 1
+
+
+# --- new: local prune (microcompact) ----------------------------------------
+
+def _msgs_with_big_tool_result(tool_chars: int):
+    filler = "z" * tool_chars
+    return [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "please read the file"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": filler},  # huge, stale
+        {"role": "assistant", "content": "done reading"},
+        {"role": "user", "content": "recent 1"},
+        {"role": "assistant", "content": "recent 2"},
+        {"role": "user", "content": "current question"},
+    ]
+
+
+def test_prune_only_avoids_llm_when_enough():
+    calls = {"n": 0}
+
+    def counting_summarizer(_s, _t):
+        calls["n"] += 1
+        return "SUMMARY"
+
+    # Big tool result pushes us over a small window; pruning it alone clears it.
+    msgs = _msgs_with_big_tool_result(80_000)  # ~20k tokens of tool output
+    out = auto_compact(msgs, counting_summarizer, context_window=20_000, manual=False)
+    assert out is not None
+    assert out.method == "prune"          # took the cheap path
+    assert calls["n"] == 0                # LLM summarizer never called
+    assert out.pruned > 0
+    # The stale tool result is cleared; recent tail is untouched.
+    assert any(m.get("content") == PRUNED_TOOL_RESULT_PLACEHOLDER for m in out.messages)
+    assert out.messages[-1]["content"] == "current question"
+
+
+def test_prune_keeps_recent_tool_output_verbatim():
+    body = [
+        {"role": "tool", "tool_call_id": "a", "content": "OLD"},
+        {"role": "tool", "tool_call_id": "b", "content": "RECENT"},
+    ]
+    pruned, saved = prune_tool_results(body, keep_start=1)
+    assert pruned[0]["content"] == PRUNED_TOOL_RESULT_PLACEHOLDER
+    assert pruned[1]["content"] == "RECENT"      # in the kept tail, untouched
+    assert saved == len("OLD")
+
+
+# --- new: summary retry with backoff ----------------------------------------
+
+def test_summary_retries_then_succeeds():
+    attempts = {"n": 0}
+
+    def flaky(_s, _t):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise RuntimeError("transient")
+        return "STRUCTURED SUMMARY after retries"
+
+    breaker = CompactCircuitBreaker()
+    msgs = _msgs(20_000)
+    out = auto_compact(msgs, flaky, context_window=128_000, manual=True, breaker=breaker)
+    assert out is not None
+    assert "after retries" in out.messages[1]["content"]
+    assert attempts["n"] == 3
+    assert breaker.consecutive_failures == 0     # success resets the breaker
+
+
+# --- new: reactive overflow detector ----------------------------------------
+
+def test_overflow_detector():
+    assert is_context_overflow_error("Error: prompt is too long: 210000 tokens > 200000")
+    assert is_context_overflow_error("context_length_exceeded")
+    assert not is_context_overflow_error("connection reset by peer")
+    assert not is_context_overflow_error("")

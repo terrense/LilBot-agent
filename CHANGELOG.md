@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-07-03 —— 短期记忆压缩强化
+
+测试数 257 → 261，无回归。对照两套成熟实现全面补齐上下文压缩短板。
+
+- **本地 prune 层（microcompact）**：压缩时先清理"保留尾部之前"的旧 `tool` 结果内容（替换为占位符，保留 `tool_call_id`/`name` 使配对仍合法）。若光靠 prune 就把预算降到阈值下，**直接返回、完全不调用 LLM**——省一次模型调用，且保留消息结构、对前缀缓存更友好。手动 `/compact` 仍走完整摘要以给出真正的交接。文件：`lilbot/core/compaction.py`（`prune_tool_results`）。
+- **窗口自适应摘要下限**：会破坏缓存的整段 LLM 摘要只在"可回收前缀足够大"时才做（自动模式取 `max(1500, 窗口×0.02)`；手动模式保留固定下限）。避免为一点点回收就重写前缀、打掉缓存。
+- **摘要重试退避**：摘要调用改为最多 3 次指数退避（0.35s 起），耗尽才记一次熔断失败。一次瞬时抖动不再浪费一次压缩机会。文件：`lilbot/core/compaction.py`（`_summarize_with_retry`）。
+- **反应式溢出兜底**：主循环中若单轮请求真的触发 provider 的"prompt too long"，检测到后强制压缩并**重试一次**，不再让整轮崩溃。文件：`lilbot/core/agent.py`（`_complete_with_overflow_recovery`、`is_context_overflow_error`）。
+- **压缩结果结构**：`CompactResult` 增加 `pruned`（清理字符数）与 `method`（`prune`/`summarize`）；prune-only 结果不再误当摘要归档为 cycle。
+
+详见 `docs/CONTEXT_COMPACTION.md`（三方对比 + 演进路线）。
+
+---
+
 ## 2026-06-23 —— 安全 / 纠错 / 协议增强
 
 测试数 184 → 257，无回归。
