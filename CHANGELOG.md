@@ -4,6 +4,26 @@
 
 ---
 
+## 2026-07-08（深夜）—— 模型无关接入 + CLI 输入区改进
+
+测试数 304 → 319，无回归。
+
+- **模型无关（hermes-agent 风格）**：LilBot 自身不含模型，任何 OpenAI 兼容的 Chat Completions 端点都可接入。新增 `KNOWN_PROVIDERS` 预设端点表（openai / deepseek / moonshot(kimi) / zhipu(glm) / dashscope(qwen) / openrouter / together / groq / mistral / siliconflow / xai(grok) / perplexity / fireworks，以及本地 ollama / vllm / lmstudio / localai）。`choose_provider` 改为：显式 mock/offline → 离线规则桩；否则**只要有 API key 或本地端点即用真实传输**（本地自托管无需 key）。`--provider` 放开为任意字符串，`--base-url` 可覆盖任意自定义端点。文件：`llm/providers.py`、`cli.py`。
+- **`/model` 全面放开**：`/model NAME`（任意模型 id）、`/model provider:model`（解析已知端点，如 `moonshot:kimi-k2`、`openrouter/anthropic/claude-3.5`）、`/model flash|pro`（DeepSeek 预设）都支持；裸模型名保留当前 provider 只换模型。`/models` 改为展示当前接线 + 已知 provider 端点表。文件：`cli.py`。
+- **CLI 输入区改进（参考 Claude Code）**：Composer 新增**上/下方向键历史回溯**（在首行/末行时回溯，不影响多行编辑；提交即入历史、连续去重、跳过空行）；**Ctrl+C 先清空非空输入、再二次确认退出**（与 Claude Code 一致）。历史导航逻辑抽成无依赖的 `tui/input_history.py` 以便单测。文件：`tui/dashboard.py`、`tui/input_history.py`、`tui/classic.py`。
+
+---
+
+## 2026-07-08（夜间）—— 会话级记忆活文档（#12）
+
+测试数 298 → 304，无回归。
+
+- **会话记忆活文档（#12）**：新增固定 7 段模板的会话笔记（`.lilbot/session-memory.md`：Session Title / Current State / Task Specification / Files and Functions / Errors and Corrections / Learnings / Worklog）。每几回合在**后台**（不阻塞回合）跑一次侧查询，模型**只返回改动的段**，`merge_updates` 写回时保留其余段与模板结构——增量、可 diff、模板即 schema，替代每次全文重写。压缩时活文档进入 recovery 附件，模型压缩后仍保有运行笔记。文件：`core/session_memory.py`、`core/agent.py`、`core/compaction.py`（`RecoveryState.record_note`）。
+
+至此可移植且合理工程量的对标短板基本补齐；剩余 #2（流式与工具执行重叠，需 ~530 行并发敏感的 StreamingToolExecutor）作为独立里程碑，#19/#24（VCR 测试基建）为纯测试面增强。#20（Skills 预取）经评估为低价值（skill 已全量在系统提示词中）。详见 `docs/LILBOT_VS_CLAUDE_CODE_COMPARISON.md` 的"复刻进度"。
+
+---
+
 ## 2026-07-08（傍晚）—— 对标短板批量补齐（第 3 批：工具契约 / 缓存 / 观测 / 权限）
 
 测试数 280 → 298，无回归。

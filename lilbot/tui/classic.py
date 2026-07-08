@@ -257,7 +257,7 @@ class LilBotUI:
             ("/help", "show commands"),
             ("/clear", "clear trace and reset local conversation"),
             ("/theme", "show theme preview"),
-            ("/model [flash|pro]", "switch DeepSeek model"),
+            ("/model [NAME|provider:model]", "switch to any OpenAI-compatible model"),
             ("/tokens", "show local token/context usage"),
             ("/plan [task]", "enter Plan Mode; optional task goes to Agent"),
             ("/do", "exit Plan Mode as approved"),

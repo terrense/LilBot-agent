@@ -39,12 +39,16 @@ class TextDelta:
 class StreamEvent:
     """One event from a provider's streaming completion.
 
-    Incremental deltas set ``text`` or ``reasoning``; the terminal event carries
-    the fully-assembled ``final`` turn (content, tool_calls, usage).
+    Incremental deltas set ``text`` or ``reasoning``; a ``tool_call`` event fires
+    when one tool call has fully streamed in (its args are complete), enabling
+    the agent to start executing it while the model keeps streaming (CC's
+    StreamingToolExecutor overlap, #2); the terminal event carries the
+    fully-assembled ``final`` turn (content, tool_calls, usage).
     """
     text: str = ""
     reasoning: str = ""
     final: "ProviderTurn | None" = None
+    tool_call: "ToolCall | None" = None
 
 
 # 【简历·5 执行观测与评估闭环｜可观测事件流】

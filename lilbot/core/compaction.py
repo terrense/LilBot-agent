@@ -121,6 +121,7 @@ class RecoveryState:
         self._lock = threading.Lock()
         self._files: dict[str, _FileRead] = {}
         self._skills: dict[str, str] = {}
+        self._notes: dict[str, str] = {}
 
     def record_file_read(self, path: str, content: str) -> None:
         if not path or not content:
@@ -133,6 +134,14 @@ class RecoveryState:
             return
         with self._lock:
             self._skills[name] = body
+
+    def record_note(self, title: str, body: str) -> None:
+        """Attach a free-form note (e.g. the session-memory living document, #12)
+        so it survives compaction alongside files and skills."""
+        if not title or not body or not body.strip():
+            return
+        with self._lock:
+            self._notes[title] = body
 
     def _recent_files(self, limit: int) -> list[_FileRead]:
         with self._lock:
@@ -162,6 +171,12 @@ class RecoveryState:
                 snippet = body if len(body) <= RECOVERY_CHARS_PER_FILE else body[:RECOVERY_CHARS_PER_FILE] + "\n… (truncated)"
                 buf.append(f"### {name}\n{snippet}\n")
             sections.append("".join(buf))
+
+        with self._lock:
+            notes = dict(self._notes)
+        for title, body in notes.items():
+            snippet = body if len(body) <= RECOVERY_CHARS_PER_FILE else body[:RECOVERY_CHARS_PER_FILE] + "\n… (truncated)"
+            sections.append(f"## {title}\n{snippet}\n")
 
         if tool_names:
             sections.append("## Available tools\n" + ", ".join(tool_names) + "\n")
