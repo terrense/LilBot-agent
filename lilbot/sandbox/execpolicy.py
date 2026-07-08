@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 import shlex
+from typing import Any
 
 # Arity = number of leading *positional* tokens (flags excluded, base word
 # included) that form a command's canonical prefix. Kept for reference / future
@@ -124,14 +125,24 @@ def matches_allow_rule(command: str, allow_prefixes: set[str] | None = None) -> 
     return False
 
 
-def classify(command: str, allow_prefixes: set[str] | None = None) -> tuple[str, str]:
-    """Return (decision, reason): decision is 'deny' | 'allow' | 'ask'."""
+def classify(command: str, allow_prefixes: set[str] | None = None, rules: Any = None) -> tuple[str, str]:
+    """Return (decision, reason): decision is 'deny' | 'allow' | 'ask'.
+
+    Catastrophic commands are always denied first (a user allow rule can never
+    re-enable ``rm -rf /``). Then user/project/policy permission rules (#15) are
+    consulted; a matching ``Bash(...)`` rule wins. No matching rule falls through
+    to the built-in read-only allow-list — so an empty ruleset is a no-op.
+    """
     cmd = (command or "").strip()
     if not cmd:
         return "ask", ""
     dangerous, reason = is_dangerous(cmd)
     if dangerous:
         return "deny", reason
+    if rules is not None:
+        decision, rule = rules.evaluate("Bash", cmd)
+        if decision:
+            return decision, f"permission rule [{rule.source}] {rule.spec()}"
     if matches_allow_rule(cmd, allow_prefixes):
         return "allow", "known safe read-only command"
     return "ask", ""

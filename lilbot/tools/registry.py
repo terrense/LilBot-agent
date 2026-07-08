@@ -84,10 +84,29 @@ PLAN_APPROVAL_GATED_TOOLS = {
 
 
 @dataclass
+class ValidationResult:
+    """Outcome of a tool's pre-execution input validation (CC's ValidationResult).
+
+    Distinct from permission: validation tells the MODEL why its call is
+    malformed (so it can fix and retry) without running the tool or prompting the
+    user. ``ok=True`` means run it; ``ok=False`` returns ``message`` to the model.
+    """
+
+    ok: bool
+    message: str = ""
+    error_code: int = 0
+
+
+@dataclass
 class ToolResult:
     ok: bool
     output: str
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Optional functional context edit applied AFTER the tool runs (CC's
+    # ToolResult.contextModifier). Only honored for non-concurrency-safe tools —
+    # a tool that mutates the shared context (e.g. adds a working directory) must
+    # not run interleaved with a parallel read batch. Returns the new context.
+    context_modifier: Callable[["ToolContext"], "ToolContext"] | None = None
 
 
 @dataclass
@@ -119,6 +138,48 @@ class ToolDef:
     # Short capability phrase for ToolSearch keyword matching (CC's searchHint):
     # 3-10 words, terms NOT already in the tool name, so deferred tools surface.
     search_hint: str = ""
+    # Optional input validation (CC's validateInput): runs BEFORE the handler and
+    # BEFORE any permission prompt; on failure the model gets a readable reason
+    # and the handler never runs. May return a ValidationResult, a (ok, message)
+    # tuple, or None (== valid).
+    validate: Callable[[dict[str, Any], "ToolContext"], "ValidationResult | tuple[bool, str] | None"] | None = None
+    # Per-tool result-size cap for offloading (CC's maxResultSizeChars).
+    #   0  -> use the global default (INLINE_LIMIT)
+    #   -1 -> never offload (CC's Infinity; e.g. read_file, whose output the model
+    #         would just Read back — persisting it is circular)
+    max_result_chars: int = 0
+    # Whether this tool performs an irreversible operation (delete/overwrite/send).
+    # Fail-closed default False (CC's buildTool default). A predicate allows a
+    # per-input answer (e.g. `bash rm` destructive, `bash ls` not).
+    destructive: bool = False
+    destructive_check: Callable[[dict[str, Any]], bool] | None = None
+
+    def is_destructive(self, args: dict[str, Any] | None = None) -> bool:
+        """Resolve destructiveness for these arguments (per-input then static)."""
+        if self.destructive_check is not None:
+            try:
+                return bool(self.destructive_check(args or {}))
+            except Exception:
+                return self.destructive
+        return self.destructive
+
+    def run_validation(self, args: dict[str, Any], ctx: "ToolContext") -> ValidationResult:
+        """Normalize the optional validate hook into a ValidationResult."""
+        if self.validate is None:
+            return ValidationResult(True)
+        try:
+            out = self.validate(args or {}, ctx)
+        except Exception as exc:  # a broken validator must not crash the call
+            return ValidationResult(True, f"(validator error ignored: {exc})")
+        if out is None:
+            return ValidationResult(True)
+        if isinstance(out, ValidationResult):
+            return out
+        if isinstance(out, tuple):
+            ok = bool(out[0])
+            msg = str(out[1]) if len(out) > 1 else ""
+            return ValidationResult(ok, msg)
+        return ValidationResult(bool(out))
 
     @property
     def concurrency_safe(self) -> bool:
@@ -362,6 +423,16 @@ class ToolRegistry:
         # honor it and reveal its schema for subsequent turns — no regression.
         if tool.should_defer and tool.name not in self._discovered:
             self._discovered.add(tool.name)
+        # Input validation (CC's validateInput) runs BEFORE the plan gate and the
+        # handler: a malformed call gets a readable reason back to the model and
+        # never executes — no side effects, no permission prompt, no wasted step.
+        validation = tool.run_validation(arguments or {}, ctx)
+        if not validation.ok:
+            return ToolResult(
+                False,
+                validation.message or f"Invalid input for {tool.name}.",
+                {"validation_error": True, "error_code": validation.error_code},
+            ), 0
         plan_gate = _plan_approval_gate(resolved_name, ctx)
         if plan_gate is not None:
             return plan_gate, 0
@@ -378,13 +449,16 @@ class ToolRegistry:
         except Exception as exc:  # pragma: no cover - defensive boundary
             result = ToolResult(False, f"Tool error: {type(exc).__name__}: {exc}")
         elapsed_ms = int((perf_counter() - started) * 1000)
+        # Surface destructiveness for observation/telemetry (CC's isDestructive).
+        if tool.is_destructive(arguments or {}):
+            result.metadata.setdefault("destructive", True)
         # Offload large outputs to disk with a recoverable preview instead of
-        # silently dropping the tail. retrieve_tool_result
-        # / handle_read can read the persisted file back.
+        # silently dropping the tail, honoring the tool's own size cap.
+        # retrieve_tool_result / handle_read can read the persisted file back.
         from .offload import maybe_offload  # local import avoids a cycle
 
         state_dir = getattr(getattr(ctx, "config", None), "state_dir", None)
-        new_output, extra = maybe_offload(result.output, state_dir)
+        new_output, extra = maybe_offload(result.output, state_dir, tool.max_result_chars)
         if extra:
             result.output = new_output
             result.metadata.update(extra)

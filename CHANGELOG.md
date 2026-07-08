@@ -4,6 +4,17 @@
 
 ---
 
+## 2026-07-08（傍晚）—— 对标短板批量补齐（第 3 批：工具契约 / 缓存 / 观测 / 权限）
+
+测试数 280 → 298，无回归。
+
+- **工具契约标准化（#4）**：`ToolDef` 增加 `validate`（执行前输入校验——给模型可读的失败原因、不跑 handler、不问用户，区别于权限）、`context_modifier`（非并发安全工具执行后以纯函数改写后续上下文）、`is_destructive`（per-input 判定不可逆操作）、`max_result_chars`（per-tool 落盘阈值，-1 表示永不落盘）。示例：`edit_file` 校验 old 非空且 old≠new；shell 工具标注 rm/mv/git push --force 等为 destructive。文件：`tools/registry.py`、`tools/builtin.py`、`tools/offload.py`、`core/agent.py`。
+- **缓存纪律（#17）**：把 prompt-cache 命中率变成可运营指标（`cache_stats()`），并统计**缓存断裂**（大 prompt 却零 cache-read）。文件：`core/agent.py`。
+- **结构化事件日志（#18）**：`.lilbot/events.jsonl` 记录 turn/tool/compaction/recovery 事件（含 ok/耗时/命中率/断裂/恢复次数），**只序列化标量**以防内容或密钥泄漏，best-effort 永不抛错。这是"工具成功率/失败恢复率/复杂任务完成率"等指标与 bad-case 分析的原始数据。文件：`core/eventlog.py`。
+- **分层权限规则（#15）**：新增 `Tool(pattern)` 语法的权限规则引擎——按来源分层（policy/project/user）、优先级 deny>ask>allow、**被遮蔽规则检测**（永远不会触发的规则），从 `permissions.json` 加载。灾难命令永远先 deny（用户 allow 规则也无法放行 `rm -rf /`）；空规则集零行为改变。文件：`sandbox/permission_rules.py`、`sandbox/execpolicy.py`。
+
+---
+
 ## 2026-07-08（下午）—— 对标短板批量补齐（第 2 批）
 
 测试数 266 → 280，无回归。按"弱于 CC 且不依赖 Claude 模型本身"的可移植差距，按价值顺序继续模仿。

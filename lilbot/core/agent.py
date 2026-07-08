@@ -27,6 +27,7 @@ from .delegation import (
 from ..hooks import HookContext, HookEngine, load_hooks
 from ..memory import extract_memories, recall
 from .cycles import CycleArchive
+from .eventlog import EventLog
 from .history import FileHistory
 from .session import SessionStore
 
@@ -55,6 +56,11 @@ MAX_OVERFLOW_RECOVERIES = 2
 # Max "resume from truncation" continuations per turn when the model is cut off
 # at max output tokens (finish_reason == "length"). CC caps this at 3.
 MAX_OUTPUT_TRUNCATIONS = 3
+
+# A main-loop prompt at least this large that comes back with zero cache-read is
+# treated as a prompt-cache break — the signal CC's break-detection service
+# tracks so cache hit-rate becomes an operable metric.
+CACHE_BREAK_MIN_PROMPT = 2_000
 
 # Bounded wait (seconds) for the recall prefetch before the FIRST provider call
 # of a turn. A fast side-query still lands in the very first completion; a slow
@@ -170,6 +176,14 @@ class Agent:
         # Observable recovery transitions (CC's transition.reason) — for tests,
         # UI, and telemetry.
         self._recovery_transitions: list[str] = []
+        # Prompt-cache accounting (#17): make cache hit-rate an operable metric
+        # and count breaks (a large main-loop prompt served with no cache read).
+        self._prompt_total = 0
+        self._cache_read_total = 0
+        self._cache_breaks = 0
+        # Structured event log (#18): JSONL sink for tool/compaction/recovery
+        # events — the raw material for success-rate / bad-case analysis.
+        self.events = EventLog(state_dir)
 
     def run_turn(self, user_text: str) -> Iterator[object]:
         # ============================================================
@@ -193,6 +207,7 @@ class Agent:
         self._edited_this_turn = []
         self._stop_continuations = 0
         self._output_truncations = 0
+        self.events.log("turn_start", turn=self._turn_count, chars=len(user_text))
         if self.hooks.has_hooks():
             self.hooks.run("user_prompt_submit", HookContext(event="user_prompt_submit", message=user_text))
         self._maybe_compact()      # 回合开始先按 token 预算压缩历史（见 compaction.py）
@@ -208,6 +223,7 @@ class Agent:
             render_ctx = self.ctx.subagents.get_render_context() if getattr(self.ctx, "subagents", None) else None
             turn, streamed = yield from self._stream_turn(render_ctx)
             self._add_usage(turn)
+            self._record_cache_usage(turn.usage)
             # When the text already streamed live, don't re-emit it as a block.
             if turn.content and not streamed:
                 yield TextDelta(turn.content, interim=bool(turn.tool_calls))
@@ -243,6 +259,7 @@ class Agent:
                 self._fire_turn_end()
                 self._maybe_extract()
                 self._persist_session()
+                self._log_turn_finished(steps, "completed")
                 yield TurnFinished(steps, dict(self.usage))
                 return
 
@@ -270,6 +287,11 @@ class Agent:
                     steps += 1
                     # 【简历·5 执行观测】ToolFinished 携带 ok/耗时(elapsed_ms)/metadata，
                     # 上层 TUI 与会话持久化据此记录 Tool Call、Observation、工具耗时。
+                    self.events.log(
+                        "tool_call", tool=call.name, ok=bool(result.ok), elapsed_ms=elapsed_ms,
+                        destructive=bool(result.metadata.get("destructive", False)),
+                        validation_error=bool(result.metadata.get("validation_error", False)),
+                    )
                     yield ToolFinished(call.name, result.ok, result.output, elapsed_ms, result.metadata)
                     # Observe：把工具输出作为 role=tool 消息回灌，成为下一轮模型的证据。
                     self.messages.append({
@@ -287,8 +309,22 @@ class Agent:
         final = self._synthesize_after_step_limit()
         self.messages.append(self._assistant_content_message(final.content, final.reasoning_content))
         self._persist_session()
+        self._log_turn_finished(steps, "step_limit")
         yield TextDelta(final.content)
         yield TurnFinished(steps, dict(self.usage))
+
+    def _log_turn_finished(self, steps: int, outcome: str) -> None:
+        stats = self.cache_stats()
+        self.events.log(
+            "turn_finished",
+            turn=self._turn_count,
+            steps=steps,
+            outcome=outcome,
+            total_tokens=int(self.usage.get("total_tokens", 0) or 0),
+            cache_hit_rate=stats["hit_rate"],
+            cache_breaks=stats["breaks"],
+            recoveries=len(self._recovery_transitions),
+        )
 
     def _provider_messages(self) -> list[dict[str, Any]]:
         """Build the message list for one provider call.
@@ -665,6 +701,15 @@ class Agent:
             return ToolResult(False, f"Blocked by hook: {block}"), 0
         self._snapshot_before_edit(call)
         result, elapsed_ms = self.registry.execute(call.name, call.arguments, self.ctx)
+        # Apply a tool's functional context edit (CC's contextModifier). Only for
+        # non-concurrency-safe tools, which run as singletons — mutating the shared
+        # ctx from a parallel worker would race, so CC only honors it here too.
+        modifier = getattr(result, "context_modifier", None)
+        if modifier is not None and not self._is_concurrency_safe(call):
+            try:
+                self.ctx = modifier(self.ctx)
+            except Exception:
+                pass
         self._record_for_recovery(call, result)
         if call.name in MUTATING_PATH_TOOLS and getattr(result, "ok", False):
             path = str(call.arguments.get("path") or call.arguments.get("file_path") or "")
@@ -807,6 +852,11 @@ class Agent:
             briefing = str(result.messages[1].get("content") or "")
             self.cycles.archive(briefing, result.summarized, result.before_tokens)
         self.messages = result.messages
+        self.events.log(
+            "compaction", method=result.method,
+            before_tokens=result.before_tokens, after_tokens=result.after_tokens,
+            summarized=result.summarized, kept=result.kept, pruned=result.pruned,
+        )
         # A summary rewrites the prefix — the real prompt-token count is now
         # stale (it reflected the pre-compact window). Clear it so the next
         # trigger falls back to the estimate until a fresh response arrives.
@@ -919,6 +969,7 @@ class Agent:
         self._recovery_transitions.append(reason)
         if len(self._recovery_transitions) > 50:
             self._recovery_transitions = self._recovery_transitions[-50:]
+        self.events.log("recovery", reason=reason)
 
     def _stream_turn(self, render_ctx: object):
         """Drive one model completion as a stream, with an ordered, bounded
@@ -992,6 +1043,34 @@ class Agent:
             if isinstance(prompt_tokens, int) and prompt_tokens > 0:
                 self._last_input_tokens = prompt_tokens
             self._last_activity_ts = time.time()
+
+    def _record_cache_usage(self, usage: dict[str, int]) -> None:
+        """Track prompt-cache hit-rate and breaks for main-loop calls (#17).
+
+        A "break" is a substantial prompt served with zero cache read after we've
+        already established a cache — the signal CC's break-detection service
+        surfaces so cache efficiency is observable, not guessed.
+        """
+        prompt = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+        if not prompt:
+            return
+        cache_read = usage.get("cache_read_tokens", 0) or 0
+        with self._usage_lock:
+            self._prompt_total += prompt
+            self._cache_read_total += cache_read
+            if prompt >= CACHE_BREAK_MIN_PROMPT and cache_read == 0 and self._cache_read_total > 0:
+                self._cache_breaks += 1
+
+    def cache_stats(self) -> dict[str, Any]:
+        """Prompt-cache accounting for /status and telemetry (#17)."""
+        with self._usage_lock:
+            rate = (self._cache_read_total / self._prompt_total) if self._prompt_total else 0.0
+            return {
+                "prompt_tokens": self._prompt_total,
+                "cache_read_tokens": self._cache_read_total,
+                "hit_rate": round(rate, 3),
+                "breaks": self._cache_breaks,
+            }
 
     def _synthesize_after_step_limit(self) -> ProviderTurn:
         prompt = (
