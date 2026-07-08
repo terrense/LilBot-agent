@@ -1,20 +1,24 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..config import LilBotConfig
 from .compaction import (
+    CACHE_TTL_SECONDS,
+    SUMMARY_INSTRUCTION,
     CompactCircuitBreaker,
     RecoveryState,
     auto_compact,
-    estimate_tokens,
     is_context_overflow_error,
+    partial_compact,
 )
+from .tool_budget import ToolBudgetState, enforce_tool_result_budget
 from .delegation import (
     parse_semantic_delegation_plan,
     semantic_delegation_messages,
@@ -38,6 +42,48 @@ DIAGNOSABLE_EXTS = {
 MAX_DIAGNOSED_FILES = 5
 
 MEMORY_EXTRACTION_INTERVAL = 3
+
+# Max times a stop hook may force the turn to continue before we let it end
+# anyway — CC's death-spiral guard against a hook that always blocks.
+MAX_STOP_CONTINUATIONS = 3
+
+# Bounded wait (seconds) for the recall prefetch before the FIRST provider call
+# of a turn. A fast side-query still lands in the very first completion; a slow
+# one is skipped there and picked up by a later iteration's non-blocking poll.
+# (Claude Code's memory prefetch never blocks at all; the bounded first wait is
+# a deliberate trade-off to keep recall coverage for single-shot answers.)
+RECALL_FIRST_WAIT_S = 1.0
+
+
+class SideQueryPrefetch:
+    """One-shot background side-query on a daemon thread.
+
+    Mirrors Claude Code's startRelevantMemoryPrefetch pattern: fire the side
+    LLM query at turn start so it runs concurrently with the main provider
+    call, then let the consume point poll for the result without blocking.
+    The job must not raise (failures resolve to None) and must not touch
+    agent state that the main thread mutates — thread-shared bits (usage)
+    are guarded by locks in the Agent.
+    """
+
+    def __init__(self, job: Callable[[], Any]) -> None:
+        self.result: Any = None
+        self._done = threading.Event()
+        threading.Thread(target=self._run, args=(job,), daemon=True).start()
+
+    def _run(self, job: Callable[[], Any]) -> None:
+        try:
+            self.result = job()
+        except Exception:
+            self.result = None
+        finally:
+            self._done.set()
+
+    def wait(self, timeout: float = 0.0) -> bool:
+        """True when the job finished within ``timeout`` seconds (0 = poll)."""
+        return self._done.wait(timeout)
+
+
 from .events import ProviderTurn, TextDelta, ToolCall, ToolFinished, ToolStarted, TurnFinished
 from .prompts import build_system_prompt
 from ..llm.providers import BaseProvider
@@ -64,6 +110,13 @@ class Agent:
         # Context compaction state.
         self.recovery = RecoveryState()
         self.compact_breaker = CompactCircuitBreaker()
+        # CC-parity: real prompt-token count from the last provider response
+        # (trigger decisions trust this over the char/4 estimate), and the
+        # timestamp of the last model call (for cache-cold detection).
+        self._last_input_tokens = 0
+        self._last_activity_ts = 0.0
+        # L0 tool-result budget: frozen/fresh/replaced state that survives turns.
+        self._tool_budget = ToolBudgetState()
         # Lifecycle hooks. Loaded from .lilbot/hooks.json.
         state_dir = getattr(config, "state_dir", None)
         workspace = getattr(config, "workspace", None)
@@ -77,6 +130,17 @@ class Agent:
         self._recent_tools: list[str] = []
         self._surfaced_memory_ids: set[str] = set()
         self._pending_recall = ""
+        # Recall prefetch (M9): the selector side-query runs on a daemon thread
+        # concurrently with the main provider call instead of blocking the turn.
+        self._recall_prefetch: SideQueryPrefetch | None = None
+        self._recall_waited = False
+        # usage is now written from side-query threads too — guard the
+        # read-modify-write in _add_usage.
+        self._usage_lock = threading.Lock()
+        # Serializes background extraction runs (and their read-modify-write
+        # against the memory store).
+        self._extract_lock = threading.Lock()
+        self._extract_thread: threading.Thread | None = None
         # Session persistence. One file per session.
         self.sessions = SessionStore(state_dir) if state_dir else None
         self.session_id = time.strftime("%Y%m%d-%H%M%S")
@@ -90,6 +154,8 @@ class Agent:
         # Cycle memory archive (M4). Each compaction
         # archives a briefing recoverable via the recall_archive tool.
         self.cycles = CycleArchive(state_dir) if state_dir else None
+        # Stop-hook continuations this turn (CC's death-spiral guard).
+        self._stop_continuations = 0
 
     def run_turn(self, user_text: str) -> Iterator[object]:
         # ============================================================
@@ -111,8 +177,14 @@ class Agent:
         self.messages.append({"role": "user", "content": user_text})
         self._turn_count += 1
         self._edited_this_turn = []
+        self._stop_continuations = 0
+        if self.hooks.has_hooks():
+            self.hooks.run("user_prompt_submit", HookContext(event="user_prompt_submit", message=user_text))
         self._maybe_compact()      # 回合开始先按 token 预算压缩历史（见 compaction.py）
-        self._maybe_recall(user_text)  # 用 LLM 从长期记忆里挑与本次请求相关的条目
+        # 记忆召回改为“并行预取”（M9，对标 CC 的 startRelevantMemoryPrefetch）：
+        # 这里只是发射后台侧查询，不再阻塞；结果由 _provider_messages 里的
+        # _consume_recall_prefetch 轮询消费（首次调用给一个有界等待）。
+        self._start_recall_prefetch(user_text)
         if self.hooks.has_hooks():
             self.hooks.run("turn_start", HookContext(event="turn_start", message=user_text))
         steps = self._auto_delegate(user_text)
@@ -125,7 +197,20 @@ class Agent:
             if turn.content and not streamed:
                 yield TextDelta(turn.content, interim=bool(turn.tool_calls))
             if not turn.tool_calls:
+                # Record the model's final message first, then consult stop hooks:
+                # one may force the model to keep working (CC's handleStopHooks),
+                # bounded so a misbehaving hook can't spin forever.
                 self.messages.append(self._assistant_content_message(turn.content, turn.reasoning_content))
+                cont = self._run_stop_hook()
+                if cont is not None:
+                    self.messages.append({
+                        "role": "user",
+                        "content": (
+                            "A stop hook requires more work before ending. "
+                            "Do not ask the user; continue directly.\n" + cont
+                        ),
+                    })
+                    continue
                 self._fire_turn_end()
                 self._maybe_extract()
                 self._persist_session()
@@ -184,6 +269,9 @@ class Agent:
         Keeping these at the tail preserves the stable prefix that drives
         server-side prompt caching.
         """
+        # Adopt the recall prefetch result (if ready) before building extras,
+        # so the reminder rides along on this provider call.
+        self._consume_recall_prefetch()
         extras: list[dict[str, Any]] = []
 
         deferred = self.registry.deferred_tool_names()
@@ -220,6 +308,8 @@ class Agent:
         return [*self.messages, *extras]
 
     def _pre_tool_hook(self, call: ToolCall) -> str | None:
+        """Run pre-tool hooks; may rewrite call.arguments in place. Returns a
+        block reason, or None to allow."""
         if not self.hooks.has_hooks():
             return None
         ctx = HookContext(
@@ -228,7 +318,13 @@ class Agent:
             tool_args=dict(call.arguments),
             file_path=str(call.arguments.get("path") or call.arguments.get("file_path") or ""),
         )
-        return self.hooks.run_pre_tool(ctx)
+        outcome = self.hooks.run_pre_tool(ctx)
+        # Structured protocol: a hook may rewrite the tool's arguments before it
+        # runs (CC's updatedInput). Apply in place so the executed call and its
+        # snapshot/diagnostics all see the rewritten input.
+        if outcome.updated_input is not None and isinstance(outcome.updated_input, dict):
+            call.arguments = outcome.updated_input
+        return outcome.block
 
     def _post_tool_hook(self, call: ToolCall, result: Any) -> None:
         if not self.hooks.has_hooks():
@@ -241,6 +337,24 @@ class Agent:
             message=getattr(result, "output", ""),
         )
         self.hooks.run("post_tool_use", ctx)
+
+    def _run_stop_hook(self) -> str | None:
+        """Stop hook (CC parity): a hook may force the turn to continue.
+
+        Returns a continuation instruction, or None to let the turn end. Capped
+        by MAX_STOP_CONTINUATIONS so a hook that always blocks can't loop forever
+        (CC's death-spiral guard — the same reason API-error paths skip stop
+        hooks entirely).
+        """
+        if not self.hooks.has_hooks():
+            return None
+        if self._stop_continuations >= MAX_STOP_CONTINUATIONS:
+            return None
+        cont = self.hooks.run_stop(HookContext(event="stop"))
+        if cont:
+            self._stop_continuations += 1
+            return cont
+        return None
 
     def _fire_turn_end(self) -> None:
         if self.hooks.has_hooks():
@@ -321,8 +435,19 @@ class Agent:
             return store
         return None
 
-    def _maybe_recall(self, query: str) -> None:
+    def _start_recall_prefetch(self, query: str) -> None:
+        """Launch memory recall as a background side-query (M9 prefetch).
+
+        Previously ``_maybe_recall`` blocked the turn on a full selector LLM
+        round-trip before the first provider call. Now the side-query runs on
+        a daemon thread while the turn proceeds; ``_consume_recall_prefetch``
+        picks the result up before each provider call. Inputs (entries, recent
+        tools, surfaced ids) are snapshotted here on the main thread so the
+        job never reads mutable agent state.
+        """
         self._pending_recall = ""
+        self._recall_prefetch = None
+        self._recall_waited = False
         if not self._provider_is_capable():
             return
         store = self._memory_store()
@@ -334,18 +459,52 @@ class Agent:
             return
         if not entries:
             return
-        try:
-            reminder, ids = recall(
-                query, entries, self._recent_tools[-8:],
-                self._surfaced_memory_ids, self._meta_query,
-            )
-        except Exception:
+        recent = list(self._recent_tools[-8:])
+        surfaced = set(self._surfaced_memory_ids)
+
+        def job() -> tuple[str, list[str]]:
+            # _meta_query is thread-safe: provider.complete builds a fresh HTTP
+            # client per call and _add_usage is guarded by _usage_lock.
+            return recall(query, entries, recent, surfaced, self._meta_query)
+
+        self._recall_prefetch = SideQueryPrefetch(job)
+
+    def _consume_recall_prefetch(self) -> None:
+        """Adopt the prefetched recall result if it is ready.
+
+        First consume of the turn waits up to RECALL_FIRST_WAIT_S so a fast
+        selector still lands in the very first completion; later consumes are
+        pure polls (mirrors Claude Code's "consume point polls settledAt,
+        never blocks"). An unconsumed prefetch is simply dropped at turn end —
+        surfaced ids stay unmarked, so those memories remain eligible next turn.
+        """
+        prefetch = self._recall_prefetch
+        if prefetch is None:
             return
+        timeout = 0.0
+        if not self._recall_waited:
+            self._recall_waited = True
+            timeout = RECALL_FIRST_WAIT_S
+        if not prefetch.wait(timeout):
+            return
+        self._recall_prefetch = None
+        result = prefetch.result
+        if not result:
+            return
+        reminder, ids = result
         if reminder:
             self._pending_recall = reminder
             self._surfaced_memory_ids.update(ids)
 
     def _maybe_extract(self) -> None:
+        """Fire-and-forget memory extraction on a daemon thread (M9).
+
+        The extraction result is never needed within the current turn, so
+        there is no reason to block turn completion on an LLM side-query.
+        ``_extract_lock`` serializes runs so two extractions can't interleave
+        their read-modify-write against the store; the conversation snapshot
+        is taken here on the main thread.
+        """
         if not self._provider_is_capable():
             return
         if self._turn_count % MEMORY_EXTRACTION_INTERVAL != 0:
@@ -356,11 +515,17 @@ class Agent:
         text = self._recent_conversation_text()
         if not text.strip():
             return
-        try:
-            index = "\n".join(f"- {e.name}" for e in store.list())
-            extract_memories(text, index, self._meta_query, store)
-        except Exception:
-            pass
+
+        def job() -> None:
+            with self._extract_lock:
+                try:
+                    index = "\n".join(f"- {e.name}" for e in store.list())
+                    extract_memories(text, index, self._meta_query, store)
+                except Exception:
+                    pass
+
+        self._extract_thread = threading.Thread(target=job, daemon=True)
+        self._extract_thread.start()
 
     def _recent_conversation_text(self, max_messages: int = 20, max_chars: int = 8000) -> str:
         lines: list[str] = []
@@ -438,8 +603,11 @@ class Agent:
         return result
 
     def _is_concurrency_safe(self, call: ToolCall) -> bool:
+        # Per-input concurrency (CC parity): a tool like bash is safe to fan out
+        # only for a read-only command (`ls`) and not a mutating one (`rm`), so
+        # ask the ToolDef with the actual arguments.
         tool = self.registry.get(call.name)
-        return tool is not None and tool.concurrency_safe
+        return tool is not None and tool.is_concurrency_safe(call.arguments)
 
     def _partition_calls(self, calls: list[ToolCall]) -> list[list[ToolCall]]:
         """Group a run of consecutive read-only calls so they can run in parallel.
@@ -551,14 +719,43 @@ class Agent:
         self._add_usage(turn)
         return turn.content
 
+    def _message_summarizer(self, system: dict[str, Any], to_summarize: list[dict[str, Any]]) -> str:
+        """Prompt-cache-sharing summary (CC's fork-based cache reuse, adapted).
+
+        Send the SAME message objects the main loop used (system + prefix) plus a
+        trailing summary instruction, so the provider's cached prefix is reused
+        instead of paying a full cache-miss on a fresh 2-message conversation.
+        Tools are passed empty so the model cannot call any (the instruction also
+        forbids it). Only used when the provider streams (a real API); the offline
+        rule provider keeps the text summarizer.
+        """
+        messages = [system, *to_summarize, {"role": "user", "content": SUMMARY_INSTRUCTION}]
+        turn = self.provider.complete(messages, [])
+        self._add_usage(turn)
+        return turn.content
+
     def _tool_names_for_recovery(self) -> list[str]:
         try:
             return [str(s.get("name")) for s in self.registry.schemas() if s.get("name")]
         except Exception:
             return []
 
+    def _cache_is_cold(self) -> bool:
+        """True when the server prompt cache has likely expired since last call.
+
+        Past the cache TTL the whole prefix is re-tokenized anyway, so a proactive
+        tool-result prune is "free". Mirrors CC's time-based microcompact trigger.
+        """
+        if self._last_activity_ts <= 0.0:
+            return False
+        return (time.time() - self._last_activity_ts) > CACHE_TTL_SECONDS
+
+    def _shared_summary_available(self) -> bool:
+        # Prompt-cache sharing only helps against a real caching provider; the
+        # offline rule provider returns canned text, so keep the text path there.
+        return self._provider_is_capable()
+
     def compact(self, manual: bool = True) -> str:
-        before = estimate_tokens(self.messages)
         result = auto_compact(
             self.messages,
             self._summarize,
@@ -567,6 +764,9 @@ class Agent:
             recovery=self.recovery,
             tool_names=self._tool_names_for_recovery(),
             breaker=self.compact_breaker,
+            actual_tokens=self._last_input_tokens,
+            cache_cold=self._cache_is_cold(),
+            message_summarizer=self._message_summarizer if self._shared_summary_available() else None,
         )
         if result is None:
             return "Nothing to compact yet." if manual else ""
@@ -578,6 +778,10 @@ class Agent:
             briefing = str(result.messages[1].get("content") or "")
             self.cycles.archive(briefing, result.summarized, result.before_tokens)
         self.messages = result.messages
+        # A summary rewrites the prefix — the real prompt-token count is now
+        # stale (it reflected the pre-compact window). Clear it so the next
+        # trigger falls back to the estimate until a fresh response arrives.
+        self._post_compact_cleanup(result.method)
         if result.method == "prune":
             return (
                 f"Pruned context: ~{result.before_tokens:,} -> ~{result.after_tokens:,} est. tokens "
@@ -587,6 +791,48 @@ class Agent:
             f"Compacted context: ~{result.before_tokens:,} -> ~{result.after_tokens:,} est. tokens "
             f"(summarized {result.summarized} msgs, kept {result.kept})."
         )
+
+    def partial_compact(self, pivot: int, direction: str = "up_to") -> str:
+        """User-selected partial compaction around a pivot message (CC's L4c).
+
+        ``up_to`` summarizes everything before the pivot (keep recent); ``from``
+        keeps the old context and compresses everything from the pivot onward.
+        """
+        result = partial_compact(
+            self.messages,
+            self._summarize,
+            pivot,
+            direction=direction,
+            recovery=self.recovery,
+            tool_names=self._tool_names_for_recovery(),
+            message_summarizer=self._message_summarizer if self._shared_summary_available() else None,
+        )
+        if result is None:
+            return "Nothing to compact on that side of the pivot."
+        if self.cycles is not None and direction == "up_to" and len(result.messages) > 1:
+            briefing = str(result.messages[1].get("content") or "")
+            self.cycles.archive(briefing, result.summarized, result.before_tokens)
+        self.messages = result.messages
+        self._post_compact_cleanup("summarize")
+        return (
+            f"Partial compact ({direction}): ~{result.before_tokens:,} -> "
+            f"~{result.after_tokens:,} est. tokens (summarized {result.summarized}, kept {result.kept})."
+        )
+
+    def _post_compact_cleanup(self, method: str) -> None:
+        """Unified post-compact reset (CC's runPostCompactCleanup analogue).
+
+        Centralizes what a compaction invalidates so every path behaves the same:
+          * the real prompt-token count is stale after a summary rewrite — clear
+            it so the trigger uses the estimate until a fresh response arrives;
+          * a one-shot pending-diagnostics message may reference pruned context;
+          * discovered deferred tools are INTENTIONALLY kept (registry state
+            survives) so the model needn't ToolSearch them again — CC carries
+            preCompactDiscoveredTools across the boundary for the same reason.
+        """
+        if method == "summarize":
+            self._last_input_tokens = 0
+        self._pending_diagnostics = ""
 
     def reset_conversation(self) -> str:
         self.messages = [
@@ -602,9 +848,24 @@ class Agent:
             start -= 1
         return start
 
+    def _apply_tool_budget(self) -> None:
+        """L0: shed oversized tool output cache-safely before compaction.
+
+        Runs before the token-budget trigger (CC's ordering: tool-result budget
+        precedes microcompact/autocompact). Only fresh (never-sent) tool results
+        are replaced with previews, so the cached prefix stays byte-stable; the
+        Recovery/offload paths let the model re-run a tool if it needs the full
+        output. Composes cleanly with prune/summary — both key off tool_call_id.
+        """
+        new_messages, replaced = enforce_tool_result_budget(self.messages, self._tool_budget)
+        if replaced:
+            self.messages = new_messages
+
     def _maybe_compact(self) -> None:
-        # Token-budget trigger (primary), with the legacy message-count trigger
+        # L0 tool-result budget first (cheapest, cache-safe), then the
+        # token-budget trigger (primary), with the legacy message-count trigger
         # as a cheap secondary safety net for pathological short-but-huge messages.
+        self._apply_tool_budget()
         self.compact(manual=False)
         if len(self.messages) > self.config.compact_after_messages * 4:
             self.compact(manual=True)
@@ -664,9 +925,20 @@ class Agent:
         return final, streamed
 
     def _add_usage(self, turn: ProviderTurn) -> None:
-        for key, value in turn.usage.items():
-            if isinstance(value, int):
-                self.usage[key] = self.usage.get(key, 0) + value
+        # Locked: recall-prefetch and extraction side-queries add usage from
+        # daemon threads, and dict read-modify-write is not atomic.
+        with self._usage_lock:
+            for key, value in turn.usage.items():
+                if isinstance(value, int):
+                    self.usage[key] = self.usage.get(key, 0) + value
+            # Snapshot the real prompt-token count for the next compaction
+            # trigger, and mark activity for cache-cold detection. Only main-loop
+            # calls carry a prompt-token count worth trusting; side-queries
+            # (summary, recall) report their own smaller prompts, so ignore those.
+            prompt_tokens = turn.usage.get("prompt_tokens") or turn.usage.get("input_tokens")
+            if isinstance(prompt_tokens, int) and prompt_tokens > 0:
+                self._last_input_tokens = prompt_tokens
+            self._last_activity_ts = time.time()
 
     def _synthesize_after_step_limit(self) -> ProviderTurn:
         prompt = (
