@@ -58,18 +58,26 @@ def make_preview(content: str, file_path: Path) -> str:
     )
 
 
-def maybe_offload(output: str, state_dir: Path | None) -> tuple[str, dict]:
+def maybe_offload(output: str, state_dir: Path | None, limit: int | None = None) -> tuple[str, dict]:
     """Return (possibly-replaced output, extra metadata).
 
     Small results pass through untouched. Large results are written to disk and
     replaced by a preview pointer. If no session dir is available (e.g. no
     config), fall back to a plain truncation so behaviour stays bounded.
+
+    ``limit`` is the per-tool cap (CC's maxResultSizeChars):
+      * None or 0 -> use the global default INLINE_LIMIT
+      * negative  -> never offload (CC's Infinity; e.g. read_file)
+      * positive  -> this tool's own threshold
     """
-    if len(output) <= INLINE_LIMIT:
+    if limit is not None and limit < 0:
+        return output, {}  # opt-out: this tool's output is never persisted
+    effective = INLINE_LIMIT if not limit else limit
+    if len(output) <= effective:
         return output, {}
     target = session_dir(state_dir)
     if target is None:
-        return output[:INLINE_LIMIT] + "\n... truncated ...", {"truncated": True}
+        return output[:effective] + "\n... truncated ...", {"truncated": True}
     path = persist_tool_result(output, target)
     return make_preview(output, path), {
         "persisted": True,

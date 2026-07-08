@@ -2263,6 +2263,33 @@ def _read_only_command_safe(args: dict[str, Any]) -> bool:
     return bool(command) and matches_allow_rule(command)
 
 
+_DESTRUCTIVE_SHELL = re.compile(
+    r"\b(rm|rmdir|del|erase|mv|move|dd|truncate|shred|mkfs)\b"
+    r"|git\s+reset\s+--hard|git\s+push\b[^\n]*--force|--force-with-lease",
+    re.IGNORECASE,
+)
+
+
+def _shell_is_destructive(args: dict[str, Any]) -> bool:
+    """Per-input destructiveness for shell tools (CC's isDestructive)."""
+    return bool(_DESTRUCTIVE_SHELL.search(str(args.get("command") or "")))
+
+
+def _edit_file_validate(args: dict[str, Any], ctx: ToolContext):
+    """Pre-execution validation for edit_file (CC's validateInput).
+
+    Give the model an actionable reason instead of a confusing no-op result
+    when the edit can't possibly do anything.
+    """
+    old = str(args.get("old") or "")
+    new = str(args.get("new") or "")
+    if not old:
+        return (False, "edit_file: 'old' must be the exact non-empty text to replace.")
+    if old == new:
+        return (False, "edit_file: 'old' and 'new' are identical — nothing would change.")
+    return (True, "")
+
+
 def _bash(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     command = args["command"]
     if bool(args.get("background", False)):
@@ -3792,11 +3819,11 @@ def register_builtins(registry: ToolRegistry) -> None:
         "old": _string("Exact text to replace."),
         "new": _string("Replacement text."),
         "replace_all": _bool("Replace every occurrence.", False),
-    }, ["path", "old", "new"]), _edit_file))
+    }, ["path", "old", "new"]), _edit_file, validate=_edit_file_validate))
     registry.register(ToolDef("bash", "Run a shell command in the workspace after permission approval.", _schema({
         "command": _string("Shell command."),
         "timeout": _integer("Timeout in seconds.", 30),
-    }, ["command"]), _bash, concurrency_check=_read_only_command_safe))
+    }, ["command"]), _bash, concurrency_check=_read_only_command_safe, destructive_check=_shell_is_destructive))
     registry.register(ToolDef("glob", "Find files by glob pattern.", _schema({
         "pattern": _string("Glob pattern, for example **/*.py."),
         "path": _string("Base path relative to workspace."),
@@ -3912,7 +3939,7 @@ def register_builtins(registry: ToolRegistry) -> None:
         "command": _string("Shell command."),
         "timeout": _integer("Timeout in seconds.", 30),
         "background": _bool("Start in background and return task_id.", False),
-    }, ["command"]), _bash, concurrency_check=_read_only_command_safe))
+    }, ["command"]), _bash, concurrency_check=_read_only_command_safe, destructive_check=_shell_is_destructive))
     registry.register(ToolDef("exec_shell_wait", "Wait for a background shell task.", _schema({
         "task_id": _string("Background shell task id."),
         "timeout": _integer("Wait timeout in seconds.", 1),
