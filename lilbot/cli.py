@@ -10,7 +10,7 @@ from typing import Iterable
 
 from .config import LilBotConfig, load_config, save_config
 from .core.agent import Agent
-from .llm.providers import choose_provider
+from .llm.providers import KNOWN_PROVIDERS, choose_provider, resolve_endpoint
 from .mcp import MCPManager
 from .memory import FileMemoryStore, MemoryStore
 from .sandbox import PermissionManager, Sandbox
@@ -22,16 +22,20 @@ from .tui.classic import LilBotUI
 from .tui.windows_console import configure_windows_console, console_font_status
 
 
+# Convenience presets for DeepSeek's REAL model ids. `flash`/`pro` are kept as
+# friendly aliases (they used to map to fictional `deepseek-v4-*` ids that the
+# API rejects — the cause of "Server disconnected" errors). Any other model is
+# still reachable via `/model <name>` or `/model <provider>:<model>`.
 SUPPORTED_MODELS: dict[str, dict[str, str | tuple[str, ...]]] = {
-    "deepseek-v4-flash": {
+    "deepseek-chat": {
         "provider": "deepseek",
         "base_url": "https://api.deepseek.com",
-        "aliases": ("flash", "deepseek-flash", "v4-flash"),
+        "aliases": ("flash", "chat", "deepseek-flash", "v3"),
     },
-    "deepseek-v4-pro": {
+    "deepseek-reasoner": {
         "provider": "deepseek",
         "base_url": "https://api.deepseek.com",
-        "aliases": ("pro", "deepseek-pro", "v4-pro"),
+        "aliases": ("pro", "reasoner", "deepseek-pro", "r1"),
     },
 }
 
@@ -60,8 +64,8 @@ SLASH_COMMANDS: tuple[SlashCommandInfo, ...] = (
     SlashCommandInfo("help", "/help [command]", "Show commands and short help.", ("?", "h")),
     SlashCommandInfo("clear", "/clear", "Clear Trace and start a fresh local conversation.", ("cls",), "local-ui"),
     SlashCommandInfo("theme", "/theme", "Show the current visual theme preview.", type="local-ui"),
-    SlashCommandInfo("model", "/model [flash|pro]", "Switch or view the current DeepSeek model.", ("moxing",)),
-    SlashCommandInfo("models", "/models", "List available models.", ("moxingliebiao",)),
+    SlashCommandInfo("model", "/model [NAME | provider:model]", "Switch or view the active model (any OpenAI-compatible model).", ("moxing",)),
+    SlashCommandInfo("models", "/models", "Show current wiring + known provider endpoints.", ("moxingliebiao",)),
     SlashCommandInfo("tools", "/tools", "List registered tools grouped by capability."),
     SlashCommandInfo("skills", "/skills", "List bundled and installed skills."),
     SlashCommandInfo("skill", "/skill NAME ARGS", "Render and run a skill prompt.", type="prompt"),
@@ -127,9 +131,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="LilBot local agent")
     parser.add_argument("prompt", nargs="*", help="Prompt for non-interactive use.")
     parser.add_argument("--workspace", type=Path, default=None)
-    parser.add_argument("--provider", choices=["auto", "openai", "deepseek", "mock"], default=None)
-    parser.add_argument("--model", default=None)
-    parser.add_argument("--base-url", default=None)
+    parser.add_argument("--provider", default=None,
+                        help="Any OpenAI-compatible provider: auto, openai, deepseek, moonshot, "
+                             "zhipu, qwen, groq, openrouter, mistral, xai, ollama/vllm/lmstudio "
+                             "(local), 'mock' (offline), or a custom name paired with --base-url.")
+    parser.add_argument("--model", default=None, help="Any model id the chosen provider serves.")
+    parser.add_argument("--base-url", default=None, help="OpenAI-compatible endpoint base URL (overrides the provider preset).")
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--permission-mode", choices=["ask", "accept-all", "deny-all"], default=None)
     parser.add_argument("--font-size", type=int, default=None, help="Request a Windows console font size for the TUI.")
@@ -200,6 +207,11 @@ def maybe_resume(agent: Agent, ui: LilBotUI, resume_arg: str | None) -> None:
 
 
 def normalize_model_name(value: str) -> str | None:
+    """Resolve a KNOWN convenience alias to its canonical model, else None.
+
+    Kept for the DeepSeek presets; model-agnostic switching (any provider/model)
+    goes through switch_runtime_model, which accepts free-form names too.
+    """
     key = value.strip().lower()
     return MODEL_ALIASES.get(key)
 
@@ -213,15 +225,41 @@ def model_rows(current_model: str) -> list[tuple[str, str, str]]:
     return rows
 
 
+def _parse_model_request(requested: str) -> tuple[str | None, str, str | None]:
+    """Parse a /model argument into (provider, model, base_url_override).
+
+    Accepts, in order of specificity:
+      * a known preset alias (``flash`` / ``pro``) -> its provider+model+base_url;
+      * ``provider:model`` or ``provider/model`` -> provider's endpoint + model;
+      * a bare model name -> keep the current provider/base_url, swap the model.
+    provider is None when the caller should keep the current one.
+    """
+    text = requested.strip()
+    alias = normalize_model_name(text)
+    if alias:
+        spec = SUPPORTED_MODELS[alias]
+        return str(spec["provider"]), alias, str(spec["base_url"])
+    for sep in (":", "/"):
+        # Only treat as provider-qualified when the head is a known provider
+        # (avoids splitting model names that legitimately contain '/').
+        if sep in text:
+            head, _, tail = text.partition(sep)
+            if head.strip().lower() in KNOWN_PROVIDERS and tail.strip():
+                provider = head.strip().lower()
+                return provider, tail.strip(), resolve_endpoint(provider)
+    return None, text, None
+
+
 def switch_runtime_model(agent: Agent, ctx: ToolContext, requested: str) -> str:
-    model = normalize_model_name(requested)
-    if not model:
-        choices = ", ".join(SUPPORTED_MODELS)
-        raise ValueError(f"Unknown model `{requested}`. Available: {choices}")
-    spec = SUPPORTED_MODELS[model]
-    ctx.config.provider = str(spec["provider"])
+    """Switch to ANY model/provider (model-agnostic). See _parse_model_request."""
+    if not requested.strip():
+        raise ValueError("Usage: /model NAME  (e.g. /model gpt-4o, /model deepseek:deepseek-chat, /model flash)")
+    provider, model, base_url = _parse_model_request(requested)
+    if provider:
+        ctx.config.provider = provider
+    if base_url:
+        ctx.config.base_url = base_url.rstrip("/")
     ctx.config.model = model
-    ctx.config.base_url = str(spec["base_url"]).rstrip("/")
     save_config(ctx.config)
     agent.config = ctx.config
     agent.provider = choose_provider(ctx.config)
@@ -231,13 +269,17 @@ def switch_runtime_model(agent: Agent, ctx: ToolContext, requested: str) -> str:
 
 def apply_args(cfg: LilBotConfig, args: argparse.Namespace) -> LilBotConfig:
     if args.provider:
-        cfg.provider = "auto" if args.provider == "mock" else args.provider
         if args.provider == "mock":
+            cfg.provider = "mock"
             cfg.api_key = ""
-        if args.provider == "deepseek":
-            cfg.base_url = "https://api.deepseek.com"
-            if cfg.model == "lilbot-rule-model":
-                cfg.model = "deepseek-v4-flash"
+        else:
+            cfg.provider = args.provider
+            # Resolve a known provider's endpoint unless the user overrides it.
+            endpoint = resolve_endpoint(args.provider)
+            if endpoint and not args.base_url:
+                cfg.base_url = endpoint.rstrip("/")
+            if args.provider == "deepseek" and cfg.model == "lilbot-rule-model":
+                cfg.model = "deepseek-chat"
     if args.model:
         cfg.model = args.model
     if args.base_url:
@@ -397,16 +439,35 @@ def handle_slash(line: str, agent: Agent, registry: ToolRegistry, ctx: ToolConte
     if cmd == "theme":
         ui.theme_demo()
         return True
-    if cmd in {"model", "models"}:
+    if cmd == "models":
+        # Model-agnostic: show current wiring + the known provider presets, and
+        # make clear any OpenAI-compatible model/endpoint can be used.
+        ui.table("Current", ["Key", "Value"], [
+            ("provider", ctx.config.provider),
+            ("model", ctx.config.model),
+            ("base_url", ctx.config.base_url),
+            ("api_key", "set" if ctx.config.api_key else "(none)"),
+        ])
+        ui.table("Known providers (preset endpoints)", ["Provider", "Base URL"],
+                 sorted(KNOWN_PROVIDERS.items()))
+        ui.print("Switch with: /model NAME  |  /model provider:model  |  /model flash|pro", "dim")
+        ui.print("Any OpenAI-compatible model works; use --base-url / LILBOT_BASE_URL for custom endpoints.", "dim")
+        return True
+    if cmd == "model":
         if not args:
-            ui.table("Models", ["Model", "Aliases", "Status"], model_rows(ctx.config.model))
+            ui.table("Model", ["Key", "Value"], [
+                ("provider", ctx.config.provider),
+                ("model", ctx.config.model),
+                ("base_url", ctx.config.base_url),
+            ])
+            ui.print("Switch: /model gpt-4o  |  /model deepseek:deepseek-chat  |  /model flash  (/models for presets)", "dim")
             return True
         try:
             model = switch_runtime_model(agent, ctx, args)
         except ValueError as exc:
             ui.error(str(exc))
             return True
-        ui.print(f"Model switched to {model}", "green")
+        ui.print(f"Model switched to {model}  [{ctx.config.provider} @ {ctx.config.base_url}]", "green")
         return True
     if cmd == "tools":
         ui.table("Tools", ["Name", "Description"], [(t.name, t.description) for t in registry.list()])

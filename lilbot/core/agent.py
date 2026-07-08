@@ -30,6 +30,7 @@ from .cycles import CycleArchive
 from .eventlog import EventLog
 from .history import FileHistory
 from .session import SessionStore
+from .session_memory import SessionMemory
 
 # Tools that mutate a file at a `path` arg — snapshot before they run so /rewind
 # can undo them.
@@ -43,6 +44,42 @@ DIAGNOSABLE_EXTS = {
 MAX_DIAGNOSED_FILES = 5
 
 MEMORY_EXTRACTION_INTERVAL = 3
+
+# How often (in turns) to refresh the session-memory living document (#12).
+SESSION_MEMORY_UPDATE_INTERVAL = 4
+
+def _extract_json_object(raw: str) -> dict[str, Any] | None:
+    """Best-effort parse of a JSON object from possibly-noisy model text."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+        return data if isinstance(data, dict) else None
+    except json.JSONDecodeError:
+        pass
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        data = json.loads(text[start:end + 1])
+        return data if isinstance(data, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+
+SESSION_MEMORY_SYSTEM = "You maintain a structured session-notes document. Output JSON only."
+
+SESSION_MEMORY_INSTRUCTION = """\
+You are keeping a running session-notes document up to date. Given the current
+notes and the recent conversation, return ONLY a JSON object mapping section
+names to their NEW content, for the sections that changed. Omit unchanged
+sections. Preserve durable facts; be terse and information-dense.
+
+Valid section names: "Session Title", "Current State", "Task Specification",
+"Files and Functions", "Errors and Corrections", "Learnings", "Worklog".
+
+Respond with JSON only, e.g. {"Current State": "...", "Worklog": "..."}."""
 
 # Max times a stop hook may force the turn to continue before we let it end
 # anyway — CC's death-spiral guard against a hook that always blocks.
@@ -156,6 +193,11 @@ class Agent:
         # against the memory store).
         self._extract_lock = threading.Lock()
         self._extract_thread: threading.Thread | None = None
+        # Session-memory living document (#12): a structured notes file the model
+        # updates incrementally in the background, and which survives compaction.
+        self.session_memory = SessionMemory(state_dir)
+        self._sm_lock = threading.Lock()
+        self._sm_thread: threading.Thread | None = None
         # Session persistence. One file per session.
         self.sessions = SessionStore(state_dir) if state_dir else None
         self.session_id = time.strftime("%Y%m%d-%H%M%S")
@@ -258,6 +300,7 @@ class Agent:
                     continue
                 self._fire_turn_end()
                 self._maybe_extract()
+                self._maybe_update_session_memory()
                 self._persist_session()
                 self._log_turn_finished(steps, "completed")
                 yield TurnFinished(steps, dict(self.usage))
@@ -306,6 +349,7 @@ class Agent:
 
         self._fire_turn_end()
         self._maybe_extract()
+        self._maybe_update_session_memory()
         final = self._synthesize_after_step_limit()
         self.messages.append(self._assistant_content_message(final.content, final.reasoning_content))
         self._persist_session()
@@ -592,6 +636,39 @@ class Agent:
         self._extract_thread = threading.Thread(target=job, daemon=True)
         self._extract_thread.start()
 
+    def _maybe_update_session_memory(self) -> None:
+        """Incrementally refresh the session-memory living document (#12).
+
+        Runs on a background daemon thread (off the turn's critical path, like
+        extraction). A side-query returns only the changed sections as JSON;
+        ``merge_updates`` writes them back while preserving the template. The
+        conversation snapshot is taken here on the main thread.
+        """
+        if not self._provider_is_capable() or self.session_memory.path is None:
+            return
+        if self._turn_count % SESSION_MEMORY_UPDATE_INTERVAL != 0:
+            return
+        convo = self._recent_conversation_text()
+        if not convo.strip():
+            return
+        current = self.session_memory.render()
+
+        def job() -> None:
+            with self._sm_lock:
+                try:
+                    raw = self._meta_query(
+                        SESSION_MEMORY_SYSTEM,
+                        f"{SESSION_MEMORY_INSTRUCTION}\n\nCurrent notes:\n{current}\n\nRecent conversation:\n{convo}",
+                    )
+                    updates = _extract_json_object(raw)
+                    if isinstance(updates, dict) and updates:
+                        self.session_memory.merge_updates(updates)
+                except Exception:
+                    pass
+
+        self._sm_thread = threading.Thread(target=job, daemon=True)
+        self._sm_thread.start()
+
     def _recent_conversation_text(self, max_messages: int = 20, max_chars: int = 8000) -> str:
         lines: list[str] = []
         for msg in self.messages[-max_messages:]:
@@ -830,6 +907,12 @@ class Agent:
         return self._provider_is_capable()
 
     def compact(self, manual: bool = True) -> str:
+        # Carry the session-memory living document (#12) through compaction: it
+        # rides along in the recovery attachment so the post-compact model keeps
+        # its running notes even after the transcript is summarized.
+        sm_text = self.session_memory.text()
+        if sm_text:
+            self.recovery.record_note("Session memory (running notes)", sm_text)
         result = auto_compact(
             self.messages,
             self._summarize,

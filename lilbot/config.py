@@ -82,7 +82,7 @@ def default_config(workspace: Path | None = None) -> LilBotConfig:
     api_key = _env("LILBOT_API_KEY", _env("OPENAI_API_KEY", deepseek_key))
     if provider == "auto" and deepseek_key and not _env("LILBOT_API_KEY") and not _env("OPENAI_API_KEY"):
         provider = "deepseek"
-    default_model = "deepseek-v4-flash" if provider == "deepseek" else "lilbot-rule-model"
+    default_model = "deepseek-chat" if provider == "deepseek" else "lilbot-rule-model"
     default_base = "https://api.deepseek.com" if provider == "deepseek" else "https://api.openai.com/v1"
     model = _env("LILBOT_MODEL", default_model)
     base_url = _env("LILBOT_BASE_URL", default_base)
@@ -108,7 +108,7 @@ def apply_env_overrides(cfg: LilBotConfig) -> LilBotConfig:
     if _env("LILBOT_MODEL"):
         cfg.model = _env("LILBOT_MODEL")
     elif cfg.provider == "deepseek" and cfg.model == "lilbot-rule-model":
-        cfg.model = "deepseek-v4-flash"
+        cfg.model = "deepseek-chat"
 
     if _env("LILBOT_BASE_URL"):
         cfg.base_url = _env("LILBOT_BASE_URL").rstrip("/")

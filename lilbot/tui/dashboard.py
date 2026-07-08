@@ -16,6 +16,7 @@ from ..cli import handle_slash, run_prompt, slash_command_runs_agent, slash_comm
 from ..core.events import TextDelta, ToolFinished, ToolStarted, TurnFinished
 from ..security import redact_args, redact_secrets
 from ..tools import ToolContext, ToolRegistry
+from .input_history import InputHistory
 
 try:
     from prompt_toolkit import Application
@@ -510,7 +511,8 @@ class DashboardUI:
             "Boot sequence ready.",
             "Trace is the main conversation and tool-execution stream.",
             "Trace keeps final answers readable and summarizes noisy tool output.",
-            "Copy: terminal Ctrl+Shift+C or F2. Exit: press Ctrl+C twice.",
+            "Input: Enter sends, Ctrl+J newline, ↑/↓ recall history, Ctrl+C clears then exits.",
+        "Copy: terminal Ctrl+Shift+C or F2. Exit: press Ctrl+C twice.",
         ]
         self.work_items: list[str] = ["No active work."]
         self.tool_count = 0
@@ -532,6 +534,8 @@ class DashboardUI:
         self.scrollbar_render_heights = {"trace": 1, "work": 1}
         self.slash_selection = 0
         self.slash_hidden_for_text = ""
+        # Composer prompt history (up/down recall, Claude-Code style).
+        self.history = InputHistory()
         self.command_popup_title = ""
         self.command_popup_lines: list[str] = []
         self.command_popup_error = False
@@ -818,6 +822,8 @@ class DashboardUI:
         self.slash_hidden_for_text = ""
         if not line:
             return False
+        # Remember submitted prompts for up/down recall (Claude-Code style).
+        self.history.record(line)
         if self._answer_permission(line):
             return False
         if line in {"/exit", "/quit", "/q"}:
@@ -1020,6 +1026,14 @@ class DashboardUI:
 
         @kb.add("c-c")
         def _exit(event) -> None:
+            # Claude-Code behavior: a non-empty composer is cleared first; only an
+            # already-empty composer arms/confirms exit on a second Ctrl+C.
+            if self.input.buffer.text.strip():
+                self.input.buffer.text = ""
+                self.history.reset()
+                self.quit_armed_until = 0.0
+                event.app.layout.focus(self.input)
+                return
             now = monotonic()
             if now <= self.quit_armed_until:
                 event.app.exit(result=0)
@@ -1050,6 +1064,39 @@ class DashboardUI:
         @kb.add("tab", filter=Condition(lambda: self._slash_suggestions_visible()))
         def _slash_accept(event) -> None:
             self._accept_slash_suggestion()
+
+        def _composer_nav(direction: int) -> bool:
+            # Only when the composer is focused and the slash popup is closed.
+            if self._slash_suggestions_visible() or not self.app.layout.has_focus(self.input):
+                return False
+            buf = self.input.buffer
+            doc = buf.document
+            if direction < 0:
+                # Recall older history only when the cursor is on the first line;
+                # otherwise let Up move the cursor within a multi-line draft.
+                if doc.cursor_position_row != 0:
+                    return False
+                text = self.history.older(buf.text)
+            else:
+                if doc.cursor_position_row != doc.line_count - 1:
+                    return False
+                text = self.history.newer(buf.text)
+            if text is None:
+                return False
+            buf.text = text
+            buf.cursor_position = len(text)
+            self._refresh()
+            return True
+
+        @kb.add("up", filter=Condition(lambda: not self._slash_suggestions_visible()))
+        def _history_up(event) -> None:
+            if not _composer_nav(-1):
+                self.input.buffer.cursor_up()
+
+        @kb.add("down", filter=Condition(lambda: not self._slash_suggestions_visible()))
+        def _history_down(event) -> None:
+            if not _composer_nav(1):
+                self.input.buffer.cursor_down()
 
         @kb.add("c-v")
         def _paste(event) -> None:

@@ -56,7 +56,7 @@
 
 ## 复刻进度（持续更新）
 
-原则：**凡是弱于 CC 且不依赖 Claude 模型本身的项，按价值顺序逐个模仿。** 当前测试 298 通过（起点 241）。
+原则：**凡是弱于 CC 且不依赖 Claude 模型本身的项，按价值顺序逐个模仿。** 当前测试 304 通过（起点 241）。
 
 ### ✅ 已复刻（可移植差距已闭合）
 
@@ -76,13 +76,19 @@
 | #17 缓存纪律 | 缓存命中率作为可运营指标 + **缓存断裂计数**（大 prompt 零 cache-read 即计一次断裂）；消息对象不变异本就基本满足（压缩/预算均返回新 dict） | `agent.py::_record_cache_usage/cache_stats` | 同上（1） |
 | #15 权限体系 | 规则按来源分层（policy/project/user）+ `Tool(pattern)` 语法 + deny>ask>allow 优先级 + **被遮蔽规则检测** + 灾难命令永远先 deny；空规则集零行为改变 | `sandbox/permission_rules.py`、`execpolicy.classify(rules=)` | `test_permission_rules.py`（7） |
 | #18 可观测性 | 命名空间化结构化事件日志（`.lilbot/events.jsonl`：turn/tool/compaction/recovery，带 ok/耗时/命中率/断裂/恢复次数）；**只序列化标量**防内容泄漏 | `core/eventlog.py` | `test_cc_parity_batch3.py`（4） |
+| #12 会话级记忆 | 固定 7 段模板的"活文档"（`session-memory.md`），后台**增量**更新（侧查询只回改动的段、`merge_updates` 保留其余段与模板），并随压缩进入 recovery 附件存活 | `core/session_memory.py`、`agent.py::_maybe_update_session_memory` | `test_session_memory.py`（6） |
+| #14 Task 工具族粒度 | **本就具备**：`team_task_create/list/get/update` + `agent_spawn/status/transcript/list` 已是分立细粒度工具 | `tools/builtin.py` | `test_teams.py` |
 
 ### 🔜 待复刻（按价值顺序，portable）
 
-1. **#12 会话级记忆**：让子代理用 Edit 工具增量维护一份 10 段"活文档"替代每次全文重写。
-2. **#20 Skills 预取并行** / **#14 Task 工具族粒度** / **#19·#24 VCR 录放测试基建**。
-3. **#2 流式与工具执行重叠**（StreamingToolExecutor，工程量最大，独立里程碑）。
-4. **#15 增强**：（可选）自然语言权限规则 + 小模型分类器（任意模型，非 Claude 专属）。
+1. **#2 流式与工具执行重叠**（StreamingToolExecutor，约 530 行、并发敏感——工程量最大，作为独立里程碑，不草率做）。
+2. **#19·#24 VCR 录放测试基建**（把真实 API 交互录成 fixture 回放，中等价值、纯测试面）。
+3. **#15 增强**（可选）：自然语言权限规则 + 小模型分类器（任意模型，非 Claude 专属）。
+
+### ⏸️ 评估后判定低价值 / 已覆盖（不做）
+
+- **#20 Skills 预取并行**：LilBot 已在系统提示词里列出全部 skill 名称与描述，无"每回合选相关 skill"的阻塞侧查询可并行；预取 skill *正文* 属投机、ROI 低。
+- **#14 Task 工具族**：已细粒度（见上），无需再拆。
 
 ### ⛔ 不复刻（依赖 Claude 模型 / Anthropic 私有 API，已剔除）
 

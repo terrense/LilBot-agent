@@ -56,9 +56,9 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(status.message, "not windows")
 
     def test_model_aliases_normalize(self):
-        self.assertEqual(normalize_model_name("pro"), "deepseek-v4-pro")
-        self.assertEqual(normalize_model_name("flash"), "deepseek-v4-flash")
-        self.assertEqual(normalize_model_name("deepseek-v4-pro"), "deepseek-v4-pro")
+        self.assertEqual(normalize_model_name("pro"), "deepseek-reasoner")
+        self.assertEqual(normalize_model_name("flash"), "deepseek-chat")
+        self.assertEqual(normalize_model_name("deepseek-chat"), "deepseek-chat")
         self.assertIsNone(normalize_model_name("unknown-model"))
 
     def test_slash_command_registry_matches_prefix_and_alias(self):
@@ -80,7 +80,7 @@ class ConfigTests(unittest.TestCase):
             agent = SimpleNamespace(config=cfg, provider=None)
             ctx = SimpleNamespace(config=cfg, subagents=SimpleNamespace(provider=None))
             model = switch_runtime_model(agent, ctx, "pro")
-        self.assertEqual(model, "deepseek-v4-pro")
+        self.assertEqual(model, "deepseek-reasoner")
         self.assertEqual(cfg.provider, "deepseek")
         self.assertEqual(cfg.base_url, "https://api.deepseek.com")
         self.assertTrue(callable(ctx.subagents.provider))

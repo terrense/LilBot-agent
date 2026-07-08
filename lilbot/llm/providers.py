@@ -462,8 +462,60 @@ class OpenAICompatibleProvider(BaseProvider):
         }
 
 
+# LilBot ships no model of its own — it's a model-agnostic runtime (hermes-agent
+# style). Any OpenAI-compatible Chat Completions endpoint plugs in: cloud vendors
+# below, plus any self-hosted server (Ollama / vLLM / LM Studio / TGI …). Unknown
+# providers still work via an explicit --base-url. Map: name -> base_url.
+KNOWN_PROVIDERS: dict[str, str] = {
+    "openai": "https://api.openai.com/v1",
+    "deepseek": "https://api.deepseek.com",
+    "moonshot": "https://api.moonshot.cn/v1",
+    "kimi": "https://api.moonshot.cn/v1",
+    "zhipu": "https://open.bigmodel.cn/api/paas/v4",
+    "glm": "https://open.bigmodel.cn/api/paas/v4",
+    "dashscope": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
+    "together": "https://api.together.xyz/v1",
+    "groq": "https://api.groq.com/openai/v1",
+    "mistral": "https://api.mistral.ai/v1",
+    "siliconflow": "https://api.siliconflow.cn/v1",
+    "xai": "https://api.x.ai/v1",
+    "grok": "https://api.x.ai/v1",
+    "perplexity": "https://api.perplexity.ai",
+    "fireworks": "https://api.fireworks.ai/inference/v1",
+    "anyscale": "https://api.endpoints.anyscale.com/v1",
+    "ollama": "http://localhost:11434/v1",
+    "lmstudio": "http://localhost:1234/v1",
+    "vllm": "http://localhost:8000/v1",
+    "localai": "http://localhost:8080/v1",
+}
+
+# Providers/base_urls that need no API key (self-hosted, on the local machine).
+_LOCAL_HINTS = ("localhost", "127.0.0.1", "0.0.0.0", "::1")
+_OFFLINE_PROVIDERS = {"mock", "rule", "rule-based", "offline", "none", ""}
+
+
+def resolve_endpoint(provider: str) -> str | None:
+    """Base URL for a known provider name, or None if unknown (use --base-url)."""
+    return KNOWN_PROVIDERS.get((provider or "").strip().lower())
+
+
+def is_local_endpoint(base_url: str) -> bool:
+    return any(hint in (base_url or "") for hint in _LOCAL_HINTS)
+
+
 def choose_provider(config: LilBotConfig) -> BaseProvider:
-    provider = config.provider.lower()
-    if provider in {"openai", "deepseek"} or (provider == "auto" and config.api_key):
+    """Pick the runtime provider. Any OpenAI-compatible endpoint is honored.
+
+    A real endpoint needs either an API key (cloud vendors) or a local base_url
+    (self-hosted servers need none). Only the explicit offline/mock providers —
+    and an unconfigured "auto" with no key — fall back to the offline rule
+    provider so tests and no-network runs still work.
+    """
+    provider = (config.provider or "auto").strip().lower()
+    if provider in _OFFLINE_PROVIDERS:
+        return RuleBasedProvider()
+    if config.api_key or is_local_endpoint(config.base_url or ""):
         return OpenAICompatibleProvider(config)
     return RuleBasedProvider()
