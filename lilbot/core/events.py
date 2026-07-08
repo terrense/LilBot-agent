@@ -19,6 +19,10 @@ class ProviderTurn:
     tool_calls: list[ToolCall] = field(default_factory=list)
     usage: dict[str, int] = field(default_factory=dict)
     reasoning_content: str = ""
+    # OpenAI-style finish_reason ("stop" | "length" | "tool_calls" | …). "length"
+    # means the model was cut off at max output tokens — the agent can inject a
+    # "continue from where you left off" message and resume (CC parity, #9).
+    finish_reason: str = ""
 
 
 @dataclass

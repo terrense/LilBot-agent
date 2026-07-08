@@ -10,7 +10,15 @@ from ..core.events import ProviderTurn, StreamEvent, ToolCall
 
 
 class ProviderError(RuntimeError):
-    pass
+    """Provider failure. Carries a structured ``status_code`` and ``is_overflow``
+    flag so the agent can react to a context-overflow (413 / context_length_exceeded)
+    by compacting and retrying, instead of matching error strings (CC's lesson:
+    judge errors by structured signals, use text only as a fallback)."""
+
+    def __init__(self, message: str, *, status_code: int | None = None, is_overflow: bool = False):
+        super().__init__(message)
+        self.status_code = status_code
+        self.is_overflow = is_overflow
 
 
 class BaseProvider:
@@ -55,6 +63,19 @@ def _truncate(text: str, limit: int = 2000) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "... truncated ..."
+
+
+def _is_overflow_error(status_code: int, detail: str) -> bool:
+    """Structured context-overflow classification (CC parity).
+
+    A 413 ("request entity too large") is always overflow; otherwise fall back to
+    the error-body text markers (``context_length_exceeded`` / "prompt too long"
+    are usually returned as 400 with a specific message).
+    """
+    if status_code == 413:
+        return True
+    from ..core.compaction import is_context_overflow_error  # local: avoids cycle
+    return is_context_overflow_error(detail)
 
 
 def _response_error_detail(response: Any) -> str:
@@ -129,6 +150,7 @@ def _iter_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
     reasoning_parts: list[str] = []
     tool_slots: dict[int, dict[str, str]] = {}
     usage: dict[str, Any] = {}
+    finish_reason: str = ""
 
     for raw in lines:
         if not raw:
@@ -151,6 +173,8 @@ def _iter_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
         choices = obj.get("choices") or []
         if not choices:
             continue
+        if choices[0].get("finish_reason"):
+            finish_reason = str(choices[0]["finish_reason"])
         delta = choices[0].get("delta") or {}
 
         text = delta.get("content")
@@ -193,6 +217,7 @@ def _iter_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
             calls,
             usage,
             "".join(reasoning_parts),
+            finish_reason=finish_reason,
         )
     )
 
@@ -276,10 +301,13 @@ class OpenAICompatibleProvider(BaseProvider):
                 response.raise_for_status()
             except httpx.HTTPStatusError as exc:
                 detail = _response_error_detail(exc.response)
+                code = exc.response.status_code
                 raise ProviderError(
                     f"{self.config.provider} chat request failed: "
-                    f"{exc.response.status_code} {exc.response.reason_phrase} "
-                    f"for {exc.request.url} (model={self.config.model}). {detail}"
+                    f"{code} {exc.response.reason_phrase} "
+                    f"for {exc.request.url} (model={self.config.model}). {detail}",
+                    status_code=code,
+                    is_overflow=_is_overflow_error(code, detail),
                 ) from exc
         data = response.json()
         message = data["choices"][0]["message"]
@@ -297,6 +325,7 @@ class OpenAICompatibleProvider(BaseProvider):
             calls,
             usage,
             str(message.get("reasoning_content") or ""),
+            finish_reason=str(data["choices"][0].get("finish_reason") or ""),
         )
 
     def complete_stream(
@@ -331,10 +360,13 @@ class OpenAICompatibleProvider(BaseProvider):
                     if response.status_code >= 400:
                         response.read()
                         detail = _response_error_detail(response)
+                        code = response.status_code
                         raise ProviderError(
                             f"{self.config.provider} chat stream failed: "
-                            f"{response.status_code} {response.reason_phrase} "
-                            f"for {response.request.url} (model={self.config.model}). {detail}"
+                            f"{code} {response.reason_phrase} "
+                            f"for {response.request.url} (model={self.config.model}). {detail}",
+                            status_code=code,
+                            is_overflow=_is_overflow_error(code, detail),
                         )
                     yield from _iter_stream_events(response.iter_lines())
         except ProviderError:

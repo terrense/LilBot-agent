@@ -4,6 +4,21 @@
 
 ---
 
+## 2026-07-08（下午）—— 对标短板批量补齐（第 2 批）
+
+测试数 266 → 280，无回归。按"弱于 CC 且不依赖 Claude 模型本身"的可移植差距，按价值顺序继续模仿。
+
+- **输入级并发安全**：`isConcurrencySafe` 从"工具级"下沉到"输入级"——`bash("ls")`/`git status` 可加入并行只读批，`bash("rm -rf x")`/`git push` 保持串行，复用 execpolicy 的只读命令白名单。`ToolDef` 新增 `concurrency_check` 谓词，谓词抛错则保守判不安全。文件：`tools/registry.py`、`tools/builtin.py`、`core/agent.py`。
+- **Hooks 结构化输出协议 + Stop hook**：命令钩子可在 stdout 打印 JSON 来 `decision:block`、`updatedInput`（改写工具入参）、`additionalContext`（注入上下文）、`continue:false`；新增 `stop` 事件——模型想结束时钩子可强制其继续工作（带最多 3 次的死亡螺旋熔断），及 `user_prompt_submit` 事件。纯文本钩子与退出码语义不变。文件：`hooks/engine.py`、`hooks/models.py`、`core/agent.py`。
+- **有序有界的溢出恢复 + 可观测 transition**：`_stream_turn` 的反应式压缩重试改为有界（最多 2 次）循环，超限则让错误浮出而非死循环；每次恢复记录一条 transition（`reactive_compact_retry` 等）到可断言的 `_recovery_transitions`。文件：`core/agent.py`。
+- **结构化判错**：`ProviderError` 携带 `status_code` 与 `is_overflow`（413 或错误体文本判定），agent 结构化优先、文本匹配兜底。文件：`llm/providers.py`。
+- **输出截断续写**：模型因 `finish_reason=="length"` 被截断时，注入"从断点续写、不道歉不复述"并继续，最多 3 次。`ProviderTurn` 新增 `finish_reason`。文件：`core/events.py`、`llm/providers.py`、`core/agent.py`。
+- **searchHint**：`ToolDef` 新增 `search_hint`，参与延迟工具检索加权，提高按能力词（而非工具名）召回。文件：`tools/registry.py`。
+
+配对不变量（每个 tool_use 必有 tool_result）经核查 LilBot 本就满足：`registry.execute` 把异常收敛成 `ToolResult`，未执行的 tool_calls 不写入 assistant 消息。详见 `docs/LILBOT_VS_CLAUDE_CODE_COMPARISON.md` 的"复刻进度"。
+
+---
+
 ## 2026-07-08 —— 上下文压缩机制全面补齐
 
 测试数 246 → 266，无回归。系统性对标业界成熟实现，把可移植的压缩要素全部补齐（可移植部分覆盖率约 90%，详见 `docs/CC_COMPACTION_REPLICATION_STATUS.md`）。

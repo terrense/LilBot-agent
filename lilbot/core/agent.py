@@ -47,6 +47,15 @@ MEMORY_EXTRACTION_INTERVAL = 3
 # anyway — CC's death-spiral guard against a hook that always blocks.
 MAX_STOP_CONTINUATIONS = 3
 
+# Max reactive compact+retry cycles for a single overflowing request before the
+# error surfaces — CC bounds every recovery loop so an irrecoverable prompt
+# can't spin forever.
+MAX_OVERFLOW_RECOVERIES = 2
+
+# Max "resume from truncation" continuations per turn when the model is cut off
+# at max output tokens (finish_reason == "length"). CC caps this at 3.
+MAX_OUTPUT_TRUNCATIONS = 3
+
 # Bounded wait (seconds) for the recall prefetch before the FIRST provider call
 # of a turn. A fast side-query still lands in the very first completion; a slow
 # one is skipped there and picked up by a later iteration's non-blocking poll.
@@ -156,6 +165,11 @@ class Agent:
         self.cycles = CycleArchive(state_dir) if state_dir else None
         # Stop-hook continuations this turn (CC's death-spiral guard).
         self._stop_continuations = 0
+        # Output-truncation resume count this turn (finish_reason == "length").
+        self._output_truncations = 0
+        # Observable recovery transitions (CC's transition.reason) — for tests,
+        # UI, and telemetry.
+        self._recovery_transitions: list[str] = []
 
     def run_turn(self, user_text: str) -> Iterator[object]:
         # ============================================================
@@ -178,6 +192,7 @@ class Agent:
         self._turn_count += 1
         self._edited_this_turn = []
         self._stop_continuations = 0
+        self._output_truncations = 0
         if self.hooks.has_hooks():
             self.hooks.run("user_prompt_submit", HookContext(event="user_prompt_submit", message=user_text))
         self._maybe_compact()      # 回合开始先按 token 预算压缩历史（见 compaction.py）
@@ -197,10 +212,24 @@ class Agent:
             if turn.content and not streamed:
                 yield TextDelta(turn.content, interim=bool(turn.tool_calls))
             if not turn.tool_calls:
-                # Record the model's final message first, then consult stop hooks:
-                # one may force the model to keep working (CC's handleStopHooks),
-                # bounded so a misbehaving hook can't spin forever.
                 self.messages.append(self._assistant_content_message(turn.content, turn.reasoning_content))
+                # Output-truncation recovery (CC parity, #9): the model was cut
+                # off at max output tokens. Inject a terse resume instruction and
+                # continue so it finishes, bounded so it can't loop forever.
+                if turn.finish_reason == "length" and self._output_truncations < MAX_OUTPUT_TRUNCATIONS:
+                    self._output_truncations += 1
+                    self._record_transition("max_output_tokens_recovery")
+                    self.messages.append({
+                        "role": "user",
+                        "content": (
+                            "Output token limit hit. Resume directly — no apology, no recap. "
+                            "Pick up mid-thought where you were cut off, and break the remaining "
+                            "work into smaller pieces."
+                        ),
+                    })
+                    continue
+                # Then consult stop hooks: one may force the model to keep working
+                # (CC's handleStopHooks), bounded so a misbehaving hook can't spin.
                 cont = self._run_stop_hook()
                 if cont is not None:
                     self.messages.append({
@@ -870,27 +899,51 @@ class Agent:
         if len(self.messages) > self.config.compact_after_messages * 4:
             self.compact(manual=True)
 
-    def _stream_turn(self, render_ctx: object):
-        """Drive one model completion as a stream, with reactive overflow recovery.
+    def _is_overflow_error(self, exc: Exception) -> bool:
+        """Structured-first overflow classification (CC parity, #23).
 
-        Yields ``TextDelta`` chunks live (when streaming is enabled) and returns
-        ``(turn, streamed)`` via ``yield from``. On a live context-overflow error
-        — raised at request start, before any text is yielded — compact once and
-        retry, so mid-turn growth past the window doesn't crash the turn.
+        Trust the provider's structured ``is_overflow`` flag when present; fall
+        back to matching the error string only when it isn't.
         """
-        try:
-            result = yield from self._drive_stream(
-                self._provider_messages(), self.registry.schemas(render_ctx)
-            )
-        except Exception as exc:
-            if not is_context_overflow_error(str(exc)):
-                raise
-            # Reactive compaction: bypass the token floor and summarize now.
-            self.compact(manual=True)
-            result = yield from self._drive_stream(
-                self._provider_messages(), self.registry.schemas(render_ctx)
-            )
-        return result
+        if getattr(exc, "is_overflow", False):
+            return True
+        return is_context_overflow_error(str(exc))
+
+    def _record_transition(self, reason: str) -> None:
+        """Record why the loop recovered/continued — CC's ``transition.reason``.
+
+        Kept as an observable list (bounded) so tests can assert a recovery path
+        fired without inspecting message contents, and the UI/telemetry can show
+        what happened.
+        """
+        self._recovery_transitions.append(reason)
+        if len(self._recovery_transitions) > 50:
+            self._recovery_transitions = self._recovery_transitions[-50:]
+
+    def _stream_turn(self, render_ctx: object):
+        """Drive one model completion as a stream, with an ordered, bounded
+        reactive-overflow recovery chain (CC parity, #8/#1).
+
+        Yields ``TextDelta`` chunks live and returns ``(turn, streamed)``. On a
+        context-overflow error — raised at request start, before any text is
+        yielded — compact and retry, up to ``MAX_OVERFLOW_RECOVERIES`` times so a
+        genuinely irrecoverable prompt surfaces the error instead of looping
+        forever. Each recovery records a transition reason.
+        """
+        attempts = 0
+        while True:
+            try:
+                result = yield from self._drive_stream(
+                    self._provider_messages(), self.registry.schemas(render_ctx)
+                )
+                return result
+            except Exception as exc:
+                if not self._is_overflow_error(exc) or attempts >= MAX_OVERFLOW_RECOVERIES:
+                    raise
+                attempts += 1
+                self._record_transition("reactive_compact_retry")
+                # Reactive compaction: bypass the token floor and summarize now.
+                self.compact(manual=True)
 
     def _drive_stream(self, messages: list[dict[str, Any]], schemas: list[dict[str, Any]]):
         """Consume the provider's stream, emitting live deltas; return (turn, streamed).
