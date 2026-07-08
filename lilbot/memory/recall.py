@@ -144,6 +144,17 @@ def recall(
 
     Returns (reminder_text, surfaced_ids). reminder_text is "" when nothing was
     selected.
+
+    【简历·4 长期记忆｜召回(Recall) 与“重要性打分/去重”的落点】
+    这是每回合开始时(agent.py::_maybe_recall)做的“记忆召回”：不是把最新几条
+    记忆一股脑塞进去，而是用一次小的 LLM 侧查询(select_relevant)让模型判断
+    哪些记忆真正与当前请求相关(至多 MAX_SELECTED 条)——这就是“重要性打分”；
+    already_surfaced 过滤掉本会话已经注入过的条目——这就是“去重合并/引用追踪”；
+    render_reminder 还会给旧记忆加“时效性警告”(freshness_text)，提醒模型把
+    过期记忆当作需复核的观察而非当前事实。
+    诚实提示：这里的相关性靠“LLM 判断 + 关键词检索(store.search)”实现，
+    并非向量检索；简历若写“语义记忆/Vector Store/Recall@3”，要么补上向量库，
+    要么在面试里如实说明是“LLM 相关性选择”，避免被追问穿帮(见随附说明)。
     """
     surfaced = already_surfaced or set()
     candidates = [e for e in entries if e.id not in surfaced]

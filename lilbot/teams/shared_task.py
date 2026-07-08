@@ -33,6 +33,17 @@ class SharedTask:
 
 
 class SharedTaskStore:
+    """【简历·3 多 Agent 协作｜Shared State / Blackboard 之一】
+
+    这是团队共享的“任务看板(黑板)”：一个 JSON 落盘的轻量 kanban，字段含
+    assignee(负责人) 与 blocks/blocked_by(依赖关系)。多个 teammate 线程并发
+    读写时，每次操作都先 _load() 从磁盘重读，保证看到一致视图（简单但有效
+    的并发一致性策略）。任务状态、谁在做什么、谁被谁阻塞都写在这块共享黑板
+    上，从而降低“多步骤任务中状态丢失/结论漂移”。它与 mailbox.py(消息)、
+    core/agent.py 的 recovery/记忆一起，构成简历说的“Shared State/Blackboard
+    共享任务状态、证据片段、中间结论和执行日志”。
+    """
+
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
         self._next_id = 1

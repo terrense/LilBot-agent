@@ -39,6 +39,19 @@ class DelegationPlan:
     probes: list[DelegationProbe]
 
 
+# ============================================================
+# 【简历·1 Plan-and-Execute 的 Planner】
+# 这段 System Prompt + parse_semantic_delegation_plan() 就是“规划器”：
+# 让 LLM 判断一个复杂任务是否要拆成多个可并行的子步骤(probes)，并输出
+# 结构化 JSON 计划（每个 probe = 一个 agent_type + 一段子任务 brief +
+# 超时）。相当于把任务分解成“多步计划 / 近似 DAG”，再由 Executor(主循环)
+# 逐个派发给 Specialist 子代理执行。
+# 注意：模块顶部 docstring 说明——关键词启发式(plan_auto_delegation 那套
+# CODE_ACTION_TERMS 等)已被“动态 Agent 工具描述”取代，现在主要保留的是
+# 这条“语义规划”路径（由 plan_delegation 工具按需调用）。
+# 面试可讲：从“关键词硬匹配触发拆分”演进到“让模型看实时 agent 描述自主
+# 决定拆分”，是一次把规则驱动改成模型驱动、并降低维护成本的架构迭代。
+# ============================================================
 SEMANTIC_DELEGATION_SYSTEM_PROMPT = """You are LilBot's delegation planner.
 
 Decide whether the parent agent should launch subagents before answering.

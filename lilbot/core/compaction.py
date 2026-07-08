@@ -357,6 +357,19 @@ def auto_compact(
 
     Returns a CompactResult with the rebuilt message list, or None when no
     compaction was needed or possible.
+
+    【简历·4 上下文管理｜两层压缩，是“Token 消耗降低 50%+”的主引擎】
+    触发方式有两种（见 agent.py）：接近上下文窗口时“主动压缩”，以及真的超长
+    报错时“被动压缩后重试”。压缩分两层，先便宜后昂贵：
+      · Layer 1 本地裁剪(microcompact)：把“保留尾部”之前的旧工具结果正文清空
+        成占位符(prune_tool_results)。不调用 LLM、保持消息结构不变，因此服务端
+        prefix 缓存能存活；若裁剪后就已回到预算内，直接返回，method="prune"。
+      · Layer 2 LLM 摘要：裁剪还不够时，才让模型把更早的前缀总结成一段结构化
+        handoff(SUMMARY_INSTRUCTION 的 9 段)，只保留最近若干条原文尾巴
+        (compute_keep_start，且绝不拆散 tool_calls/tool 配对)。
+    另有三重工程护栏：摘要失败按指数退避重试(_summarize_with_retry)、连续失败
+    则熔断降级(CompactCircuitBreaker)、并把最近读过的文件/技能/工具清单作为
+    RecoveryState 附在摘要后，避免模型“压缩后失忆”。
     """
     if not messages:
         return None
