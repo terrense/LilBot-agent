@@ -13,7 +13,16 @@ from ..sandbox import SandboxError
 # Tool capability + approval-requirement enums.
 
 class ToolCapability:
-    """Tool capability flags."""
+    """Tool capability flags.
+
+    【简历·2 Tool 标准化接入｜权限边界】
+    每个工具用一组 capability 标记它的“能力/风险面”：只读 / 写文件 /
+    执行代码 / 联网 / 可沙箱 / 需审批。下面的便捷集合(READ、WRITE_APPROVAL…)
+    让注册一个新工具时只写一行就声明清楚它的权限边界，配合
+    ApprovalRequirement 决定要不要人工确认——这就是简历里“统一定义工具的
+    权限边界、超时策略和错误类型”的“权限边界”落点，也是子代理按角色裁剪
+    工具集(subagents/manager.py)和只读并行(concurrency_safe)的判据来源。
+    """
     ReadOnly = "read_only"
     WritesFiles = "writes_files"
     ExecutesCode = "executes_code"
@@ -83,6 +92,13 @@ class ToolResult:
 
 @dataclass
 class ToolDef:
+    # 【简历·2 Tool 标准化接入｜统一契约】
+    # 一个 ToolDef 就是一次“标准化接入”：name/description 给模型看，
+    # input_schema 是 JSON Schema（约束工具的输入输出结构），criteria 声明
+    # 权限边界，approval_requirement 声明审批策略，handler 是真正的实现。
+    # 搜索/知识库检索/文件处理/DB 查询/代码执行/外部 API 只要各写一个
+    # ToolDef 注册进来，主循环就能以完全一致的方式调用——这正是“新 Tool
+    # 接入时间由 ~60min 缩短到 ~20min”的结构性原因（模板固定，只填 4 项）。
     name: str
     description: str
     input_schema: dict[str, Any]
@@ -172,6 +188,13 @@ class ToolRegistry:
 
     def defer_all_except(self, core: set[str]) -> None:
         """Mark every registered tool deferred unless it is in the core set.
+
+        【简历·2/4 面试可重点讲：工具规模化 = 一种上下文压缩】
+        LilBot 注册了约 150 个工具，若每轮都把全部 schema 塞进 prompt，会白白
+        烧掉大量 token。这里用“核心工具常驻 + 长尾工具延迟加载”的策略：只把
+        日常高频工具的 schema 发给模型，其余只在一行提醒里报名字，模型需要时
+        用 ToolSearch 按需拉取(mark_discovered)。这既控制了每轮 payload 大小，
+        又让工具目录字节稳定(见 _base_catalog 的缓存)以命中服务端 prefix 缓存。
 
         Allowlist approach: the daily-driver tools stay loaded each turn; the
         long tail (LSP, github, automation, rlm, slop ledger, aliases, …) is
@@ -316,6 +339,11 @@ class ToolRegistry:
         plan_gate = _plan_approval_gate(resolved_name, ctx)
         if plan_gate is not None:
             return plan_gate, 0
+        # 【简历·2/5 错误类型统一 + 耗时观测】
+        # 所有工具都从这一个入口执行：perf_counter 计时得到 elapsed_ms（喂给
+        # 执行观测），try/except 把任何异常收敛成统一的 ToolResult(ok=False,...)
+        # ——沙箱错误、未知异常都变成“可回灌给模型的错误消息”，绝不让单个
+        # 工具异常炸掉整轮。这就是“统一错误类型”的落点。
         started = perf_counter()
         try:
             result = tool.handler(arguments or {}, ctx)

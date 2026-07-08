@@ -205,6 +205,18 @@ BLOCKERS: blockers, or None.
 """
 
 
+# ============================================================
+# 【简历·3 多 Agent 协作｜Specialist Agents 角色库】
+# 这张表就是“Supervisor + Specialist”里的一组专家角色定义：
+# explore(检索/只读探查)、researcher(联网调研)、review(代码审查)、
+# implementer(改代码)、verifier(只跑验证不改代码)、plan/writer/critic…
+# 每个 AgentDefinition 绑定了：能力边界(writes)、可用工具白名单
+# (allowed_tools)、禁用工具(disallowed_tools)、系统提示(system_hint)。
+# Supervisor(主 Agent)按任务把子任务派给对应角色 —— 检索 Agent、分析
+# Agent、执行 Agent、验证 Agent 各司其职，正是简历描述的分工结构。
+# 关键安全点：子代理的工具集是“角色白名单 ∩ 全局禁用表”，从源头上做到
+# 最小权限(见 _tool_schemas_for_task / _execute_tool_call 的多道 gate)。
+# ============================================================
 DEFAULT_AGENT_TYPES = [
     AgentDefinition(
         "general",
@@ -1250,6 +1262,13 @@ class SubAgentManager:
         self.tasks_path.write_text(json.dumps(records, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
     def _append_transcript(self, task: SubAgentTask, event: str, data: dict[str, Any]) -> None:
+        # 【简历·5 执行观测｜落盘的 JSONL 执行轨迹】
+        # 子代理生命周期里的每一步(queued/running/provider_turn/tool_started/
+        # tool_finished/completed/failed/worktree_*…)都追加一行 JSON 到
+        # subagent-transcripts/{id}.jsonl，带时间戳、内容、工具入参/输出、usage。
+        # 这就是可回放、可分页拉取(transcript())、可做 bad case 复盘的执行日志——
+        # 简历“记录 Plan/Tool Call/Observation/错误类型/工具耗时/Token 消耗”的
+        # 持久化落点。progress_event_count/last_event 同时驱动实时看板。
         if self.transcripts_dir is None:
             return
         path = Path(task.transcript_path) if task.transcript_path else self.transcripts_dir / f"{task.id}.jsonl"

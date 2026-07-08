@@ -39,6 +39,17 @@ class MailboxMessage:
 
 
 class Mailbox:
+    """【简历·3 多 Agent 协作｜Shared State 之二：消息回流】
+
+    团队内 Agent 之间的“信箱”：每个 agent 一个 {id}.json 收件箱，用一个伴生
+    的 .lock 文件(O_EXCL 独占创建 + 重试 + 10s 陈旧锁回收)做跨线程/跨进程的
+    互斥写，避免并发追加互相覆盖(Windows 上还额外兼容 PermissionError 重试)。
+    teammate 用 send_message 往 lead 的信箱写进度，lead 在主循环每次迭代前
+    drain_lead_mailbox 取走这些消息注入上下文(见 core/agent.py 的
+    _drain_team_notifications) —— 这就是“teammate 进度不阻塞、不轮询地回流给
+    Supervisor”的机制，让长任务里状态不丢。
+    """
+
     def __init__(self, base_dir: str | Path) -> None:
         self._base_dir = Path(base_dir)
         self._base_dir.mkdir(parents=True, exist_ok=True)

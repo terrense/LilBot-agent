@@ -173,6 +173,18 @@ def _companion_files(path: Path) -> list[Path]:
 
 
 class SkillRegistry:
+    """【简历·2 Skill 标准化接入｜Skill Registry】
+
+    与 Tool Registry 对称：Skill 是“可复用的 SOP / 提示词模板 + 参数 + 允许
+    使用的工具集(allowed_tools) + 期望模型(model)”。每个 Skill 就是一个带
+    YAML frontmatter 的 Markdown（_parse_frontmatter 解析元数据，body 是正文
+    模板），支持 {{args}}/$ARGUMENTS/命名参数(argument_names)渲染。
+    reload() 会同时加载内置(bundled)与项目级(.lilbot/skills)两处，形成
+    “内置 + 项目自定义”的技能库。这让沉淀的最佳实践(如代码审查、写作套路)
+    像工具一样被标准化装配、按需调用，是简历“Skill Registry / Skill 示例”
+    的实现主体。
+    """
+
     def __init__(self, state_dir: Path):
         self.state_dir = state_dir
         self.project_dir = state_dir / "skills"

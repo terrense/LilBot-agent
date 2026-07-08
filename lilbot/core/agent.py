@@ -92,12 +92,27 @@ class Agent:
         self.cycles = CycleArchive(state_dir) if state_dir else None
 
     def run_turn(self, user_text: str) -> Iterator[object]:
+        # ============================================================
+        # 【简历·1 Agent 执行框架｜ReAct 主循环】
+        # 这是整个 Runtime 的心脏：一次用户输入 -> 一轮或多轮
+        # “思考(LLM) -> 行动(工具) -> 观察(工具结果)”的 ReAct 循环。
+        #   · 入口先做三件“回合级”准备：压缩上下文(_maybe_compact)、
+        #     召回相关记忆(_maybe_recall)、触发生命周期钩子(turn_start)。
+        #   · 下面的 while 循环就是 ReAct 的 Reason–Act–Observe：
+        #       1) _stream_turn  -> 让模型思考并流式产出文本/工具调用(Reason)
+        #       2) 若无 tool_calls -> 收尾返回最终答案(纯对话，单 Agent 直答)
+        #       3) 若有 tool_calls -> 执行工具(Act) 并把结果回灌进 messages(Observe)
+        #   · max_steps 是“工具步数预算”，是复杂任务不失控的护栏；超预算后
+        #     由 _synthesize_after_step_limit 用已有证据强制收敛出答案。
+        # 简单任务：模型第一轮就不产工具调用 -> 单 Agent 直接响应。
+        # 复杂任务：模型多轮调用工具/子代理，逐步执行并校验中间结果。
+        # ============================================================
         self._reload_hooks_if_changed()
         self.messages.append({"role": "user", "content": user_text})
         self._turn_count += 1
         self._edited_this_turn = []
-        self._maybe_compact()
-        self._maybe_recall(user_text)
+        self._maybe_compact()      # 回合开始先按 token 预算压缩历史（见 compaction.py）
+        self._maybe_recall(user_text)  # 用 LLM 从长期记忆里挑与本次请求相关的条目
         if self.hooks.has_hooks():
             self.hooks.run("turn_start", HookContext(event="turn_start", message=user_text))
         steps = self._auto_delegate(user_text)
@@ -117,6 +132,11 @@ class Agent:
                 yield TurnFinished(steps, dict(self.usage))
                 return
 
+            # --- ReAct 的 Act + Observe 阶段 ---
+            # 把本轮工具调用切成若干 batch：连续的“只读”工具会并到同一批里
+            # 并行执行（_run_calls_parallel），写文件/执行代码/需审批的工具则单独
+            # 成批串行，保证副作用可控。这一步既是“调用工具”，也是把工具结果
+            # 以 role=tool 消息写回 messages，构成下一轮模型能“观察”到的证据。
             remaining_steps = self.config.max_steps - steps
             calls_to_run = turn.tool_calls[:remaining_steps]
             self.messages.append(self._assistant_tool_message(
@@ -134,7 +154,10 @@ class Agent:
                     results = [self._run_one_call(batch[0])]
                 for call, (result, elapsed_ms) in zip(batch, results):
                     steps += 1
+                    # 【简历·5 执行观测】ToolFinished 携带 ok/耗时(elapsed_ms)/metadata，
+                    # 上层 TUI 与会话持久化据此记录 Tool Call、Observation、工具耗时。
                     yield ToolFinished(call.name, result.ok, result.output, elapsed_ms, result.metadata)
+                    # Observe：把工具输出作为 role=tool 消息回灌，成为下一轮模型的证据。
                     self.messages.append({
                         "role": "tool",
                         "tool_call_id": call.call_id,
@@ -423,6 +446,12 @@ class Agent:
 
         Order is preserved: a concurrency-safe call extends the current safe
         batch; anything else starts its own singleton batch.
+
+        【简历·1 并行执行】这是“Executor 按状态逐步执行”的性能优化点：
+        只读工具(read_file/grep/git_* 等)之间没有副作用，可安全并行，
+        因此把相邻只读调用合批交给线程池(_run_calls_parallel)一起跑；
+        一旦遇到写文件/执行代码/需审批的工具，就单独成批、保持串行顺序，
+        避免副作用交叉。是否“只读安全”由 ToolDef.concurrency_safe 判定。
         """
         batches: list[list[ToolCall]] = []
         for call in calls:

@@ -43,6 +43,16 @@ class StreamEvent:
     final: "ProviderTurn | None" = None
 
 
+# 【简历·5 执行观测与评估闭环｜可观测事件流】
+# 主循环(agent.py::run_turn)用 yield 把下面这些事件逐个抛给上层(TUI/持久化)。
+# 它们就是简历里“Plan / Tool Call / Observation / Final Answer / 工具耗时 /
+# Token 消耗”的结构化载体：
+#   · ToolStarted   -> 记录一次工具调用的开始(名字+入参)  = Tool Call
+#   · ToolFinished  -> 成功与否 ok、输出 output、耗时 elapsed_ms、元数据
+#                      = Observation + 工具耗时 + 错误类型
+#   · TurnFinished  -> 本回合总步数 steps 与累计 usage(Token 消耗)
+# 子代理侧则把同类事件持久化成 JSONL 轨迹(subagents/manager.py::_append_transcript)，
+# 形成可回放、可做 bad case 分析的执行日志链路。
 @dataclass
 class ToolStarted:
     name: str
@@ -55,11 +65,11 @@ class ToolFinished:
     name: str
     ok: bool
     output: str
-    elapsed_ms: int
+    elapsed_ms: int  # 工具耗时（execute() 用 perf_counter 计得），用于观测与优化
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class TurnFinished:
-    steps: int
-    usage: dict[str, int] = field(default_factory=dict)
+    steps: int  # 本回合实际执行的工具步数
+    usage: dict[str, int] = field(default_factory=dict)  # 累计 token 用量
