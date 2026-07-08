@@ -53,3 +53,40 @@
 3. **token 计数改用 API usage 回报**（#7）：LilBot 已在累计 usage，只差把 `estimate_tokens` 的触发判断换成"上次响应回报的真实上下文 + 估算兜底"。
 4. **hook 结构化输出协议 + Stop hook**（#16）：让 hook 能改写工具入参、注入上下文、阻止停止——LilBot hooks 引擎 109 行，加这个协议成本很低。
 5. **isConcurrencySafe 下沉到输入级**（#3）：至少对 shell 类工具按命令内容判定，能显著扩大可并行面。
+
+## 复刻进度（持续更新）
+
+原则：**凡是弱于 CC 且不依赖 Claude 模型本身的项，按价值顺序逐个模仿。** 当前测试 280 通过（起点 241）。
+
+### ✅ 已复刻（可移植差距已闭合）
+
+| 维度 | 复刻内容 | 落点 | 测试 |
+|---|---|---|---|
+| #6 上下文压缩 | 八条压缩路径中可移植的 27/30（L0 工具结果预算三态机、缓存冷热感知 prune、截头重试、`<analysis>` 剥离、前缀缓存共享摘要、partial from/up_to、统一 cleanup…） | `compaction.py`、`tool_budget.py` | `test_compaction_cc.py`（20） |
+| #7 token 计数 | 优先用 Provider 回报的真实 `prompt_tokens`，估算兜底；摘要后清陈旧计数 | `agent.py::_add_usage/_post_compact_cleanup` | 同上 |
+| #11 记忆召回 | 召回改并行预取（daemon 线程，工具执行后消费）+ 抽取后台化 | `agent.py::SideQueryPrefetch` | `test_recall_prefetch.py`（5） |
+| #3 只读并行分批 | `isConcurrencySafe` 下沉到**输入级**：`bash("ls")` 可并行、`bash("rm")` 不行，复用 execpolicy 只读白名单 | `registry.py::ToolDef.is_concurrency_safe`、`builtin.py::_read_only_command_safe` | `test_cc_parity_batch2.py`（3） |
+| #5 工具规模化 | `searchHint` 字段 + 检索加权，提高延迟工具召回 | `registry.py::search_deferred` | 同上（1） |
+| #16 Hooks | 结构化 JSON 输出协议（decision/updatedInput/additionalContext/continue）+ **Stop hook**（可阻止模型停止并强制续跑，带死亡螺旋熔断）+ user_prompt_submit 事件 | `hooks/engine.py`、`agent.py::_run_stop_hook` | 同上（5） |
+| #8/#1 溢出恢复 | 有序**有界**反应式恢复链（compact→retry，上限 2 次）+ **transition 观测枚举**（`_recovery_transitions`，可测试可观测） | `agent.py::_stream_turn/_record_transition` | 同上 |
+| #23 判错结构化 | `ProviderError.is_overflow`/`status_code`（413 或错误体文本）——结构化优先、文本兜底 | `llm/providers.py::_is_overflow_error` | 同上 |
+| #9 输出截断恢复 | `finish_reason=="length"` 时注入"从断点续写、不道歉不复述"并续跑，上限 3 次 | `agent.py` run_turn + `events.py::ProviderTurn.finish_reason` | 同上（2） |
+| #10 配对不变量 | **本就满足**：`registry.execute` 把任何异常收敛成 `ToolResult`，未执行的 tool_calls 不写入 assistant 消息，故无孤儿 tool_result | `tools/registry.py::execute` | `test_agent_loop.py` |
+
+### 🔜 待复刻（按价值顺序，portable）
+
+1. **#4 工具契约**：`validateInput`（告诉模型为何失败）与 `checkPermissions`（问用户）分离、`contextModifier`（工具后函数式改上下文）、fail-closed 默认值 builder。
+2. **#17 缓存纪律**："发 API 的消息对象永不变异，观察用克隆"上升为不变量 + 缓存断裂归因计数。
+3. **#15 权限体系**：规则按来源分层（用户/项目/策略）、`Tool(pattern)` 统一语法、被遮蔽规则检测、（可选）小模型分类器（任意模型，非 Claude 专属）。
+4. **#12 会话级记忆**：让子代理用 Edit 工具增量维护一份 10 段"活文档"替代每次全文重写。
+5. **#18 可观测性**：命名空间化结构化事件日志 + 类型化元数据。
+6. **#20 Skills 预取并行** / **#14 Task 工具族粒度** / **#19·#24 VCR 录放测试基建**。
+7. **#2 流式与工具执行重叠**（StreamingToolExecutor，工程量最大，独立里程碑）。
+
+### ⛔ 不复刻（依赖 Claude 模型 / Anthropic 私有 API，已剔除）
+
+- #6 的 cache_edits 服务端原位删除、API 原生 context_management（Anthropic 请求协议）
+- #10 的跨模型 fallback + 剥离 thinking 签名（LilBot 单 Provider，且 thinking 签名是 Anthropic 专属）
+- #22 feature() 编译期门控、#23 UI 自渲染（非架构项，价值低）
+
+详见 `docs/CC_COMPACTION_REPLICATION_STATUS.md`（压缩专项 34 项逐条）。
