@@ -4,6 +4,23 @@
 
 ---
 
+## 2026-07-08 —— 上下文压缩机制全面补齐
+
+测试数 246 → 266，无回归。系统性对标业界成熟实现，把可移植的压缩要素全部补齐（可移植部分覆盖率约 90%，详见 `docs/CC_COMPACTION_REPLICATION_STATUS.md`）。
+
+- **L0 工具结果预算（缓存安全卸载）**：新增 `tool_budget.py` 的 frozen/fresh/replaced 三态状态机。已原文发给模型（进了缓存前缀）的工具结果永不改写，只把本会话首见的超大结果按大小替换成预览——既卸载空间又不打掉前缀缓存。在压缩之前运行。文件：`lilbot/core/tool_budget.py`、`lilbot/core/agent.py`（`_apply_tool_budget`）。
+- **真实 token 触发**：压缩触发判断优先采用 Provider 回报的真实 `prompt_tokens`，字符估算仅作兜底。文件：`lilbot/core/agent.py`（`_add_usage` → `_last_input_tokens`）。
+- **缓存冷热感知 prune**：距上次模型调用超过缓存 TTL（5min）时缓存已冷，清理工具正文"免费"（前缀反正会重算），可在阈值下主动清；冷缓存路径只许 prune 不许付费摘要。文件：`lilbot/core/compaction.py`（`CACHE_TTL_SECONDS`、`cache_cold`）、`agent.py`（`_cache_is_cold`）。
+- **摘要请求自溢出的截头重试**：按 API 轮次分组（不拆 `tool_calls`/`tool` 配对），摘要请求本身过长时丢最旧轮重试，marker 幂等防死循环。文件：`compaction.py`（`group_messages_by_round`、`truncate_head_for_retry`）。
+- **`<analysis>` 草稿区 + NO_TOOLS 双保险**：摘要提示词让模型先写可剥离的思考草稿再产出 `<summary>`，开头结尾各一遍禁工具。`format_compact_summary` 入库前剥离草稿。文件：`compaction.py`。
+- **前缀缓存共享摘要**：摘要调用改为复用主对话的 system+prefix 消息对象 + 尾部指令，命中 Provider 前缀缓存，而非发全新 2 消息小对话（原来 100% cache miss）。文件：`agent.py`（`_message_summarizer`）。
+- **部分压缩（from/up_to）**：用户可选一个 pivot，`up_to` 压缩其前（保留近段）、`from` 保留旧上下文而压缩近段。文件：`compaction.py`（`partial_compact`）、`agent.py`。
+- **压缩后统一清理**：摘要重写前缀后清除陈旧的真实 token 计数与一次性诊断提示；有意保留已发现的延迟工具（免得再 ToolSearch）。恢复附件加总 token 预算。文件：`agent.py`（`_post_compact_cleanup`）、`compaction.py`（`RECOVERY_TOTAL_TOKENS`）。
+
+详见 `docs/CC_COMPACTION_REPLICATION_STATUS.md`（逐条复刻清单）与 `docs/CC_DEEPDIVE_COMPACTION_PIPELINE.md`（机制深挖）。
+
+---
+
 ## 2026-07-03 —— 短期记忆压缩强化
 
 测试数 257 → 261，无回归。对照两套成熟实现全面补齐上下文压缩短板。

@@ -2248,6 +2248,21 @@ def _handle_read(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     return _retrieve_tool_result(args, ctx)
 
 
+def _read_only_command_safe(args: dict[str, Any]) -> bool:
+    """Per-input concurrency predicate for shell tools (CC's isConcurrencySafe).
+
+    A shell call may join a parallel read-only batch only when it is a known
+    read-only command (`git status`, `ls`, `grep`, …) with no shell operators —
+    reuses execpolicy's arity-aware allow matcher. Backgrounded commands and
+    anything mutating or compound stay serial.
+    """
+    if args.get("background"):
+        return False
+    from ..sandbox.execpolicy import matches_allow_rule  # local import avoids cycle
+    command = str(args.get("command") or "")
+    return bool(command) and matches_allow_rule(command)
+
+
 def _bash(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     command = args["command"]
     if bool(args.get("background", False)):
@@ -3781,7 +3796,7 @@ def register_builtins(registry: ToolRegistry) -> None:
     registry.register(ToolDef("bash", "Run a shell command in the workspace after permission approval.", _schema({
         "command": _string("Shell command."),
         "timeout": _integer("Timeout in seconds.", 30),
-    }, ["command"]), _bash))
+    }, ["command"]), _bash, concurrency_check=_read_only_command_safe))
     registry.register(ToolDef("glob", "Find files by glob pattern.", _schema({
         "pattern": _string("Glob pattern, for example **/*.py."),
         "path": _string("Base path relative to workspace."),
@@ -3897,7 +3912,7 @@ def register_builtins(registry: ToolRegistry) -> None:
         "command": _string("Shell command."),
         "timeout": _integer("Timeout in seconds.", 30),
         "background": _bool("Start in background and return task_id.", False),
-    }, ["command"]), _bash))
+    }, ["command"]), _bash, concurrency_check=_read_only_command_safe))
     registry.register(ToolDef("exec_shell_wait", "Wait for a background shell task.", _schema({
         "task_id": _string("Background shell task id."),
         "timeout": _integer("Wait timeout in seconds.", 1),

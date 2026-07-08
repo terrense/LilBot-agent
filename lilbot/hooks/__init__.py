@@ -14,13 +14,14 @@ notification.
 """
 from __future__ import annotations
 
-from .engine import HookEngine, HookNotification
+from .engine import HookEngine, HookNotification, PreToolOutcome
 from .loader import load_hooks
 from .models import Hook, HookAction, HookContext, HookMatch, HookResult
 
 __all__ = [
     "HookEngine",
     "HookNotification",
+    "PreToolOutcome",
     "load_hooks",
     "Hook",
     "HookAction",

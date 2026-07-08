@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -24,6 +25,10 @@ class MemoryEntry:
 class MemoryStore:
     def __init__(self, state_dir: Path):
         self.path = state_dir / "memory.jsonl"
+        # Mutations are read-modify-write over the whole JSONL file; the lock
+        # keeps a background extraction thread from racing a main-thread
+        # memory_save/memory_delete and losing entries.
+        self._lock = threading.Lock()
 
     def _read(self) -> list[MemoryEntry]:
         entries: list[MemoryEntry] = []
@@ -53,17 +58,19 @@ class MemoryStore:
             scope=scope.strip() or "project",
             created_at=time.time(),
         )
-        entries = self._read()
-        entries.append(entry)
-        self._write(entries)
+        with self._lock:
+            entries = self._read()
+            entries.append(entry)
+            self._write(entries)
         return entry
 
     def delete(self, memory_id_or_name: str) -> bool:
-        entries = self._read()
-        kept = [e for e in entries if e.id != memory_id_or_name and e.name != memory_id_or_name]
-        changed = len(kept) != len(entries)
-        if changed:
-            self._write(kept)
+        with self._lock:
+            entries = self._read()
+            kept = [e for e in entries if e.id != memory_id_or_name and e.name != memory_id_or_name]
+            changed = len(kept) != len(entries)
+            if changed:
+                self._write(kept)
         return changed
 
     def list(self) -> list[MemoryEntry]:

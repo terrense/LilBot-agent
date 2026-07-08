@@ -110,6 +110,15 @@ class ToolDef:
     # the full schema on demand via the ToolSearch tool. This keeps the per-turn
     # tool payload small even though LilBot registers ~150 tools.
     should_defer: bool = False
+    # Optional per-INPUT concurrency predicate (CC's isConcurrencySafe(input)).
+    # When set, the agent loop calls it with the tool arguments to decide whether
+    # THIS call can join a parallel read-only batch — e.g. `bash("ls")` is safe
+    # but `bash("rm -rf x")` is not, even though the tool is the same. Overrides
+    # the static capability-based `concurrency_safe` when present.
+    concurrency_check: Callable[[dict[str, Any]], bool] | None = None
+    # Short capability phrase for ToolSearch keyword matching (CC's searchHint):
+    # 3-10 words, terms NOT already in the tool name, so deferred tools surface.
+    search_hint: str = ""
 
     @property
     def concurrency_safe(self) -> bool:
@@ -125,6 +134,20 @@ class ToolDef:
             ToolCapability.RequiresApproval,
         }
         return ToolCapability.ReadOnly in self.criteria and not (self.criteria & unsafe)
+
+    def is_concurrency_safe(self, args: dict[str, Any] | None = None) -> bool:
+        """Per-input concurrency safety (CC parity).
+
+        Prefer the per-input predicate when the tool defines one; a predicate
+        that raises is treated as not-safe (fail-closed, like CC's try/catch).
+        Falls back to the static capability-based property otherwise.
+        """
+        if self.concurrency_check is not None:
+            try:
+                return bool(self.concurrency_check(args or {}))
+            except Exception:
+                return False
+        return self.concurrency_safe
 
 
 @dataclass
@@ -252,10 +275,13 @@ class ToolRegistry:
         for tool in self._tools.values():
             if not tool.should_defer or tool.name in self._discovered:
                 continue
-            blob = f"{tool.name} {tool.description}".lower()
+            blob = f"{tool.name} {tool.description} {tool.search_hint}".lower()
             score = sum(blob.count(term) for term in terms)
             # Name hits weigh more than description hits.
             score += sum(3 for term in terms if term in tool.name.lower())
+            # searchHint hits weigh more too — it exists precisely to surface a
+            # deferred tool via terms not in its name (CC's searchHint intent).
+            score += sum(2 for term in terms if tool.search_hint and term in tool.search_hint.lower())
             if score:
                 scored.append((score, tool))
         scored.sort(key=lambda item: (item[0], item[1].name), reverse=True)

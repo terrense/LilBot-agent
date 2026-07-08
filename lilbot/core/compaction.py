@@ -60,6 +60,23 @@ RETRY_BASE_DELAY_S = 0.35
 # with the model's window; a manual /compact bypasses this scaled floor.
 SUMMARIZE_FLOOR_FRACTION = 0.02
 
+# --- CC-parity additions ----------------------------------------------------
+
+# Server prompt caches (Anthropic/DeepSeek/OpenAI) expire after ~5 minutes idle.
+# Past this gap the prefix is cold: clearing tool bodies is "free" because the
+# whole prefix will be re-tokenized regardless. Mirrors CC's time-based
+# microcompact (gapThresholdMinutes) — CC uses 60min tied to the 1h server TTL;
+# we use the conservative 5min floor common to OpenAI-compatible caches.
+CACHE_TTL_SECONDS = 300.0
+
+# Total recovery-attachment budget (tokens). CC caps post-compact file restore
+# at ~50k tokens / 5 files; we bound the whole attachment so the summary message
+# can't itself blow the window.
+RECOVERY_TOTAL_TOKENS = 12_000
+
+# Marker inserted where truncate_head_for_retry drops the oldest rounds.
+PTL_RETRY_MARKER = "[earlier conversation truncated so the summary request fits]"
+
 
 def estimate_tokens_text(text: str) -> int:
     return int(len(text) / _CHARS_PER_TOKEN) if text else 0
@@ -155,7 +172,14 @@ class RecoveryState:
             "## Note\nThe context above was reconstructed. For exact code, errors, or the "
             "user's original wording, re-read the source rather than guessing from the summary.\n"
         )
-        return "\n".join(sections)
+        attachment = "\n".join(sections)
+        # Total-token budget (CC caps post-compact restore at ~50k tokens): never
+        # let the recovery attachment itself grow the post-compact window without
+        # bound — trim from the end (tool list / note first).
+        if estimate_tokens_text(attachment) > RECOVERY_TOTAL_TOKENS:
+            budget_chars = int(RECOVERY_TOTAL_TOKENS * _CHARS_PER_TOKEN)
+            attachment = attachment[:budget_chars] + "\n… (recovery attachment truncated to fit budget)\n"
+        return attachment
 
 
 # --- tail selection ---------------------------------------------------------
@@ -249,20 +273,52 @@ def is_context_overflow_error(message: str) -> bool:
 
 SUMMARY_SYSTEM = "You are a conversation-summarizer. Output plain text only. Do not call any tools."
 
-SUMMARY_INSTRUCTION = """\
-Summarize the conversation below into a structured handoff. Cover, in order:
+# NO_TOOLS preamble (ported from CC prompt.ts): the cache-sharing summary fork
+# inherits the full tool schema set, and some models attempt a tool call despite
+# a weak trailer. A rejected tool call wastes the single summary turn, so we
+# forbid tools up front AND in the trailer.
+_NO_TOOLS_PREAMBLE = (
+    "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools — any tool call is "
+    "rejected and wastes this turn. You already have everything you need above.\n\n"
+)
+_NO_TOOLS_TRAILER = (
+    "\n\nREMINDER: plain text only — an <analysis> block followed by a <summary> "
+    "block. Do not call any tools."
+)
+
+SUMMARY_INSTRUCTION = _NO_TOOLS_PREAMBLE + """\
+Before the final summary, wrap your thinking in <analysis>...</analysis> to make
+sure you cover every point (this scratchpad is stripped before the summary is
+stored). Then wrap the summary itself in <summary>...</summary>.
+
+The <summary> must cover, in order:
 
 1. Primary request and intent — what the user is ultimately trying to do
 2. Key technical concepts discussed
 3. Files and code — which files, and any critical snippets to preserve
-4. Errors and fixes
+4. Errors and fixes — and any user corrections, in the user's own words
 5. Problem-solving approach
 6. All user messages — preserve the user's own words, do not paraphrase
 7. Pending tasks — what is not yet done
 8. Current work — most recent activity, in detail
-9. Next step — what to do next
+9. Next step — the next action, with a verbatim quote of where you left off""" + _NO_TOOLS_TRAILER
 
-Output the summary as plain text. Do not call tools."""
+
+def format_compact_summary(summary: str) -> str:
+    """Strip the ``<analysis>`` scratchpad and unwrap ``<summary>`` tags.
+
+    Faithful to CC's formatCompactSummary: the analysis block improves summary
+    quality but has no informational value once written, so it never enters
+    context. Tolerant of models that ignore the tags entirely (returns the text
+    unchanged), so the offline provider and simple models still work.
+    """
+    import re
+
+    text = re.sub(r"<analysis>[\s\S]*?</analysis>", "", summary or "").strip()
+    m = re.search(r"<summary>([\s\S]*?)</summary>", text)
+    if m:
+        text = m.group(1).strip()
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 def _render_message_for_summary(msg: dict[str, Any]) -> str:
@@ -281,6 +337,67 @@ def _render_message_for_summary(msg: dict[str, Any]) -> str:
 
 def render_prefix_for_summary(prefix: list[dict[str, Any]]) -> str:
     return "\n".join(_render_message_for_summary(m) for m in prefix if _render_message_for_summary(m))
+
+
+# --- API-round grouping + head truncation (summary self-overflow) -----------
+
+def group_messages_by_round(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Group messages into API rounds: one group per assistant response.
+
+    Port of CC's groupMessagesByApiRound. A boundary fires when a new assistant
+    message begins and the current group is non-empty; ``tool`` results attach to
+    the assistant round that produced them (they follow it). The leading system /
+    user preamble forms group 0. Keeping tool_calls together with their tool
+    results means a whole round can be dropped without orphaning a tool result.
+    """
+    groups: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for msg in messages:
+        if msg.get("role") == "assistant" and current:
+            groups.append(current)
+            current = [msg]
+        else:
+            current.append(msg)
+    if current:
+        groups.append(current)
+    return groups
+
+
+def truncate_head_for_retry(
+    messages: list[dict[str, Any]],
+    *,
+    keep_system: bool = True,
+    drop_fraction: float = 0.2,
+) -> list[dict[str, Any]] | None:
+    """Drop the oldest API rounds so an over-long summary request fits.
+
+    Port of CC's truncateHeadForPTLRetry (the "dumb but safe" fallback): drop
+    ~``drop_fraction`` of the oldest rounds, always keep the system message and at
+    least one round, and re-insert a marker so a follow-up retry is idempotent
+    (the marker is stripped before regrouping). Returns None when there is
+    nothing safe to drop.
+    """
+    if not messages:
+        return None
+    system: list[dict[str, Any]] = []
+    body = messages
+    if keep_system and messages[0].get("role") == "system":
+        system = [messages[0]]
+        body = messages[1:]
+
+    # Strip our own marker from a prior retry so it doesn't become its own round
+    # and stall the 20% fallback.
+    if body and body[0].get("role") == "user" and body[0].get("content") == PTL_RETRY_MARKER:
+        body = body[1:]
+
+    groups = group_messages_by_round(body)
+    if len(groups) < 2:
+        return None
+    drop = max(1, int(len(groups) * drop_fraction))
+    drop = min(drop, len(groups) - 1)  # keep at least one round
+    kept = [m for g in groups[drop:] for m in g]
+    marker = {"role": "user", "content": PTL_RETRY_MARKER}
+    return [*system, marker, *kept]
 
 
 # --- circuit breaker --------------------------------------------------------
@@ -315,8 +432,15 @@ class CompactResult:
     method: str = "summarize"
 
 
-# A summarizer takes (system_prompt, prefix_text) and returns the summary text.
+# A text summarizer takes (system_prompt, prefix_text) and returns summary text.
 Summarizer = Callable[[str, str], str]
+
+# A message summarizer takes (system_msg, to_summarize_msgs) and returns summary
+# text. It exists so the Agent can send the SAME message objects the main loop
+# used (system + prefix) plus a trailing instruction, reusing the provider's
+# prompt-cache prefix instead of paying a 100% cache-miss on a fresh 2-message
+# conversation. Mirrors CC's fork-based prompt-cache-sharing summary.
+MessageSummarizer = Callable[[dict[str, Any], list[dict[str, Any]]], str]
 
 
 def _summarize_with_retry(
@@ -343,6 +467,37 @@ def _summarize_with_retry(
     return ""
 
 
+def _summarize_messages_with_retry(
+    summarizer: MessageSummarizer,
+    system: dict[str, Any],
+    to_summarize: list[dict[str, Any]],
+    max_retries: int,
+    base_delay: float,
+) -> str:
+    """Prompt-cache-sharing summary with backoff + head-truncation on overflow.
+
+    On a context-overflow error from the summary call itself (the request can be
+    almost the whole window), drop the oldest rounds (truncate_head_for_retry)
+    and retry — CC's CC-1180 fix. Returns "" when every attempt fails.
+    """
+    msgs = to_summarize
+    for attempt in range(max(1, max_retries)):
+        if attempt > 0 and base_delay > 0:
+            time.sleep(base_delay * (2 ** (attempt - 1)))
+        try:
+            out = summarizer(system, msgs)
+        except Exception as exc:
+            if is_context_overflow_error(str(exc)):
+                truncated = truncate_head_for_retry([system, *msgs])
+                if truncated is not None:
+                    msgs = truncated[1:]  # drop the system we prepended
+                    continue
+            continue
+        if out and out.strip():
+            return out
+    return ""
+
+
 def auto_compact(
     messages: list[dict[str, Any]],
     summarizer: Summarizer,
@@ -352,6 +507,9 @@ def auto_compact(
     recovery: RecoveryState | None = None,
     tool_names: list[str] | None = None,
     breaker: CompactCircuitBreaker | None = None,
+    actual_tokens: int | None = None,
+    cache_cold: bool = False,
+    message_summarizer: MessageSummarizer | None = None,
 ) -> CompactResult | None:
     """Compact messages in place-by-return. messages[0] (system) is preserved.
 
@@ -376,12 +534,23 @@ def auto_compact(
     system = messages[0]
     body = messages[1:]
     before = estimate_tokens(messages)
+    # Prefer the provider's real reported prompt-token count for the trigger
+    # decision; fall back to the char/4 estimate. CC's lesson: trust API usage,
+    # estimate only as a backstop.
+    trigger_tokens = actual_tokens if (actual_tokens and actual_tokens > 0) else before
+    threshold = compute_threshold(context_window)
+    over_threshold = trigger_tokens >= threshold
 
     if not manual:
-        if before < compute_threshold(context_window):
+        # Below threshold we normally do nothing — unless the cache is cold, in
+        # which case a prune is "free" (the prefix is re-tokenized anyway) and
+        # worth doing proactively. Cold-cache passes may ONLY prune, never pay
+        # for an LLM summary below threshold.
+        if not over_threshold and not cache_cold:
             return None
         if breaker is not None and breaker.is_open():
             return None
+    prune_only = (not manual) and (not over_threshold) and cache_cold
 
     keep_start = compute_keep_start(body)
 
@@ -395,9 +564,10 @@ def auto_compact(
         pruned_chars = saved
         candidate = [system, *pruned_body]
         after_prune = estimate_tokens(candidate)
-        # In auto mode, stop here when pruning cleared the pressure. Manual
-        # /compact always proceeds to a summary so the user gets a real handoff.
-        if not manual and after_prune < compute_threshold(context_window):
+        # In auto mode, stop here when pruning cleared the pressure (or when the
+        # cache is cold and we're only allowed to prune). Manual /compact always
+        # proceeds to a summary so the user gets a real handoff.
+        if not manual and (prune_only or after_prune < threshold):
             if breaker is not None:
                 breaker.record_success()
             return CompactResult(
@@ -411,6 +581,10 @@ def auto_compact(
             )
         # Not enough on its own — summarize the (now smaller) pruned prefix.
         body = pruned_body
+    elif prune_only:
+        # Cold cache but nothing to prune, and we may not summarize below
+        # threshold. Nothing to do.
+        return None
 
     # --- Layer 2: LLM summary of the older prefix ---------------------------
     to_summarize = body[:keep_start]
@@ -427,12 +601,22 @@ def auto_compact(
     if keep_start <= 0 or estimate_tokens(to_summarize) < summary_floor:
         return None
 
-    prefix_text = render_prefix_for_summary(to_summarize)
-    summary = _summarize_with_retry(summarizer, prefix_text, MAX_SUMMARY_RETRIES, RETRY_BASE_DELAY_S)
-    if not summary or not summary.strip():
+    # Prompt-cache-sharing path (preferred): hand the real prefix objects to the
+    # message summarizer so the provider's cached prefix is reused. Fall back to
+    # the text summarizer (offline provider / simple callers).
+    if message_summarizer is not None:
+        raw_summary = _summarize_messages_with_retry(
+            message_summarizer, system, to_summarize, MAX_SUMMARY_RETRIES, RETRY_BASE_DELAY_S
+        )
+    else:
+        prefix_text = render_prefix_for_summary(to_summarize)
+        raw_summary = _summarize_with_retry(summarizer, prefix_text, MAX_SUMMARY_RETRIES, RETRY_BASE_DELAY_S)
+    if not raw_summary or not raw_summary.strip():
         if breaker is not None:
             breaker.record_failure()
         return None
+    # Strip the <analysis> scratchpad and unwrap <summary> (no-op if absent).
+    summary = format_compact_summary(raw_summary)
 
     content = (
         "This session continues from an earlier conversation that was compacted to save context. "
@@ -458,5 +642,78 @@ def auto_compact(
         summarized=len(to_summarize),
         kept=len(keep_tail),
         pruned=pruned_chars,
+        method="summarize",
+    )
+
+
+def partial_compact(
+    messages: list[dict[str, Any]],
+    summarizer: Summarizer,
+    pivot: int,
+    *,
+    direction: str = "up_to",
+    recovery: RecoveryState | None = None,
+    tool_names: list[str] | None = None,
+    message_summarizer: MessageSummarizer | None = None,
+) -> CompactResult | None:
+    """User-selected partial compaction (CC's partialCompactConversation).
+
+    ``pivot`` is an index into ``messages`` (system at 0 is always preserved).
+      * ``up_to``: summarize ``messages[1:pivot]``, keep ``messages[pivot:]`` —
+        the summary sits at the head (a normal compact with an explicit split).
+      * ``from``: keep ``messages[1:pivot]`` intact, summarize ``messages[pivot:]``
+        — the summary sits at the tail (compress recent, keep the old context).
+
+    Returns None when there is nothing on the chosen side to summarize.
+    """
+    if not messages or pivot <= 0 or pivot >= len(messages):
+        return None
+    system = messages[0]
+    before = estimate_tokens(messages)
+
+    if direction == "from":
+        keep = messages[1:pivot]
+        to_summarize = messages[pivot:]
+    else:  # "up_to"
+        to_summarize = messages[1:pivot]
+        keep = messages[pivot:]
+    if not to_summarize:
+        return None
+
+    if message_summarizer is not None:
+        raw = _summarize_messages_with_retry(
+            message_summarizer, system, to_summarize, MAX_SUMMARY_RETRIES, RETRY_BASE_DELAY_S
+        )
+    else:
+        raw = _summarize_with_retry(
+            summarizer, render_prefix_for_summary(to_summarize), MAX_SUMMARY_RETRIES, RETRY_BASE_DELAY_S
+        )
+    if not raw or not raw.strip():
+        return None
+    summary = format_compact_summary(raw)
+
+    content = (
+        "Part of this conversation was compacted to save context. "
+        "Summary of the compacted portion:\n\n" + summary.strip()
+    )
+    if recovery is not None:
+        attachment = recovery.build_attachment(tool_names)
+        if attachment:
+            content += "\n\n---\n\n" + attachment
+    summary_msg = {"role": "system", "content": content}
+
+    if direction == "from":
+        # Keep old context, replace recent tail with its summary.
+        new_messages = [system, *keep, summary_msg]
+    else:
+        new_messages = [system, summary_msg, *keep]
+
+    return CompactResult(
+        messages=new_messages,
+        before_tokens=before,
+        after_tokens=estimate_tokens(new_messages),
+        summarized=len(to_summarize),
+        kept=len(keep),
+        pruned=0,
         method="summarize",
     )

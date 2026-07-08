@@ -54,12 +54,12 @@ def test_pre_tool_block_returns_reason():
         match=HookMatch(tool="write_file", path_regex=r"\.env$"),
     )
     engine = HookEngine([hook])
-    reason = engine.run_pre_tool(HookContext(
+    outcome = engine.run_pre_tool(HookContext(
         event="pre_tool_use", tool_name="write_file", file_path=".env"))
-    assert reason == "Refusing to touch .env"
+    assert outcome.block == "Refusing to touch .env"
     # Non-matching tool is not blocked.
     assert engine.run_pre_tool(HookContext(
-        event="pre_tool_use", tool_name="read_file", file_path=".env")) is None
+        event="pre_tool_use", tool_name="read_file", file_path=".env")).block is None
 
 
 def test_prompt_action_collected_as_message():
