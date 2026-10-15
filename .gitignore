@@ -13,3 +13,4 @@ env/
 
 /leetcode-master
 /mewcode-python/
+*.egg-info/
