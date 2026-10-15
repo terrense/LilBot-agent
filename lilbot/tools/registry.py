@@ -7,6 +7,7 @@ from time import perf_counter
 from typing import Any, Callable
 
 from ..sandbox import SandboxError
+from ..security.env import redact_known_secrets
 
 
 # ── Direct tools crate ──────────────────────────────
@@ -452,6 +453,10 @@ class ToolRegistry:
         # Surface destructiveness for observation/telemetry (CC's isDestructive).
         if tool.is_destructive(arguments or {}):
             result.metadata.setdefault("destructive", True)
+        # Credential isolation: the model never sees the value of a secret
+        # LilBot holds, whichever tool surfaced it (read_file on .env, grep, MCP).
+        config_key = getattr(getattr(ctx, "config", None), "api_key", "") or ""
+        result.output = redact_known_secrets(result.output, {"LILBOT_API_KEY": config_key} if config_key else None)
         # Offload large outputs to disk with a recoverable preview instead of
         # silently dropping the tail, honoring the tool's own size cap.
         # retrieve_tool_result / handle_read can read the persisted file back.

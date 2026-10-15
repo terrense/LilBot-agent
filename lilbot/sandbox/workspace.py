@@ -7,6 +7,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..security.env import scrubbed_env
+
 
 class SandboxError(RuntimeError):
     pass
@@ -111,6 +113,7 @@ class Sandbox:
             proc = subprocess.run(
                 argv,
                 cwd=self.root,
+                env=scrubbed_env(),
                 shell=shell,
                 capture_output=True,
                 timeout=timeout,

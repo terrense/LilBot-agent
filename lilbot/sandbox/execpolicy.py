@@ -17,6 +17,8 @@ import re
 import shlex
 from typing import Any
 
+from ..security.env import is_secret_env_name
+
 # Arity = number of leading *positional* tokens (flags excluded, base word
 # included) that form a command's canonical prefix. Kept for reference / future
 # use; the allow matcher derives arity from each allow-rule's own length.
@@ -77,6 +79,45 @@ def _rm_is_catastrophic(command: str) -> bool:
     return False
 
 
+# Secret access — never auto-allowed, always falls through to a prompt.
+# Variable references: PowerShell $env:NAME / ${env:NAME}, POSIX $NAME / ${NAME},
+# cmd %NAME%. Only secret-looking names count; `echo $env:PATH` stays allowed.
+_ENV_REFS = [
+    re.compile(r"\$\{?env:([A-Za-z_][A-Za-z0-9_]*)", re.I),
+    re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)"),
+    re.compile(r"%([A-Za-z_][A-Za-z0-9_]*)%"),
+]
+# Dumping the whole environment: `Get-ChildItem env:`, `dir env:`, .NET accessors.
+_ENV_DUMP = re.compile(
+    r"(?<![A-Za-z0-9_$])env:(?![A-Za-z0-9_])|\[(?:System\.)?Environment\]::GetEnvironmentVariables?\b|\bprintenv\b",
+    re.I,
+)
+# Credential files.
+_CREDENTIAL_PATHS = re.compile(
+    r"\.ssh[\\/]|\bid_(?:rsa|ed25519|ecdsa|dsa)\b|\.aws[\\/]credentials|\.git-credentials"
+    r"|[._]netrc\b|\.npmrc\b|\.pypirc\b|\.docker[\\/]config\.json",
+    re.I,
+)
+_DOTENV_NAME = re.compile(r"^\.env(?:\..+)?$|^\.envrc$", re.I)
+
+
+def references_secrets(command: str) -> tuple[bool, str]:
+    """True when the command reads secret env vars, dumps the env, or reads credential files."""
+    for pattern in _ENV_REFS:
+        for match in pattern.finditer(command):
+            if is_secret_env_name(match.group(1)):
+                return True, f"reads secret environment variable {match.group(1)}"
+    if _ENV_DUMP.search(command):
+        return True, "lists environment variables"
+    if _CREDENTIAL_PATHS.search(command):
+        return True, "reads a credential file"
+    for token in re.split(r"[\s\"'=,;()]+", command):
+        name = re.split(r"[\\/]", token)[-1]
+        if name and _DOTENV_NAME.match(name):
+            return True, "reads a .env file"
+    return False, ""
+
+
 def is_dangerous(command: str) -> tuple[bool, str]:
     if _rm_is_catastrophic(command):
         return True, "delete of a root/home/cwd/glob-everything path"
@@ -132,6 +173,11 @@ def classify(command: str, allow_prefixes: set[str] | None = None, rules: Any = 
     re-enable ``rm -rf /``). Then user/project/policy permission rules (#15) are
     consulted; a matching ``Bash(...)`` rule wins. No matching rule falls through
     to the built-in read-only allow-list — so an empty ruleset is a no-op.
+
+    Commands that touch secrets (``references_secrets``) are never auto-allowed —
+    not by the allow-list and not by a broad user allow rule like ``Bash(cat *)``
+    — so a prompt-injected ``cat .env`` always reaches a human. A user *deny*
+    rule still denies them.
     """
     cmd = (command or "").strip()
     if not cmd:
@@ -139,10 +185,13 @@ def classify(command: str, allow_prefixes: set[str] | None = None, rules: Any = 
     dangerous, reason = is_dangerous(cmd)
     if dangerous:
         return "deny", reason
+    secret, secret_reason = references_secrets(cmd)
     if rules is not None:
         decision, rule = rules.evaluate("Bash", cmd)
-        if decision:
+        if decision == "deny" or (decision and not secret):
             return decision, f"permission rule [{rule.source}] {rule.spec()}"
+    if secret:
+        return "ask", secret_reason
     if matches_allow_rule(cmd, allow_prefixes):
         return "allow", "known safe read-only command"
     return "ask", ""
