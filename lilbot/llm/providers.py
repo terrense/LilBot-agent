@@ -139,6 +139,79 @@ def _http_timeout() -> Any:
     return httpx.Timeout(120.0, connect=10.0)
 
 
+_THINK_OPEN = "<think>"
+_THINK_CLOSE = "</think>"
+
+
+class _InlineThinkSplitter:
+    """Route a leading ``<think>…</think>`` block in content to reasoning.
+
+    Some models (MiniMax without ``reasoning_split``, Qwen/DeepSeek-R1 behind
+    vLLM/Ollama) put their reasoning inline in ``content`` instead of a
+    ``reasoning_content`` field. Only a block at the very start counts, so a
+    literal "<think>" later in an answer is left alone. Streaming-safe: a tag
+    split across chunks (``"<thi"`` + ``"nk>"``) is held back until decided.
+    """
+
+    def __init__(self) -> None:
+        self._state = "start"  # start -> think -> content, or start -> content
+        self._buf = ""
+        self._trim_lead = False  # drop the blank line(s) after </think>, even in a later chunk
+
+    def feed(self, text: str) -> list[tuple[str, str]]:
+        """Return ``[(kind, text), …]`` with kind ``"content"`` or ``"reasoning"``."""
+        out: list[tuple[str, str]] = []
+        self._buf += text
+        if self._state == "start":
+            head = self._buf.lstrip()
+            if not head or (len(head) < len(_THINK_OPEN) and _THINK_OPEN.startswith(head)):
+                return out  # undecided: whitespace or a partial opening tag
+            if head.startswith(_THINK_OPEN):
+                self._state = "think"
+                self._buf = head[len(_THINK_OPEN):]
+            else:
+                self._state = "content"
+        if self._state == "think":
+            end = self._buf.find(_THINK_CLOSE)
+            if end < 0:
+                # Hold back a possible partial closing tag at the tail.
+                keep = len(_THINK_CLOSE) - 1
+                ready, self._buf = self._buf[:-keep], self._buf[-keep:]
+                if ready:
+                    out.append(("reasoning", ready))
+                return out
+            if end:
+                out.append(("reasoning", self._buf[:end]))
+            self._buf = self._buf[end + len(_THINK_CLOSE):]
+            self._state = "content"
+            self._trim_lead = True
+        if self._state == "content" and self._trim_lead:
+            self._buf = self._buf.lstrip()
+            self._trim_lead = not self._buf
+        if self._state == "content" and self._buf:
+            out.append(("content", self._buf))
+            self._buf = ""
+        return out
+
+    def flush(self) -> list[tuple[str, str]]:
+        rest, self._buf = self._buf, ""
+        if not rest:
+            return []
+        # An unterminated think block (output cut off) is still reasoning.
+        return [("reasoning" if self._state == "think" else "content", rest)]
+
+
+def split_inline_think(content: str, reasoning: str = "") -> tuple[str, str]:
+    """Non-streaming form: return ``(content, reasoning)`` with a leading think block moved."""
+    splitter = _InlineThinkSplitter()
+    parts = splitter.feed(content or "") + splitter.flush()
+    text = "".join(t for kind, t in parts if kind == "content")
+    inline = "".join(t for kind, t in parts if kind == "reasoning").strip()
+    if inline:
+        reasoning = f"{reasoning}\n{inline}" if reasoning else inline
+    return text, reasoning
+
+
 def _iter_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
     """Parse an OpenAI-compatible SSE line stream into StreamEvents.
 
@@ -151,6 +224,16 @@ def _iter_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
     tool_slots: dict[int, dict[str, str]] = {}
     usage: dict[str, Any] = {}
     finish_reason: str = ""
+    splitter = _InlineThinkSplitter()
+
+    def route(parts: list[tuple[str, str]]) -> Iterator[StreamEvent]:
+        for kind, piece in parts:
+            if kind == "content":
+                content_parts.append(piece)
+                yield StreamEvent(text=piece)
+            else:
+                reasoning_parts.append(piece)
+                yield StreamEvent(reasoning=piece)
 
     for raw in lines:
         if not raw:
@@ -179,8 +262,7 @@ def _iter_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
 
         text = delta.get("content")
         if text:
-            content_parts.append(text)
-            yield StreamEvent(text=text)
+            yield from route(splitter.feed(text))
 
         reasoning = delta.get("reasoning_content")
         if reasoning:
@@ -199,6 +281,8 @@ def _iter_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
                 slot["name"] = str(fn["name"])
             if fn.get("arguments"):
                 slot["args"] += str(fn["arguments"])
+
+    yield from route(splitter.flush())
 
     calls: list[ToolCall] = []
     for index in sorted(tool_slots):
@@ -271,6 +355,17 @@ class RuleBasedProvider(BaseProvider):
         return f"Received: {prompt}\n\nThis is a short response from LilBot's offline provider."
 
 
+def _vendor_body_extras(base_url: str) -> dict[str, Any]:
+    """Vendor-specific request fields for otherwise-standard Chat Completions.
+
+    MiniMax inlines reasoning as ``<think>`` in ``content`` unless asked to
+    split it into ``reasoning_content`` (both streaming and non-streaming).
+    """
+    if "minimax" in (base_url or "").lower():
+        return {"reasoning_split": True}
+    return {}
+
+
 @dataclass
 class OpenAICompatibleProvider(BaseProvider):
     config: LilBotConfig
@@ -290,6 +385,7 @@ class OpenAICompatibleProvider(BaseProvider):
         if tools:
             body["tools"] = [self._tool_schema(tool) for tool in tools]
             body["tool_choice"] = "auto"
+        body.update(_vendor_body_extras(self.config.base_url))
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
@@ -320,11 +416,14 @@ class OpenAICompatibleProvider(BaseProvider):
                 args = {"raw": fn.get("arguments", "")}
             calls.append(ToolCall(fn.get("name", ""), args, call.get("id") or "tool"))
         usage = _normalize_usage(data.get("usage") or {})
+        content, reasoning = split_inline_think(
+            message.get("content") or "", str(message.get("reasoning_content") or "")
+        )
         return ProviderTurn(
-            message.get("content") or "",
+            content,
             calls,
             usage,
-            str(message.get("reasoning_content") or ""),
+            reasoning,
             finish_reason=str(data["choices"][0].get("finish_reason") or ""),
         )
 
@@ -349,6 +448,7 @@ class OpenAICompatibleProvider(BaseProvider):
         if tools:
             body["tools"] = [self._tool_schema(tool) for tool in tools]
             body["tool_choice"] = "auto"
+        body.update(_vendor_body_extras(self.config.base_url))
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
@@ -469,6 +569,8 @@ class OpenAICompatibleProvider(BaseProvider):
 KNOWN_PROVIDERS: dict[str, str] = {
     "openai": "https://api.openai.com/v1",
     "deepseek": "https://api.deepseek.com",
+    "minimax": "https://api.minimaxi.com/v1",       # China region
+    "minimax-intl": "https://api.minimax.io/v1",   # international
     "moonshot": "https://api.moonshot.cn/v1",
     "kimi": "https://api.moonshot.cn/v1",
     "zhipu": "https://open.bigmodel.cn/api/paas/v4",

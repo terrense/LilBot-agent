@@ -39,13 +39,22 @@ git log --oneline -5                        # 看最近提交
 - 新增 `tests/test_credential_isolation.py`（51 个用例；回退源码后 19 个失败，证明有效）
 - 全量：404 passed / 6 skipped
 
-### 🔄 修复 2：MiniMax `<think>` 泄漏（进行中）
-- 已实测：MiniMax 默认把推理内联为 `<think>…</think>`；请求加 `reasoning_split: true` 后推理进入 `reasoning_content` 字段（流式与非流式均如此）
-- 计划：
-  1. `llm/providers.py`：MiniMax 端点自动加 `reasoning_split: true`；`KNOWN_PROVIDERS` 增加 `minimax`（中国区）与 `minimax-intl`
-  2. 通用兜底：开头的内联 `<think>` 块剥离到 `reasoning_content`（流式需处理标签被切分）
-  3. 测试 + 真实多轮工具调用验证
+### ✅ 修复 2：MiniMax `<think>` 泄漏（2026-10-15）
+- `llm/providers.py`：MiniMax 端点自动加 `reasoning_split: true`；`KNOWN_PROVIDERS` 增加 `minimax`（中国区）与 `minimax-intl`
+- 通用兜底 `_InlineThinkSplitter` / `split_inline_think`：开头的内联 `<think>` 块剥离到 `reasoning_content`，流式下也能处理
+- 新增 `tests/test_inline_think.py`（13 个用例）；全量：417 passed / 6 skipped
+- 真实验证：MiniMax-M3 两轮对话 + 工具调用 + `--resume`，无 `<think>`，session 中无密钥
 
-### ⏳ 待办
-- [ ] 推送 `dev/nayang`：需先接受 terrense 的协作邀请并在本机登录 GitHub
-- [ ] Week 2：Durable Runtime MVP
+### ✅ 提交与推送
+- 提交身份（仓库级）：NaYanyeee <948513837@qq.com>
+- `dev/nayang` 已推送到 GitHub
+
+### ⏳ 下一步：Week 2 Durable Runtime MVP
+- [ ] 设计 `lilbot/runtime/`（models / state_machine / store(SQLite) / checkpoint / recovery / idempotency）
+- [ ] 第一个验收点：回合内增量持久化（每个工具结果之后写 checkpoint），崩溃后不丢失本回合已完成的步骤
+- [ ] 故障注入测试：步骤之间崩溃、执行中崩溃、工具超时、结果未知时不盲目重试
+
+### 📝 记下的小问题（未排期）
+- `--resume` 参数可选，会吞掉后面的 prompt（需写成 `lilbot --print "问题" --resume`）
+- Provider 没有请求级重试（S5）
+- 根目录有残留文件 `Untitled`、`hello.txt`、`hello002.txt`（清理前需和 terrense 确认）

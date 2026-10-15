@@ -56,9 +56,14 @@ LILBOT_MODEL=MiniMax-M3
 |---|---|---|---|
 | B1 | MiniMax 把推理过程以 `<think>…</think>` 内联在 `content` 里返回，LilBot 原样显示给用户 | `llm/providers.py` `_iter_stream_events` / `complete` 只识别 `reasoning_content` 字段 | 输出噪声大；同时整段思考会写入 `messages` 并持久化到 session |
 
-B1 修复思路（待定，需要先确认 MiniMax 多轮对话对历史中思考内容的要求）：
-1. 请求体加 MiniMax 的 `reasoning_split: true`，让思考进入独立字段；或
-2. 在 provider 层把 `<think>…</think>` 剥离到 `reasoning_content`，UI 不显示，历史中按 provider 要求保留/丢弃。
+B1 **已修复**（2026-10-15，`llm/providers.py`，测试 `tests/test_inline_think.py`）：
+1. MiniMax 端点（base_url 含 `minimax`）自动在请求体中加 `reasoning_split: true`，实测推理进入 `reasoning_content` 字段（流式与非流式均如此）；
+2. 通用兜底：其他模型若在 `content` 开头内联 `<think>…</think>`，provider 层把它剥离到 `reasoning_content`，流式下标签被切到多个 chunk 也能处理；
+3. 新增 provider 预设 `minimax`（中国区 `api.minimaxi.com`）与 `minimax-intl`。
+
+实测（MiniMax-M3，两轮对话，含 2 次工具调用，并用 `--resume` 续接）：输出中没有 `<think>`；session 里 4 条 assistant 消息的推理都单独存在 `reasoning_content` 中；MiniMax 接受在历史中回传 `reasoning_content`，第二轮能正确利用上下文；session 文件中没有出现 API Key。
+
+附带发现：`--resume` 的参数是可选的，因此 `lilbot --print --resume "问题"` 会把问题当成 session id。需要写成 `lilbot --print "问题" --resume`。可以以后改进 CLI。
 
 其余在代码审计中发现的问题见 `docs/architecture-overview.md` 第 4 节。
 
