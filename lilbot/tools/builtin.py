@@ -25,6 +25,7 @@ from typing import Any
 from uuid import uuid4
 
 from ..sandbox import analyze_powershell_command
+from ..security.env import scrubbed_env
 from ..subagents import SubAgentGateError
 from .registry import ApprovalRequirement, ToolCapability, ToolContext, ToolDef, ToolRegistry, ToolResult
 
@@ -213,8 +214,10 @@ def _shell_permission(ctx: ToolContext, action: str, description: str, command: 
     if decision == "allow" and getattr(getattr(ctx, "config", None), "auto_allow_safe_commands", True):
         return True, safety, None
     prompt = description
+    if reason:
+        prompt = f"{description} | {reason}"
     if safety:
-        prompt = f"{description} | {safety.get('summary')}"
+        prompt = f"{prompt} | {safety.get('summary')}"
     if not _permission(ctx, action, prompt):
         metadata = {"powershell_safety": safety} if safety else {}
         return False, safety, ToolResult(False, "Permission denied.", metadata)
@@ -2315,6 +2318,7 @@ def _start_process(command: str, ctx: ToolContext) -> subprocess.Popen:
     return subprocess.Popen(
         argv,
         cwd=ctx.sandbox.root,
+        env=scrubbed_env(),
         shell=shell,
         text=True,
         stdin=subprocess.PIPE,
@@ -3686,7 +3690,7 @@ def _code_execution(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         handle.write(code)
         script = handle.name
     try:
-        proc = subprocess.run([sys.executable, script], cwd=ctx.sandbox.root, text=True, capture_output=True, timeout=120)
+        proc = subprocess.run([sys.executable, script], cwd=ctx.sandbox.root, env=scrubbed_env(), text=True, capture_output=True, timeout=120)
         data = {"stdout": proc.stdout, "stderr": proc.stderr, "return_code": proc.returncode}
         return ToolResult(proc.returncode == 0, _json(data), data)
     finally:
@@ -3708,7 +3712,7 @@ def _js_execution(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         handle.write(code)
         script = handle.name
     try:
-        proc = subprocess.run(["node", script], cwd=ctx.sandbox.root, text=True, capture_output=True, timeout=120)
+        proc = subprocess.run(["node", script], cwd=ctx.sandbox.root, env=scrubbed_env(), text=True, capture_output=True, timeout=120)
         data = {"stdout": proc.stdout, "stderr": proc.stderr, "return_code": proc.returncode}
         return ToolResult(proc.returncode == 0, _json(data), data)
     finally:
