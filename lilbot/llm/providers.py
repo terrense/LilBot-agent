@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 from typing import Any, Iterable, Iterator
 
 from ..config import LilBotConfig
@@ -34,6 +35,9 @@ class BaseProvider:
         working: the agent sees a single terminal event and renders one block.
         """
         yield StreamEvent(final=self.complete(messages, tools))
+
+    def close(self) -> None:
+        """Release network resources (no-op for providers without any)."""
 
 
 def _normalize_usage(usage: dict[str, Any]) -> dict[str, Any]:
@@ -137,6 +141,34 @@ def _http_timeout() -> Any:
     import httpx
 
     return httpx.Timeout(120.0, connect=10.0)
+
+
+_SSL_CONTEXT: Any = None
+_SSL_LOCK = threading.Lock()
+
+
+def _ssl_context() -> Any:
+    """Process-wide SSL context. Building one loads the certifi bundle from
+    disk (~270 ms on Windows); every ``httpx.Client(verify=True)`` paid that
+    again. Built once with httpx's own defaults (honors SSL_CERT_FILE)."""
+    global _SSL_CONTEXT
+    if _SSL_CONTEXT is None:
+        with _SSL_LOCK:
+            if _SSL_CONTEXT is None:
+                import httpx
+
+                _SSL_CONTEXT = httpx.create_ssl_context()
+    return _SSL_CONTEXT
+
+
+def _new_http_client() -> Any:
+    import httpx
+
+    return httpx.Client(
+        timeout=_http_timeout(),
+        verify=_ssl_context(),
+        limits=httpx.Limits(max_keepalive_connections=8, keepalive_expiry=60.0),
+    )
 
 
 _THINK_OPEN = "<think>"
@@ -369,6 +401,29 @@ def _vendor_body_extras(base_url: str) -> dict[str, Any]:
 @dataclass
 class OpenAICompatibleProvider(BaseProvider):
     config: LilBotConfig
+    # One keep-alive client per provider, shared by the main loop, recall
+    # prefetch and subagents (httpx.Client is thread-safe). Rebuilt when the
+    # base_url changes, since config is mutated in place by /model.
+    _client: Any = field(default=None, init=False, repr=False, compare=False)
+    _client_key: str = field(default="", init=False, repr=False, compare=False)
+    _client_lock: Any = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
+
+    def _http_client(self) -> Any:
+        key = (self.config.base_url or "").rstrip("/")
+        with self._client_lock:
+            if self._client is None or self._client_key != key:
+                stale = self._client
+                self._client = _new_http_client()
+                self._client_key = key
+                if stale is not None:
+                    stale.close()
+            return self._client
+
+    def close(self) -> None:
+        with self._client_lock:
+            client, self._client = self._client, None
+        if client is not None:
+            client.close()
 
     def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> ProviderTurn:
         try:
@@ -391,20 +446,19 @@ class OpenAICompatibleProvider(BaseProvider):
             "Content-Type": "application/json",
         }
         url = f"{self.config.base_url.rstrip('/')}/chat/completions"
-        with httpx.Client(timeout=_http_timeout()) as client:
-            response = client.post(url, headers=headers, json=body)
-            try:
-                response.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                detail = _response_error_detail(exc.response)
-                code = exc.response.status_code
-                raise ProviderError(
-                    f"{self.config.provider} chat request failed: "
-                    f"{code} {exc.response.reason_phrase} "
-                    f"for {exc.request.url} (model={self.config.model}). {detail}",
-                    status_code=code,
-                    is_overflow=_is_overflow_error(code, detail),
-                ) from exc
+        response = self._http_client().post(url, headers=headers, json=body)
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            detail = _response_error_detail(exc.response)
+            code = exc.response.status_code
+            raise ProviderError(
+                f"{self.config.provider} chat request failed: "
+                f"{code} {exc.response.reason_phrase} "
+                f"for {exc.request.url} (model={self.config.model}). {detail}",
+                status_code=code,
+                is_overflow=_is_overflow_error(code, detail),
+            ) from exc
         data = response.json()
         message = data["choices"][0]["message"]
         calls: list[ToolCall] = []
@@ -455,20 +509,25 @@ class OpenAICompatibleProvider(BaseProvider):
         }
         url = f"{self.config.base_url.rstrip('/')}/chat/completions"
         try:
-            with httpx.Client(timeout=_http_timeout()) as client:
-                with client.stream("POST", url, headers=headers, json=body) as response:
-                    if response.status_code >= 400:
-                        response.read()
-                        detail = _response_error_detail(response)
-                        code = response.status_code
-                        raise ProviderError(
-                            f"{self.config.provider} chat stream failed: "
-                            f"{code} {response.reason_phrase} "
-                            f"for {response.request.url} (model={self.config.model}). {detail}",
-                            status_code=code,
-                            is_overflow=_is_overflow_error(code, detail),
-                        )
-                    yield from _iter_stream_events(response.iter_lines())
+            client = self._http_client()
+            with client.stream("POST", url, headers=headers, json=body) as response:
+                if response.status_code >= 400:
+                    response.read()
+                    detail = _response_error_detail(response)
+                    code = response.status_code
+                    raise ProviderError(
+                        f"{self.config.provider} chat stream failed: "
+                        f"{code} {response.reason_phrase} "
+                        f"for {response.request.url} (model={self.config.model}). {detail}",
+                        status_code=code,
+                        is_overflow=_is_overflow_error(code, detail),
+                    )
+                lines = response.iter_lines()
+                yield from _iter_stream_events(lines)
+                # The parser stops at [DONE]; drain the tail so httpx can hand
+                # the connection back to the keep-alive pool instead of closing it.
+                for _ in lines:
+                    pass
         except ProviderError:
             raise
         except httpx.HTTPError as exc:

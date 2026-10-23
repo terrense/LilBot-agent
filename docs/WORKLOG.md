@@ -49,6 +49,15 @@ git log --oneline -5                        # 看最近提交
 - 提交身份（仓库级）：NaYanyeee <948513837@qq.com>
 - `dev/nayang` 已推送到 GitHub
 
+### ▶ 2026-10-23 起：对标 Hermes 的七天优化（当前主线）
+- 仓库已搬到 `B:\娜样的武装部\LilBot-agent`
+- 恢复入口：`docs/hermes-gap/SESSION_LOG.md`（进度、断点、基准数据都在这里）
+  - ⚠️ 这个文件可能被本机加密软件加密（`cat` / 编辑器看到的是乱码）。用 Python 读明文：
+    `$env:PYTHONIOENCODING='utf-8'; .\.venv\Scripts\python -c "import sys;sys.stdout.write(open('docs/hermes-gap/SESSION_LOG.md',encoding='utf-8').read())"`
+- 2026-10-23 Day 1（HTTP 连接复用）已完成，下一步 Day 2（错误分类 + 重试 + 备用模型）；测试 425 passed / 6 skipped
+- 报告：`docs/hermes-gap/01-LilBot与Hermes差距分析报告.md`；计划：`docs/hermes-gap/02-七天优化计划.md`
+- 下面的 Week 2 Durable Runtime MVP 已并入七天计划的 Day 5
+
 ### ⏳ 下一步：Week 2 Durable Runtime MVP
 - [ ] 设计 `lilbot/runtime/`（models / state_machine / store(SQLite) / checkpoint / recovery / idempotency）
 - [ ] 第一个验收点：回合内增量持久化（每个工具结果之后写 checkpoint），崩溃后不丢失本回合已完成的步骤
