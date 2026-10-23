@@ -250,6 +250,12 @@ def _parse_model_request(requested: str) -> tuple[str | None, str, str | None]:
     return None, text, None
 
 
+def _close_provider(provider: object) -> None:
+    close = getattr(provider, "close", None)
+    if callable(close):
+        close()
+
+
 def switch_runtime_model(agent: Agent, ctx: ToolContext, requested: str) -> str:
     """Switch to ANY model/provider (model-agnostic). See _parse_model_request."""
     if not requested.strip():
@@ -262,7 +268,9 @@ def switch_runtime_model(agent: Agent, ctx: ToolContext, requested: str) -> str:
     ctx.config.model = model
     save_config(ctx.config)
     agent.config = ctx.config
-    agent.provider = choose_provider(ctx.config)
+    old_provider, agent.provider = agent.provider, choose_provider(ctx.config)
+    if old_provider is not agent.provider:
+        _close_provider(old_provider)
     ctx.subagents.provider = lambda messages, tools: agent.provider.complete(messages, tools)
     return model
 
@@ -773,20 +781,23 @@ def main(argv: Iterable[str] | None = None) -> int:
         return 0
     one_shot = args.print_mode or bool(args.prompt)
     agent, registry, ctx = build_runtime(cfg, ui, interactive=not one_shot)
-    maybe_resume(agent, ui, getattr(args, "resume", None))
-    if one_shot:
-        prompt = " ".join(args.prompt)
-        if not prompt:
-            parser.error("--print requires a prompt or positional prompt text")
-        run_prompt(agent, ui, prompt)
-        return 0
-    can_use_dashboard = sys.stdin.isatty() and sys.stdout.isatty()
-    if not args.classic and not args.no_rich and can_use_dashboard:
-        try:
-            configure_windows_console(font_size=cfg.font_size)
-            from .tui.dashboard import DashboardUI
+    try:
+        maybe_resume(agent, ui, getattr(args, "resume", None))
+        if one_shot:
+            prompt = " ".join(args.prompt)
+            if not prompt:
+                parser.error("--print requires a prompt or positional prompt text")
+            run_prompt(agent, ui, prompt)
+            return 0
+        can_use_dashboard = sys.stdin.isatty() and sys.stdout.isatty()
+        if not args.classic and not args.no_rich and can_use_dashboard:
+            try:
+                configure_windows_console(font_size=cfg.font_size)
+                from .tui.dashboard import DashboardUI
 
-            return DashboardUI(agent, registry, ctx).run()
-        except Exception as exc:
-            ui.error(f"Dashboard unavailable ({type(exc).__name__}); falling back to classic UI.")
-    return interactive_loop(agent, registry, ctx, ui)
+                return DashboardUI(agent, registry, ctx).run()
+            except Exception as exc:
+                ui.error(f"Dashboard unavailable ({type(exc).__name__}); falling back to classic UI.")
+        return interactive_loop(agent, registry, ctx, ui)
+    finally:
+        _close_provider(agent.provider)
