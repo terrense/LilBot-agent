@@ -4,7 +4,7 @@ import sys
 from datetime import datetime
 from typing import Iterable
 
-from ..core.events import TextDelta, ToolFinished, ToolStarted, TurnFinished
+from ..core.events import ProviderRetry, TextDelta, ToolFinished, ToolStarted, TurnFinished
 from ..security import redact_args, redact_secrets
 
 try:
@@ -243,6 +243,8 @@ class LilBotUI:
                 self.print(f"{mark} {event.name} {event.elapsed_ms}ms", style)
                 if output:
                     self.print(output)
+        elif isinstance(event, ProviderRetry):
+            self.print(_retry_notice(event), "yellow")
         elif isinstance(event, TurnFinished):
             self.print(f"completed {event.steps} steps", "bold green")
 
@@ -302,3 +304,9 @@ class LilBotUI:
             table.add_row(number, label, "OK" if status else "")
         self.console.print(Panel(table, title="[bold yellow]Choose the text style that looks best[/]", border_style="bright_cyan", box=self._box))
         self.console.print(Panel(Syntax(DIFF_PREVIEW, "diff", theme="monokai"), title="[bold]Syntax theme: Monokai Extended[/]", border_style="yellow", box=self._box))
+
+
+def _retry_notice(event: ProviderRetry) -> str:
+    if event.action == "fallback":
+        return f"↻ {event.reason}: switching to fallback model {event.detail}"
+    return f"↻ {event.reason}: retry {event.attempt} in {event.delay:.1f}s — {event.detail}"

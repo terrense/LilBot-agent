@@ -10,7 +10,7 @@ from typing import Iterable
 
 from .config import LilBotConfig, load_config, save_config
 from .core.agent import Agent
-from .llm.providers import KNOWN_PROVIDERS, choose_provider, resolve_endpoint
+from .llm.providers import KNOWN_PROVIDERS, ProviderError, choose_provider, resolve_endpoint
 from .mcp import MCPManager
 from .memory import FileMemoryStore, MemoryStore
 from .sandbox import PermissionManager, Sandbox
@@ -787,7 +787,12 @@ def main(argv: Iterable[str] | None = None) -> int:
             prompt = " ".join(args.prompt)
             if not prompt:
                 parser.error("--print requires a prompt or positional prompt text")
-            run_prompt(agent, ui, prompt)
+            try:
+                run_prompt(agent, ui, prompt)
+            except ProviderError as exc:
+                # Retries/fallback are exhausted by now; the turn was persisted.
+                ui.error(f"Model request failed: {exc}")
+                return 1
             return 0
         can_use_dashboard = sys.stdin.isatty() and sys.stdout.isatty()
         if not args.classic and not args.no_rich and can_use_dashboard:
@@ -800,4 +805,4 @@ def main(argv: Iterable[str] | None = None) -> int:
                 ui.error(f"Dashboard unavailable ({type(exc).__name__}); falling back to classic UI.")
         return interactive_loop(agent, registry, ctx, ui)
     finally:
-        _close_provider(agent.provider)
+        _close_provider(agent)

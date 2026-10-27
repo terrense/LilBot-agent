@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import threading
 import time
@@ -94,6 +95,12 @@ MAX_OVERFLOW_RECOVERIES = 2
 # at max output tokens (finish_reason == "length"). CC caps this at 3.
 MAX_OUTPUT_TRUNCATIONS = 3
 
+
+def _brief_error(exc: BaseException, limit: int = 160) -> str:
+    """One-line, bounded error text for a retry notice."""
+    text = " ".join(str(exc).split()) or type(exc).__name__
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
 # A main-loop prompt at least this large that comes back with zero cache-read is
 # treated as a prompt-cache break — the signal CC's break-detection service
 # tracks so cache hit-rate becomes an operable metric.
@@ -136,9 +143,11 @@ class SideQueryPrefetch:
         return self._done.wait(timeout)
 
 
-from .events import ProviderTurn, TextDelta, ToolCall, ToolFinished, ToolStarted, TurnFinished
+from .events import ProviderRetry, ProviderTurn, TextDelta, ToolCall, ToolFinished, ToolStarted, TurnFinished
 from .prompts import build_system_prompt
-from ..llm.providers import BaseProvider
+from ..llm.errors import classify
+from ..llm.providers import BaseProvider, choose_provider
+from ..llm.retry import retry_delay
 from ..tools import ToolContext, ToolRegistry, ToolResult
 
 
@@ -226,8 +235,32 @@ class Agent:
         # Structured event log (#18): JSONL sink for tool/compaction/recovery
         # events — the raw material for success-rate / bad-case analysis.
         self.events = EventLog(state_dir)
+        # Provider failure handling (Hermes gap P2): backoff sleep is injectable
+        # so tests run instantly; the fallback provider is built lazily and used
+        # for the rest of the turn once the main model gives up.
+        self._sleep: Callable[[float], None] = time.sleep
+        self._fallback_provider: BaseProvider | None = None
+        self._fallback_key: tuple[str, str, str] | None = None
+        self._turn_provider: BaseProvider | None = None
 
     def run_turn(self, user_text: str) -> Iterator[object]:
+        """One user turn. A failure (provider error, Ctrl+C) still persists the
+        messages gathered so far before the exception propagates."""
+        self._turn_provider = None  # every turn starts on the main model again
+        try:
+            yield from self._run_turn_body(user_text)
+        except (Exception, KeyboardInterrupt) as exc:
+            self._persist_after_failure(exc)
+            raise
+
+    def _persist_after_failure(self, exc: BaseException) -> None:
+        try:
+            self._persist_session()
+            self.events.log("turn_error", turn=self._turn_count, error=type(exc).__name__)
+        except Exception:  # noqa: BLE001 - never mask the original failure
+            pass
+
+    def _run_turn_body(self, user_text: str) -> Iterator[object]:
         # ============================================================
         # 【简历·1 Agent 执行框架｜ReAct 主循环】
         # 这是整个 Runtime 的心脏：一次用户输入 -> 一轮或多轮
@@ -1056,40 +1089,116 @@ class Agent:
 
     def _stream_turn(self, render_ctx: object):
         """Drive one model completion as a stream, with an ordered, bounded
-        reactive-overflow recovery chain (CC parity, #8/#1).
+        recovery chain (CC parity #8/#1 + Hermes error classifier).
 
-        Yields ``TextDelta`` chunks live and returns ``(turn, streamed)``. On a
-        context-overflow error — raised at request start, before any text is
-        yielded — compact and retry, up to ``MAX_OVERFLOW_RECOVERIES`` times so a
-        genuinely irrecoverable prompt surfaces the error instead of looping
-        forever. Each recovery records a transition reason.
+        Yields ``TextDelta`` chunks live and returns ``(turn, streamed)``. Each
+        failure is classified (``llm.errors.classify``) and handled in order:
+
+        1. text already reached the user -> re-raise (a replay would duplicate it)
+        2. context overflow -> compact and retry, up to ``MAX_OVERFLOW_RECOVERIES``
+        3. transient (429/5xx/timeout/network) -> back off and retry, up to
+           ``config.max_retries`` (honoring Retry-After)
+        4. still failing, or model/billing errors -> switch to the fallback model
+           for the rest of the turn (once)
+        5. anything else (auth, bad request, a bug) -> re-raise
+
+        Every recovery records a transition reason and yields ``ProviderRetry``.
         """
-        attempts = 0
+        overflow_attempts = 0
+        retries = 0
         while True:
+            progress = {"emitted": False}
             try:
                 result = yield from self._drive_stream(
-                    self._provider_messages(), self.registry.schemas(render_ctx)
+                    self._provider_messages(),
+                    self.registry.schemas(render_ctx),
+                    provider=self._turn_provider or self.provider,
+                    progress=progress,
                 )
                 return result
             except Exception as exc:
-                if not self._is_overflow_error(exc) or attempts >= MAX_OVERFLOW_RECOVERIES:
+                if progress["emitted"]:
                     raise
-                attempts += 1
-                self._record_transition("reactive_compact_retry")
-                # Reactive compaction: bypass the token floor and summarize now.
-                self.compact(manual=True)
+                info = classify(exc)
+                if info.should_compress or self._is_overflow_error(exc):
+                    if overflow_attempts >= MAX_OVERFLOW_RECOVERIES:
+                        raise
+                    overflow_attempts += 1
+                    self._record_transition("reactive_compact_retry")
+                    # Reactive compaction: bypass the token floor and summarize now.
+                    self.compact(manual=True)
+                    continue
+                if info.retryable and retries < self._max_retries():
+                    retries += 1
+                    delay = retry_delay(retries, info.retry_after)
+                    self._record_transition(f"retry_{info.reason.value}")
+                    yield ProviderRetry(info.reason.value, "retry", retries, delay, _brief_error(exc))
+                    self._sleep(delay)
+                    continue
+                if info.should_fallback and self._activate_fallback():
+                    retries = 0
+                    self._record_transition(f"fallback_{info.reason.value}")
+                    yield ProviderRetry(info.reason.value, "fallback", detail=self.config.fallback_model)
+                    continue
+                raise
 
-    def _drive_stream(self, messages: list[dict[str, Any]], schemas: list[dict[str, Any]]):
+    def _max_retries(self) -> int:
+        return max(0, int(getattr(self.config, "max_retries", 3) or 0))
+
+    def _activate_fallback(self) -> bool:
+        """Route the rest of this turn to the fallback model. False when none is
+        configured, it is the model that just failed, or it is already active."""
+        model = (getattr(self.config, "fallback_model", "") or "").strip()
+        if not model or self._turn_provider is not None:
+            return False
+        base_url = (getattr(self.config, "fallback_base_url", "") or self.config.base_url).rstrip("/")
+        if model == self.config.model and base_url == self.config.base_url.rstrip("/"):
+            return False
+        key = (model, base_url, self.config.api_key)
+        if self._fallback_provider is None or self._fallback_key != key:
+            stale = self._fallback_provider
+            self._fallback_provider = self._build_fallback_provider(
+                dataclasses.replace(self.config, model=model, base_url=base_url)
+            )
+            self._fallback_key = key
+            if stale is not None:
+                stale.close()
+        self._turn_provider = self._fallback_provider
+        return True
+
+    def _build_fallback_provider(self, config: LilBotConfig) -> BaseProvider:
+        return choose_provider(config)
+
+    def close(self) -> None:
+        """Release provider network resources (main + fallback)."""
+        for provider in (self.provider, self._fallback_provider):
+            close = getattr(provider, "close", None)
+            if callable(close):
+                close()
+        self._fallback_provider = None
+        self._turn_provider = None
+
+    def _drive_stream(
+        self,
+        messages: list[dict[str, Any]],
+        schemas: list[dict[str, Any]],
+        *,
+        provider: Any = None,
+        progress: dict[str, bool] | None = None,
+    ):
         """Consume the provider's stream, emitting live deltas; return (turn, streamed).
 
         Falls back to a single blocking call for duck-typed providers that only
         implement ``complete``. ``streamed`` is True only when incremental text
         was actually surfaced to the UI, so the caller knows whether to also emit
-        a final block.
+        a final block. ``progress["emitted"]`` flips as soon as any text is
+        surfaced, so a mid-stream failure is known to be unsafe to replay.
         """
-        stream_fn = getattr(self.provider, "complete_stream", None)
+        provider = provider or self.provider
+        progress = progress if progress is not None else {}
+        stream_fn = getattr(provider, "complete_stream", None)
         if stream_fn is None:
-            turn = self.provider.complete(messages, schemas)
+            turn = provider.complete(messages, schemas)
             return turn, False
 
         show = bool(getattr(self.config, "stream_output", True))
@@ -1105,6 +1214,7 @@ class Agent:
                 parts.append(text)
                 if show:
                     streamed = True
+                    progress["emitted"] = True
                     yield TextDelta(text, interim=True, streaming=True)
             # reasoning deltas are consumed (drive the stream) but not displayed.
         if final is None:

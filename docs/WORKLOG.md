@@ -54,7 +54,8 @@ git log --oneline -5                        # 看最近提交
 - 恢复入口：`docs/hermes-gap/SESSION_LOG.md`（进度、断点、基准数据都在这里）
   - ⚠️ 这个文件可能被本机加密软件加密（`cat` / 编辑器看到的是乱码）。用 Python 读明文：
     `$env:PYTHONIOENCODING='utf-8'; .\.venv\Scripts\python -c "import sys;sys.stdout.write(open('docs/hermes-gap/SESSION_LOG.md',encoding='utf-8').read())"`
-- 2026-10-23 Day 1（HTTP 连接复用）已完成，下一步 Day 2（错误分类 + 重试 + 备用模型）；测试 425 passed / 6 skipped
+- 2026-10-23 Day 1（HTTP 连接复用）已完成并推送
+- 2026-10-27 Day 2（错误分类 + 重试 + 备用模型）已完成；下一步 Day 3（中文 token 估算 + 辅助模型）；测试 466 passed / 6 skipped
 - 报告：`docs/hermes-gap/01-LilBot与Hermes差距分析报告.md`；计划：`docs/hermes-gap/02-七天优化计划.md`
 - 下面的 Week 2 Durable Runtime MVP 已并入七天计划的 Day 5
 
@@ -65,5 +66,5 @@ git log --oneline -5                        # 看最近提交
 
 ### 📝 记下的小问题（未排期）
 - `--resume` 参数可选，会吞掉后面的 prompt（需写成 `lilbot --print "问题" --resume`）
-- Provider 没有请求级重试（S5）
+- ~~Provider 没有请求级重试（S5）~~ → Day 2 已解决（主循环）；子代理和侧查询仍无重试
 - 根目录有残留文件 `Untitled`、`hello.txt`、`hello002.txt`（清理前需和 terrense 确认）
