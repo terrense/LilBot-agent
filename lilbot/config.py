@@ -10,6 +10,7 @@ from typing import Any
 DEFAULT_MAX_STEPS = 20
 DEFAULT_TUI_FONT_SIZE = 22
 DEFAULT_SUBAGENT_MAX_CONCURRENT = 8
+DEFAULT_MAX_RETRIES = 3
 
 
 @dataclass
@@ -31,6 +32,13 @@ class LilBotConfig:
     # Stream model output token-by-token to the UI. Falls back to a single
     # final block automatically for providers without a streaming transport.
     stream_output: bool = True
+    # Provider failure handling (llm/errors.py + llm/retry.py): retries per
+    # model call for transient errors (429/5xx/timeouts), then an optional
+    # fallback model for the rest of the turn. The fallback reuses api_key;
+    # an empty fallback_base_url means "same endpoint as the main model".
+    max_retries: int = DEFAULT_MAX_RETRIES
+    fallback_model: str = ""
+    fallback_base_url: str = ""
 
     @property
     def state_dir(self) -> Path:
@@ -131,6 +139,12 @@ def apply_env_overrides(cfg: LilBotConfig) -> LilBotConfig:
         cfg.context_window = max(8_000, _env_int("LILBOT_CONTEXT_WINDOW", cfg.context_window))
     if _env("LILBOT_STREAM"):
         cfg.stream_output = _env("LILBOT_STREAM").strip().lower() not in {"0", "false", "no", "off"}
+    if _env("LILBOT_MAX_RETRIES"):
+        cfg.max_retries = max(0, _env_int("LILBOT_MAX_RETRIES", cfg.max_retries))
+    if _env("LILBOT_FALLBACK_MODEL"):
+        cfg.fallback_model = _env("LILBOT_FALLBACK_MODEL").strip()
+    if _env("LILBOT_FALLBACK_BASE_URL"):
+        cfg.fallback_base_url = _env("LILBOT_FALLBACK_BASE_URL").strip().rstrip("/")
     return cfg
 
 

@@ -8,18 +8,44 @@ from typing import Any, Iterable, Iterator
 
 from ..config import LilBotConfig
 from ..core.events import ProviderTurn, StreamEvent, ToolCall
+from .retry import parse_retry_after
 
 
 class ProviderError(RuntimeError):
     """Provider failure. Carries a structured ``status_code`` and ``is_overflow``
     flag so the agent can react to a context-overflow (413 / context_length_exceeded)
     by compacting and retrying, instead of matching error strings (CC's lesson:
-    judge errors by structured signals, use text only as a fallback)."""
+    judge errors by structured signals, use text only as a fallback).
 
-    def __init__(self, message: str, *, status_code: int | None = None, is_overflow: bool = False):
+    ``reason`` names a transport failure with no HTTP status (``"timeout"`` /
+    ``"network"``) and ``retry_after`` carries the server's Retry-After, both
+    read by ``llm.errors.classify``."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        is_overflow: bool = False,
+        reason: str | None = None,
+        retry_after: float | None = None,
+    ):
         super().__init__(message)
         self.status_code = status_code
         self.is_overflow = is_overflow
+        self.reason = reason
+        self.retry_after = retry_after
+
+
+def _transport_error(provider: str, url: str, model: str, exc: Exception) -> ProviderError:
+    """Wrap an httpx transport failure (no response) as a classified ProviderError."""
+    import httpx
+
+    reason = "timeout" if isinstance(exc, httpx.TimeoutException) else "network"
+    return ProviderError(
+        f"{provider} chat request failed for {url} (model={model}): {type(exc).__name__}: {exc}",
+        reason=reason,
+    )
 
 
 class BaseProvider:
@@ -431,7 +457,7 @@ class OpenAICompatibleProvider(BaseProvider):
         except ImportError as exc:  # pragma: no cover - dependency hint
             raise ProviderError("httpx is required for OpenAI-compatible provider") from exc
         if not self.config.api_key:
-            raise ProviderError("missing LILBOT_API_KEY or OPENAI_API_KEY")
+            raise ProviderError("missing LILBOT_API_KEY or OPENAI_API_KEY", reason="auth")
 
         body: dict[str, Any] = {
             "model": self.config.model,
@@ -446,7 +472,10 @@ class OpenAICompatibleProvider(BaseProvider):
             "Content-Type": "application/json",
         }
         url = f"{self.config.base_url.rstrip('/')}/chat/completions"
-        response = self._http_client().post(url, headers=headers, json=body)
+        try:
+            response = self._http_client().post(url, headers=headers, json=body)
+        except httpx.TransportError as exc:
+            raise _transport_error(self.config.provider, url, self.config.model, exc) from exc
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
@@ -458,6 +487,7 @@ class OpenAICompatibleProvider(BaseProvider):
                 f"for {exc.request.url} (model={self.config.model}). {detail}",
                 status_code=code,
                 is_overflow=_is_overflow_error(code, detail),
+                retry_after=parse_retry_after(exc.response.headers.get("retry-after")),
             ) from exc
         data = response.json()
         message = data["choices"][0]["message"]
@@ -489,7 +519,7 @@ class OpenAICompatibleProvider(BaseProvider):
         except ImportError as exc:  # pragma: no cover - dependency hint
             raise ProviderError("httpx is required for OpenAI-compatible provider") from exc
         if not self.config.api_key:
-            raise ProviderError("missing LILBOT_API_KEY or OPENAI_API_KEY")
+            raise ProviderError("missing LILBOT_API_KEY or OPENAI_API_KEY", reason="auth")
 
         body: dict[str, Any] = {
             "model": self.config.model,
@@ -521,6 +551,7 @@ class OpenAICompatibleProvider(BaseProvider):
                         f"for {response.request.url} (model={self.config.model}). {detail}",
                         status_code=code,
                         is_overflow=_is_overflow_error(code, detail),
+                        retry_after=parse_retry_after(response.headers.get("retry-after")),
                     )
                 lines = response.iter_lines()
                 yield from _iter_stream_events(lines)
@@ -530,6 +561,8 @@ class OpenAICompatibleProvider(BaseProvider):
                     pass
         except ProviderError:
             raise
+        except httpx.TransportError as exc:
+            raise _transport_error(self.config.provider, url, self.config.model, exc) from exc
         except httpx.HTTPError as exc:
             raise ProviderError(
                 f"{self.config.provider} chat stream failed for {url} "

@@ -81,3 +81,14 @@ class ToolFinished:
 class TurnFinished:
     steps: int  # 本回合实际执行的工具步数
     usage: dict[str, int] = field(default_factory=dict)  # 累计 token 用量
+
+
+@dataclass
+class ProviderRetry:
+    """模型调用失败后的恢复动作（重试 / 切换备用模型），供 UI 显示一行提示。"""
+
+    reason: str        # FailoverReason 的值，如 "rate_limit"
+    action: str        # "retry" 或 "fallback"
+    attempt: int = 0   # 第几次重试（fallback 时为 0）
+    delay: float = 0.0  # 本次重试前等待的秒数
+    detail: str = ""   # 简短的错误信息或备用模型名

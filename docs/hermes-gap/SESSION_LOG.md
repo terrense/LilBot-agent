@@ -22,21 +22,23 @@
 
 ## 当前断点
 
-- **阶段**：Day 1 已完成，**下一步是 Day 2：错误分类 + 指数退避重试 + 备用模型**
-- 未提交的改动：`docs/hermes-gap/`（3 个文件）、`docs/WORKLOG.md`、`lilbot/llm/providers.py`、`lilbot/cli.py`、`tests/test_http_client_reuse.py`、`benchmarks/bench_runtime.py`（等用户确认后再提交）
-- 测试：**425 passed / 6 skipped / 0 failed**（Day 0 是 417，新增 8 个）
+- **阶段**：Day 2 已完成（代码 + 测试 + 真实冒烟），**未提交**，等用户确认；**下一步是 Day 3：中文 token 估算 + 辅助模型路由**
+- 最近提交：`3fd83dc perf(llm): reuse one keep-alive httpx client per provider`（Day 0 + Day 1，已推送到 GitHub `origin/dev/nayang`）
+- Day 2 未提交的改动：`lilbot/llm/errors.py`、`lilbot/llm/retry.py`（新）、`tests/test_retry.py`（新）、`lilbot/llm/providers.py`、`lilbot/core/agent.py`、`lilbot/core/events.py`、`lilbot/config.py`、`lilbot/cli.py`、`lilbot/tui/classic.py`、`lilbot/tui/dashboard.py`、本文件、`02-七天优化计划.md`、`docs/WORKLOG.md`
+- 提交约定：提交信息**不要**加 `Co-Authored-By` 行；提交身份用仓库级配置 NaYanyeee
+- 测试：**466 passed / 6 skipped / 0 failed**（Day 1 是 425，Day 2 新增 41 个）
 
 ## 基准数据（每天更新）
 
 | 指标 | Day 0 基线 | Day 1 | Day 2 | Day 3 | Day 4 | Day 5 | Day 6 | Day 7 |
 |---|---|---|---|---|---|---|---|---|
-| httpx.Client 创建开销 / 次 | 813 ms | 0.2 ms | | | | | | |
-| 10 次连续流式请求（本地假服务器） | 7,830 ms / 10 条 TCP | 7.5 ms / 1 条 TCP | | | | | | |
-| 中文 1,450 字的 token 估算（实际约 1,000–1,450） | 362 | 362 | | | | | | |
-| 仓库根目录 grep（不存在的字符串） | 1,739 ms | ~1,070 ms（未改，波动） | | | | | | |
-| 回合中途崩溃后保留的消息 | 0 | 0 | | | | | | |
-| 429 / 5xx 时回合是否存活 | ❌ | ❌ | | | | | | |
-| 全量测试 passed | 417 | 425 | | | | | | |
+| httpx.Client 创建开销 / 次 | 813 ms | 0.2 ms | 0.2 ms | | | | | |
+| 10 次连续流式请求（本地假服务器） | 7,830 ms / 10 条 TCP | 7.5 ms / 1 条 TCP | 同左 | | | | | |
+| 中文 1,450 字的 token 估算（实际约 1,000–1,450） | 362 | 362 | 362 | | | | | |
+| 仓库根目录 grep（不存在的字符串） | 1,739 ms | ~1,070 ms（未改，波动） | 未改 | | | | | |
+| 回合中途崩溃后保留的消息 | 0 | 0 | 回合失败时全部保留（回合内增量写仍待 Day 5） | | | | | |
+| 429 / 5xx 时回合是否存活 | ❌ | ❌ | ✅ 退避重试 3 次 → 备用模型 | | | | | |
+| 全量测试 passed | 417 | 425 | 466 | | | | | |
 
 ## 会话记录
 
@@ -56,4 +58,16 @@
 - 新增 `benchmarks/bench_runtime.py`
 - 真实验证：MiniMax-M3 `--print` 一次，正常回复
 - 踩坑：文档里写了加密软件的文件头标记原文 → 文件被加密。已改写为明文并在“环境速查”里记下规则
-- 遗留：`complete()`（非流式）遇到连接错误抛的是 `httpx.HTTPError` 而不是 `ProviderError` → Day 2 一起处理
+- 遗留：`complete()`（非流式）遇到连接错误抛的是 `httpx.HTTPError` 而不是 `ProviderError` → Day 2 一起处理（✅ 已在 Day 2 修复）
+
+### 2026-10-27 · Day 2：错误分类 + 重试 + 备用模型
+- 新增 `lilbot/llm/errors.py`：`FailoverReason`（auth / billing / rate_limit / overloaded / server_error / timeout / network / context_overflow / model_not_found / format_error / unknown）+ `classify(exc) -> ClassifiedError(retryable, should_compress, should_fallback, retry_after)`。先看结构化信号（`is_overflow`、`reason`、`status_code`、httpx 异常类型），文字只做兜底（如 429 + `insufficient_quota` 判为 billing）。我们自己代码的 bug（如 `KeyError`）判为 unknown，**不重试**
+- 新增 `lilbot/llm/retry.py`：`jittered_backoff`（2s、4s、8s… 加最多 50% 抖动，上限 60s）、`parse_retry_after`（秒数或 HTTP 日期）、`retry_delay`（有 Retry-After 就听服务器的，上限 60s）
+- `providers.py`：`ProviderError` 增加 `reason`、`retry_after`；两条请求路径都把 httpx 传输错误包装成 `reason="timeout"/"network"`；解析 `Retry-After` 头；缺 key 标为 `auth`
+- `agent.py:_stream_turn` 恢复链：①已经流式输出过文字 → 直接抛出（重放会重复输出）②上下文溢出 → 压缩重试（原逻辑）③临时错误 → 退避重试，最多 `max_retries` 次 ④仍失败或模型不存在/欠费 → 本回合切到备用模型（只切一次，下一回合回到主模型）⑤其他 → 抛出。每次恢复都 yield `ProviderRetry` 事件并记录 transition
+- `run_turn` 包了一层：失败（含 Ctrl+C）时先 `_persist_session()` 再抛出；新增 `Agent.close()`（关闭主模型和备用模型的连接）
+- 配置：`LILBOT_MAX_RETRIES`（默认 3）、`LILBOT_FALLBACK_MODEL`、`LILBOT_FALLBACK_BASE_URL`（备用模型复用同一个 api_key，没有新增密钥字段）
+- UI：两个界面都显示一行黄色提示，如 `↻ rate_limit: retry 1 in 2.4s — …`；`--print` 模式最终失败时只打一行错误、退出码 1（原来是整段 traceback）
+- 新增 `tests/test_retry.py`（41 个用例）；全量 466 passed
+- 真实验证：①MiniMax-M3 正常回复 ②`LILBOT_BASE_URL=http://127.0.0.1:9/v1` → 两次重试（2.8s、5.5s）后报错，会话已保存 ③`LILBOT_MODEL=MiniMax-NoSuchModel` + `LILBOT_FALLBACK_MODEL=MiniMax-M3` → 自动切到备用模型并正常回复
+- 遗留：子代理（`ctx.subagents.provider` 走非流式 `complete`）和侧查询（召回、摘要）还没有重试；退避等待用的是 `time.sleep`，Day 6 改成可中断的 `Event.wait`

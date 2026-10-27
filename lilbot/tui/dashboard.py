@@ -13,7 +13,8 @@ from typing import Iterable
 
 from ..core.agent import Agent
 from ..cli import handle_slash, run_prompt, slash_command_runs_agent, slash_commands_matching
-from ..core.events import TextDelta, ToolFinished, ToolStarted, TurnFinished
+from ..core.events import ProviderRetry, TextDelta, ToolFinished, ToolStarted, TurnFinished
+from .classic import _retry_notice
 from ..security import redact_args, redact_secrets
 from ..tools import ToolContext, ToolRegistry
 from .input_history import InputHistory
@@ -772,6 +773,8 @@ class DashboardUI:
                 f"{event.elapsed_ms}ms",
                 f"{len(event.output.splitlines()) if event.output else 0} output lines",
             ]
+        elif isinstance(event, ProviderRetry):
+            self._append(_retry_notice(event))
         elif isinstance(event, TurnFinished):
             self._append(f"completed {event.steps} steps")
             self.work_items = ["No active work."]
