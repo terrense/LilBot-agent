@@ -22,23 +22,31 @@
 
 ## 当前断点
 
-- **阶段**：Day 2 已完成（代码 + 测试 + 真实冒烟），**未提交**，等用户确认；**下一步是 Day 3：中文 token 估算 + 辅助模型路由**
-- 最近提交：`3fd83dc perf(llm): reuse one keep-alive httpx client per provider`（Day 0 + Day 1，已推送到 GitHub `origin/dev/nayang`）
-- Day 2 未提交的改动：`lilbot/llm/errors.py`、`lilbot/llm/retry.py`（新）、`tests/test_retry.py`（新）、`lilbot/llm/providers.py`、`lilbot/core/agent.py`、`lilbot/core/events.py`、`lilbot/config.py`、`lilbot/cli.py`、`lilbot/tui/classic.py`、`lilbot/tui/dashboard.py`、本文件、`02-七天优化计划.md`、`docs/WORKLOG.md`
+- **阶段**：Day 3、Day 4 已分两次提交；**下一步是 Day 5：回合内增量持久化**
+- 提交记录（`dev/nayang`）：
+  - Day 4：`perf(search): one pruning walker for every search tool, parallel reads`（含 Day 3/4 的文档更新）
+  - Day 3：`058ea96 feat(context): CJK-aware token estimate, live calibration, aux model for side queries`（单独检出跑过全量：481 passed）
+  - Day 2：`83b4a20`；Day 0 + Day 1：`3fd83dc`
 - 提交约定：提交信息**不要**加 `Co-Authored-By` 行；提交身份用仓库级配置 NaYanyeee
-- 测试：**466 passed / 6 skipped / 0 failed**（Day 1 是 425，Day 2 新增 41 个）
+- 测试：**509 passed / 7 skipped / 0 failed**（Day 3 是 481，Day 4 新增 28 个；多出的 1 个 skipped 是 Windows 上无法建符号链接的用例）
+- 用户偏好（2026-10-29）：每天的优化除了改代码，还要**单独生成一份优化报告**（策略、代码走读、数据流、坑、知识点），放在 `docs/hermes-gap/0N-DayN-*.md`
 
 ## 基准数据（每天更新）
 
 | 指标 | Day 0 基线 | Day 1 | Day 2 | Day 3 | Day 4 | Day 5 | Day 6 | Day 7 |
 |---|---|---|---|---|---|---|---|---|
-| httpx.Client 创建开销 / 次 | 813 ms | 0.2 ms | 0.2 ms | | | | | |
-| 10 次连续流式请求（本地假服务器） | 7,830 ms / 10 条 TCP | 7.5 ms / 1 条 TCP | 同左 | | | | | |
-| 中文 1,450 字的 token 估算（实际约 1,000–1,450） | 362 | 362 | 362 | | | | | |
-| 仓库根目录 grep（不存在的字符串） | 1,739 ms | ~1,070 ms（未改，波动） | 未改 | | | | | |
-| 回合中途崩溃后保留的消息 | 0 | 0 | 回合失败时全部保留（回合内增量写仍待 Day 5） | | | | | |
-| 429 / 5xx 时回合是否存活 | ❌ | ❌ | ✅ 退避重试 3 次 → 备用模型 | | | | | |
-| 全量测试 passed | 417 | 425 | 466 | | | | | |
+| httpx.Client 创建开销 / 次 | 813 ms | 0.2 ms | 0.2 ms | 0.2 ms | | | | |
+| 10 次连续流式请求（本地假服务器） | 7,830 ms / 10 条 TCP | 7.5 ms / 1 条 TCP | 同左 | 同左 | | | | |
+| 中文文档 6,000 字符的 token 估算（MiniMax-M3 实测 2,610） | 1,500（-43%） | 同左 | 同左 | 2,965（+14%） | | | | |
+| 整个真实请求的估算误差（系统提示 + 工具定义 + 对话，实测 11,408） | 偏低（中文系统提示按 len/4 算） | | | 11,624（+2%），校准后系数 0.98 | | | | |
+| 仓库根目录 grep（不存在的字符串） | 1,739 ms | ~1,070 ms（未改，波动） | 未改 | 未改（这次测到 3,179 ms，波动很大） | **54 ms**（3 次中位数） | | | |
+| `glob **/*.py`（耗时 / 返回行数） | 1,084 ms / 1,793 行（1,682 行是 .venv） | | | | **9 ms / 113 行** | | | |
+| 真实任务“找函数 + 数 .py 文件”（MiniMax-M3） | | | | 19 步 / 26.5 s | **2 步 / 5.8 s** | | | |
+| 回合中途崩溃后保留的消息 | 0 | 0 | 回合失败时全部保留（回合内增量写仍待 Day 5） | 同左 | | | | |
+| 429 / 5xx 时回合是否存活 | ❌ | ❌ | ✅ 退避重试 3 次 → 备用模型 | ✅ | | | | |
+| 全量测试 passed | 417 | 425 | 466 | 481 | 509 | | | |
+
+> 注：Day 0 时“中文 1,450 字”那一行用的是一句话重复 50 次的人造文本，Day 3 实测发现它会被分词器异常压缩（实际只有 701 token），不具代表性，所以换成了 `benchmarks/samples/` 下的真实文本。
 
 ## 会话记录
 
@@ -71,3 +79,30 @@
 - 新增 `tests/test_retry.py`（41 个用例）；全量 466 passed
 - 真实验证：①MiniMax-M3 正常回复 ②`LILBOT_BASE_URL=http://127.0.0.1:9/v1` → 两次重试（2.8s、5.5s）后报错，会话已保存 ③`LILBOT_MODEL=MiniMax-NoSuchModel` + `LILBOT_FALLBACK_MODEL=MiniMax-M3` → 自动切到备用模型并正常回复
 - 遗留：子代理（`ctx.subagents.provider` 走非流式 `complete`）和侧查询（召回、摘要）还没有重试；退避等待用的是 `time.sleep`，Day 6 改成可中断的 `Event.wait`
+
+### 2026-10-28 · Day 3：中文 token 估算 + 校准 + 辅助模型
+- **先实测再定系数**：用 MiniMax-M3 真实 `prompt_tokens` 测了 3 份真实文本（存到 `benchmarks/samples/`）。中文文档：实测 2,610，旧 `len/4` 1,500（-43%）。原计划里的“1,450 字重复句”是人造文本，实测只有 701 token，已弃用
+- `compaction.py:estimate_tokens_text`：按字符类别估算，ASCII /4、CJK（含全角标点、假名、韩文）×1、其他非 ASCII /2；纯 ASCII 结果和以前完全一样。中文文档 2,965（+14%），偏高是安全方向（早一点压缩，而不是溢出）。恢复附件的截断也改成按这段文本自己的“字符/token”比例
+- **修了一个已有 bug**：`_add_usage` 被侧查询（召回、记忆抽取、摘要、委派规划）调用时也会覆盖 `_last_input_tokens`，召回在后台线程完成后会把压缩触发值从几千改成几十，导致该压缩时不压缩。现在只有主循环（`main_loop=True`）更新它。旧代码实测：5000 → 7
+- 校准：每次主循环请求前记下估算值（消息 + 工具定义），拿到真实 `prompt_tokens` 后更新 EMA 系数（α=0.3，异常样本 <0.3 或 >3 丢弃）
+- 新增 `Agent.context_tokens()`：上次真实值 + 之后新增消息的校准估算（工具结果最容易在这里被低估）。压缩触发、`/tokens`、`/status`、dashboard 顶栏都用它
+- **又修了两个显示 bug**：dashboard 顶栏的上下文百分比用的是 `usage["prompt_tokens"]`（全部请求累计值，几轮后就卡在 99%）；不在列表里的模型（如 MiniMax）上下文窗口按 32K 算，和压缩用的 `context_window`（128K）对不上
+- 辅助模型：`LILBOT_AUX_MODEL`、`LILBOT_AUX_BASE_URL`（复用 api_key）。`_meta_query`（召回 / 记忆抽取 / 会话笔记）和委派规划走辅助模型；压缩摘要仍用主模型（复用前缀缓存）。`Agent.close()` 一并关闭
+- `/tokens` 新增 `estimate_calibration` 行；`/status` 新增 aux_model、fallback_model、context_tokens
+- 新增 `tests/test_token_estimate.py`（15 个用例）；全量 481 passed
+- 真实验证（MiniMax-M3 两轮 + `LILBOT_AUX_MODEL=MiniMax-M3.1-Flash`）：整个请求估算 11,624 vs 实测 11,408（+2%），校准系数 0.981；侧查询确实走了 M3.1-Flash，主循环仍是 M3
+- 可用模型（2026-10-28 查询 `/models`）：MiniMax-M3.1-Flash、MiniMax-M3、MiniMax-M2.7(-highspeed)、M2.5(-highspeed)、M2.1(-highspeed)、M2
+- 遗留：校准系数没有持久化（每次启动从 1.0 开始，第一次请求后就校准好了，影响很小）；压缩摘要是否改用辅助模型，等有了缓存命中数据再决定
+
+### 2026-10-29 · Day 4：搜索工具提速
+- **详细报告**：[04-Day4-搜索优化报告.md](04-Day4-搜索优化报告.md)（排查过程、策略、代码走读、数据流、14 条坑、知识点）
+- 根因（实测拆解）：不是“文件多读得慢”，而是 `rglob` 之后对 4,557 项逐个 `is_file()`，每次 `stat` 约 0.18 ms（加密 + 杀毒过滤驱动），共 831 ms；`os.scandir` 剪枝遍历同样的 183 个文件只要 7 ms
+- 新增 `lilbot/sandbox/walk.py`：`walk` / `iter_files`（scandir、进入前剪枝、顺序 == `sorted(rglob)`）、`IgnoreRules`（`.gitignore` 安全子集，否定规则跳过）、`read_text_for_search`（二进制后缀 / NUL 嗅探 / >2MB 跳过）、`read_texts`（8 线程、每批 32、保序）、`glob_to_regex`（兼容 3.11 `rglob` 语义）
+- 8 处 `rglob("*")` 全部换掉：`_grep`、`_glob`（经 `Sandbox.glob`）、`_list_dir`、`_file_search`、`_project_map`、`_iter_source_files`、`Sandbox.list_dir/grep`
+- 修了 4 个正确性 bug：glob 返回 `.venv`（95K 字符）；grep 单文件路径永远无结果；grep 在 PNG 里假匹配；不尊重 `.gitignore`
+- 瓶颈转移后发现：打开文件 0.72 ms/个 → 并行读 120 ms → 30 ms
+- 真实任务发现 glob 不给数量导致模型绕路 19 步 → 输出末尾加 `(N matches)` 后 2 步
+- **没做 ripgrep**：本机没装、无法验证，纯 Python 已 54 ms；理由写在报告第 5 节
+- 新旧输出逐行对比（`git archive` 导出旧版本）：只去掉了 `.venv`、`*.egg-info`、`.env`，顺序完全一致
+- 新增 `tests/test_search_walk.py`（28 个用例）；全量 509 passed / 7 skipped
+- 遗留：`skills/registry.py:170` 还有一处 `rglob`（技能目录很小，暂不改）；嵌套 `.gitignore` 不支持

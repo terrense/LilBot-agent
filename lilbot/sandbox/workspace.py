@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..security.env import scrubbed_env
+from .walk import glob_matches_dirs_only, glob_to_regex, iter_files, read_texts, walk
 
 
 class SandboxError(RuntimeError):
@@ -59,20 +60,22 @@ class Sandbox:
             raise SandboxError(f"path does not exist: {path}")
         if not base.is_dir():
             raise SandboxError(f"path is not a directory: {path}")
-        rows: list[str] = []
         max_depth = max(0, min(max_depth, 8))
-        for item in sorted(base.rglob("*") if max_depth else base.iterdir()):
-            rel = item.relative_to(base)
-            depth = len(rel.parts)
-            if depth > max_depth + 1:
-                continue
-            suffix = "/" if item.is_dir() else ""
-            rows.append(f"{rel.as_posix()}{suffix}")
-        return rows
+        return [
+            entry.rel + ("/" if entry.is_dir else "")
+            for entry in walk(base, root=self.root, max_depth=max_depth + 1, include_dirs=True)
+        ]
 
     def glob(self, pattern: str, path: str = ".") -> list[str]:
+        """Like ``base.rglob(pattern)`` minus noisy and .gitignore'd trees."""
         base = self.resolve(path)
-        matches = [p.relative_to(self.root).as_posix() for p in base.rglob(pattern)]
+        regex = glob_to_regex(pattern)
+        dirs_only = glob_matches_dirs_only(pattern)
+        matches = [
+            entry.path.relative_to(self.root).as_posix()
+            for entry in walk(base, root=self.root, include_dirs=True, respect_gitignore=True)
+            if regex.match(entry.rel) and (entry.is_dir or not dirs_only)
+        ]
         return sorted(matches)
 
     def grep(
@@ -84,15 +87,15 @@ class Sandbox:
     ) -> list[str]:
         base = self.resolve(path)
         rows: list[str] = []
-        for file_path in base.rglob("*"):
-            if not file_path.is_file():
+        files = [base] if base.is_file() else (
+            entry.path for entry in iter_files(base, root=self.root, respect_gitignore=True)
+        )
+        if glob_pattern:
+            files = (f for f in files if fnmatch.fnmatch(f.name, glob_pattern))
+        for file_path, text in read_texts(files):
+            if text is None:
                 continue
-            if glob_pattern and not fnmatch.fnmatch(file_path.name, glob_pattern):
-                continue
-            try:
-                lines = file_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-            except OSError:
-                continue
+            lines = text.splitlines()
             for idx, line in enumerate(lines, 1):
                 if pattern.lower() in line.lower():
                     rel = file_path.relative_to(self.root).as_posix()

@@ -9,7 +9,7 @@ Measures:
   1. httpx.Client creation cost (old per-request pattern vs the shared factory)
   2. 10 sequential streaming requests: new client each time vs provider reuse,
      plus how many TCP connections the server saw
-  3. grep over the repo for a string that does not exist (Day 4)
+  3. grep (no match) and glob **/*.py over the repo, median of 3 (Day 4)
   4. token estimate vs real MiniMax-M3 counts on benchmarks/samples (Day 3)
 """
 from __future__ import annotations
@@ -35,7 +35,7 @@ from lilbot.config import LilBotConfig  # noqa: E402
 from lilbot.core.compaction import estimate_tokens_text  # noqa: E402
 from lilbot.llm import providers  # noqa: E402
 from lilbot.sandbox import Sandbox  # noqa: E402
-from lilbot.tools.builtin import _grep  # noqa: E402
+from lilbot.tools.builtin import _glob, _grep  # noqa: E402
 
 _SSE = (
     b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
@@ -117,11 +117,24 @@ def bench_sequential_requests(n: int = 10) -> dict[str, float]:
     }
 
 
-def bench_grep() -> dict[str, float]:
+def bench_grep(runs: int = 3) -> dict[str, object]:
+    """Median of a few runs — single runs swing 2x with the OS file cache."""
     ctx = SimpleNamespace(sandbox=Sandbox(ROOT))
-    t = time.perf_counter()
-    _grep({"pattern": "zzz_not_exist_zzz"}, ctx)
-    return {"grep_repo_no_match_ms": _ms(time.perf_counter() - t)}
+
+    def median_ms(fn) -> float:
+        samples = []
+        for _ in range(runs):
+            t = time.perf_counter()
+            fn()
+            samples.append(time.perf_counter() - t)
+        return _ms(statistics.median(samples))
+
+    glob_lines = _glob({"pattern": "**/*.py"}, ctx).metadata["count"]
+    return {
+        "grep_repo_no_match_ms": median_ms(lambda: _grep({"pattern": "zzz_not_exist_zzz"}, ctx)),
+        "glob_py_ms": median_ms(lambda: _glob({"pattern": "**/*.py"}, ctx)),
+        "glob_py_lines": glob_lines,
+    }
 
 
 # Real prompt_tokens for benchmarks/samples/*, measured on MiniMax-M3

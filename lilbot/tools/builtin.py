@@ -25,6 +25,7 @@ from typing import Any
 from uuid import uuid4
 
 from ..sandbox import analyze_powershell_command
+from ..sandbox.walk import NOISY_DIRS, is_noisy_dir, iter_files, read_texts, walk  # noqa: F401  (NOISY_DIRS re-exported)
 from ..security.env import scrubbed_env
 from ..subagents import SubAgentGateError
 from .registry import ApprovalRequirement, ToolCapability, ToolContext, ToolDef, ToolRegistry, ToolResult
@@ -60,22 +61,7 @@ def _bool(description: str, default: bool | None = None) -> dict[str, Any]:
 WEB_USER_AGENT = "LilBot/0.1 (+https://github.com/terrense/LilBot-agent)"
 MAX_WEB_RESULTS = 10
 MAX_FETCH_CHARS = 40000
-NOISY_DIRS = {
-    ".git",
-    ".hg",
-    ".svn",
-    ".lilbot",
-    "__pycache__",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    ".venv",
-    "venv",
-    "env",
-    "node_modules",
-    "dist",
-    "build",
-}
+# NOISY_DIRS lives in sandbox/walk.py (one walker for every search tool).
 _SHELL_JOBS: dict[str, dict[str, Any]] = {}
 _SHELL_LOCK = threading.RLock()
 _RLM_SESSIONS: dict[str, dict[str, Any]] = {}
@@ -122,7 +108,7 @@ def _is_noisy_path(path: Path, root: Path) -> bool:
         rel = path.relative_to(root)
     except ValueError:
         return True
-    return any(part in NOISY_DIRS for part in rel.parts)
+    return any(is_noisy_dir(part) for part in rel.parts)
 
 
 def _parse_line_range(value: Any, total: int) -> tuple[int, int] | None:
@@ -472,20 +458,20 @@ def _list_dir(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     limit = max(1, min(int(args.get("limit", 500)), 5000))
     include_hidden = bool(args.get("include_hidden", False))
     entries = []
-    iterator = base.rglob("*") if max_depth else base.iterdir()
-    for item in sorted(iterator):
-        if _is_noisy_path(item, ctx.sandbox.root):
+    for entry in walk(base, root=ctx.sandbox.root, max_depth=max_depth + 1, include_dirs=True):
+        if not include_hidden and any(part.startswith(".") for part in entry.rel.split("/")):
             continue
-        rel_from_base = item.relative_to(base)
-        if len(rel_from_base.parts) > max_depth + 1:
-            continue
-        if not include_hidden and any(part.startswith(".") for part in rel_from_base.parts):
-            continue
-        rel = item.relative_to(ctx.sandbox.root).as_posix()
+        rel = entry.path.relative_to(ctx.sandbox.root).as_posix()
+        size = None
+        if not entry.is_dir:
+            try:
+                size = entry.path.stat().st_size
+            except OSError:
+                size = None
         entries.append({
-            "path": rel + ("/" if item.is_dir() else ""),
-            "type": "dir" if item.is_dir() else "file",
-            "size": item.stat().st_size if item.is_file() else None,
+            "path": rel + ("/" if entry.is_dir else ""),
+            "type": "dir" if entry.is_dir else "file",
+            "size": size,
         })
         if len(entries) >= limit:
             break
@@ -715,9 +701,8 @@ def _file_search(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     limit = max(1, min(int(args.get("limit", args.get("max_results", 50))), 200))
     base = ctx.sandbox.resolve(args.get("path", "."))
     matches: list[tuple[int, str]] = []
-    for path in base.rglob("*"):
-        if _is_noisy_path(path, ctx.sandbox.root):
-            continue
+    for entry in walk(base, root=ctx.sandbox.root, include_dirs=True, respect_gitignore=True):
+        path = entry.path
         rel = path.relative_to(ctx.sandbox.root).as_posix()
         name = path.name.lower()
         haystack = rel.lower()
@@ -731,7 +716,7 @@ def _file_search(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         if query in haystack:
             score += 20
         if score:
-            matches.append((score, rel + ("/" if path.is_dir() else "")))
+            matches.append((score, rel + ("/" if entry.is_dir else "")))
     matches.sort(key=lambda item: (-item[0], item[1]))
     rows = [{"path": rel, "score": score} for score, rel in matches[:limit]]
     return ToolResult(True, "\n".join(item["path"] for item in rows) if rows else "(no matches)", {"matches": rows, "count": len(rows)})
@@ -1345,13 +1330,11 @@ def _iter_source_files(base: Path, root: Path, limit: int = 2000) -> list[Path]:
     if base.is_file():
         return [base] if base.suffix.lower() in SYMBOL_SUFFIXES else []
     files: list[Path] = []
-    for path in sorted(base.rglob("*")):
+    for entry in iter_files(base, root=root, respect_gitignore=True):
         if len(files) >= limit:
             break
-        if not path.is_file() or _is_noisy_path(path, root):
-            continue
-        if path.suffix.lower() in SYMBOL_SUFFIXES:
-            files.append(path)
+        if entry.path.suffix.lower() in SYMBOL_SUFFIXES:
+            files.append(entry.path)
     return files
 
 
@@ -2184,12 +2167,11 @@ def _project_map(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     directories: list[str] = []
     files: list[str] = []
     counts = {"files": 0, "directories": 0, "by_suffix": {}}
-    for path in sorted(root.rglob("*")):
-        if _is_noisy_path(path, root):
-            continue
+    for entry in walk(root, root=root, include_dirs=True, respect_gitignore=True):
+        path = entry.path
         rel_path = path.relative_to(root)
         rel = rel_path.as_posix()
-        if path.is_dir():
+        if entry.is_dir:
             counts["directories"] += 1
             if len(rel_path.parts) <= max_depth:
                 directories.append(rel + "/")
@@ -2418,7 +2400,10 @@ def _exec_shell_cancel(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
 
 def _glob(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     rows = ctx.sandbox.glob(args["pattern"], args.get("path", "."))
-    return ToolResult(True, "\n".join(rows) if rows else "(no matches)")
+    if not rows:
+        return ToolResult(True, "(no matches)", {"count": 0})
+    # The trailing count saves the model from re-globbing per directory to count.
+    return ToolResult(True, "\n".join(rows) + f"\n({len(rows)} matches)", {"count": len(rows), "paths": rows})
 
 
 def _grep(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -2433,18 +2418,29 @@ def _grep(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     before = max(0, min(int(args.get("before", args.get("context", 0))), 20))
     after = max(0, min(int(args.get("after", args.get("context", 0))), 20))
     matches = []
-    for file_path in base.rglob("*"):
+    scanned = skipped = 0
+    # A single file is searchable too (rglob on a file used to yield nothing).
+    files = [base] if base.is_file() else (
+        entry.path for entry in iter_files(base, root=ctx.sandbox.root, respect_gitignore=True)
+    )
+
+    def candidates():
+        for file_path in files:
+            rel = file_path.relative_to(ctx.sandbox.root).as_posix()
+            if glob_pattern and not fnmatch.fnmatch(rel, str(glob_pattern)) and not fnmatch.fnmatch(file_path.name, str(glob_pattern)):
+                continue
+            yield file_path
+
+    # Files are read in parallel (order preserved); see sandbox/walk.read_texts.
+    for file_path, text in read_texts(candidates()):
         if len(matches) >= max_results:
             break
-        if not file_path.is_file() or _is_noisy_path(file_path, ctx.sandbox.root):
-            continue
         rel = file_path.relative_to(ctx.sandbox.root).as_posix()
-        if glob_pattern and not fnmatch.fnmatch(rel, str(glob_pattern)) and not fnmatch.fnmatch(file_path.name, str(glob_pattern)):
+        if text is None:  # binary or larger than MAX_SEARCH_FILE_BYTES
+            skipped += 1
             continue
-        try:
-            lines = file_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-        except OSError:
-            continue
+        scanned += 1
+        lines = text.splitlines()
         for idx, line in enumerate(lines, 1):
             if pattern.search(line):
                 start = max(1, idx - before)
@@ -2458,7 +2454,10 @@ def _grep(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
                 if len(matches) >= max_results:
                     break
     rows = [f"{item['path']}:{item['line']}: {item['text']}" for item in matches]
-    return ToolResult(True, "\n".join(rows) if rows else "(no matches)", {"matches": matches, "count": len(matches), "pattern": pattern_text})
+    return ToolResult(True, "\n".join(rows) if rows else "(no matches)", {
+        "matches": matches, "count": len(matches), "pattern": pattern_text,
+        "files_scanned": scanned, "files_skipped": skipped,
+    })
 
 
 def _memory_save(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
