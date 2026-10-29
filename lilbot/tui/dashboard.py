@@ -12,6 +12,7 @@ from time import monotonic
 from typing import Iterable
 
 from ..core.agent import Agent
+from ..core.compaction import estimate_tokens
 from ..cli import handle_slash, run_prompt, slash_command_runs_agent, slash_commands_matching
 from ..core.events import ProviderRetry, TextDelta, ToolFinished, ToolStarted, TurnFinished
 from .classic import _retry_notice
@@ -1676,10 +1677,11 @@ class DashboardUI:
         )
 
     def _context_percent(self) -> int:
-        serialized = json.dumps(self.agent.messages, ensure_ascii=False, default=str)
-        estimated_tokens = max(1, len(serialized) // 4)
-        usage_tokens = self.agent.usage.get("prompt_tokens") or self.agent.usage.get("input_tokens") or 0
-        estimated_tokens = max(estimated_tokens, int(usage_tokens))
+        # Current context size, not usage["prompt_tokens"] - that is the
+        # cumulative total over every call and pinned the bar at 99%.
+        fn = getattr(self.agent, "context_tokens", None)
+        estimated_tokens = (fn() if callable(fn) else 0) or estimate_tokens(self.agent.messages)
+        estimated_tokens = max(1, estimated_tokens)
         limit = self._model_context_limit()
         return min(99, int((estimated_tokens / limit) * 100))
 
@@ -1693,7 +1695,8 @@ class DashboardUI:
             return 200000
         if "gemini" in model:
             return 1000000
-        return 32000
+        # Same window compaction uses, so the bar and the trigger agree.
+        return int(getattr(self.ctx.config, "context_window", 0) or 32000)
 
     def _agent_panel(self):
         width = self._width()

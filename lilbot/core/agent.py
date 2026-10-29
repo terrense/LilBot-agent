@@ -16,6 +16,8 @@ from .compaction import (
     CompactCircuitBreaker,
     RecoveryState,
     auto_compact,
+    estimate_tokens,
+    estimate_tokens_text,
     is_context_overflow_error,
     partial_compact,
 )
@@ -242,6 +244,19 @@ class Agent:
         self._fallback_provider: BaseProvider | None = None
         self._fallback_key: tuple[str, str, str] | None = None
         self._turn_provider: BaseProvider | None = None
+        # Auxiliary (cheaper) model for side queries - recall, memory extraction,
+        # session notes, delegation planning. Built lazily, possibly from the
+        # recall-prefetch thread, hence the lock. Unset => main provider.
+        self._aux_provider: BaseProvider | None = None
+        self._aux_key: tuple[str, str, str] | None = None
+        self._aux_lock = threading.Lock()
+        # Token-estimate calibration (Hermes gap P3): the char-class estimate is
+        # scaled by an EMA of real prompt_tokens / estimate from main-loop calls,
+        # so each model's tokenizer is learned instead of guessed.
+        self._estimate_ratio = 1.0
+        self._estimate_samples = 0
+        self._last_request_estimate = 0
+        self._last_request_len = 0
 
     def run_turn(self, user_text: str) -> Iterator[object]:
         """One user turn. A failure (provider error, Ctrl+C) still persists the
@@ -297,7 +312,7 @@ class Agent:
             self._drain_team_notifications()
             render_ctx = self.ctx.subagents.get_render_context() if getattr(self.ctx, "subagents", None) else None
             turn, streamed = yield from self._stream_turn(render_ctx)
-            self._add_usage(turn)
+            self._add_usage(turn, main_loop=True)
             self._record_cache_usage(turn.usage)
             # When the text already streamed live, don't re-emit it as a block.
             if turn.content and not streamed:
@@ -564,7 +579,7 @@ class Agent:
         return type(self.provider).__name__ != "RuleBasedProvider"
 
     def _meta_query(self, system_prompt: str, user_message: str) -> str:
-        turn = self.provider.complete(
+        turn = self._side_provider().complete(
             [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_message}],
             [],
         )
@@ -759,7 +774,7 @@ class Agent:
         if not should_consult_semantic_delegation(user_text):
             return None
         try:
-            turn = self.provider.complete(
+            turn = self._side_provider().complete(
                 semantic_delegation_messages(user_text, max_agents, max_question_agents),
                 [],
             )
@@ -954,7 +969,7 @@ class Agent:
             recovery=self.recovery,
             tool_names=self._tool_names_for_recovery(),
             breaker=self.compact_breaker,
-            actual_tokens=self._last_input_tokens,
+            actual_tokens=self.context_tokens(),
             cache_cold=self._cache_is_cold(),
             message_summarizer=self._message_summarizer if self._shared_summary_available() else None,
         )
@@ -1108,10 +1123,13 @@ class Agent:
         retries = 0
         while True:
             progress = {"emitted": False}
+            messages = self._provider_messages()
+            schemas = self.registry.schemas(render_ctx)
+            self._note_request_size(messages, schemas)
             try:
                 result = yield from self._drive_stream(
-                    self._provider_messages(),
-                    self.registry.schemas(render_ctx),
+                    messages,
+                    schemas,
                     provider=self._turn_provider or self.provider,
                     progress=progress,
                 )
@@ -1170,13 +1188,14 @@ class Agent:
         return choose_provider(config)
 
     def close(self) -> None:
-        """Release provider network resources (main + fallback)."""
-        for provider in (self.provider, self._fallback_provider):
+        """Release provider network resources (main + fallback + aux)."""
+        for provider in (self.provider, self._fallback_provider, self._aux_provider):
             close = getattr(provider, "close", None)
             if callable(close):
                 close()
         self._fallback_provider = None
         self._turn_provider = None
+        self._aux_provider = None
 
     def _drive_stream(
         self,
@@ -1221,7 +1240,7 @@ class Agent:
             final = ProviderTurn(content="".join(parts))
         return final, streamed
 
-    def _add_usage(self, turn: ProviderTurn) -> None:
+    def _add_usage(self, turn: ProviderTurn, *, main_loop: bool = False) -> None:
         # Locked: recall-prefetch and extraction side-queries add usage from
         # daemon threads, and dict read-modify-write is not atomic.
         with self._usage_lock:
@@ -1233,9 +1252,92 @@ class Agent:
             # calls carry a prompt-token count worth trusting; side-queries
             # (summary, recall) report their own smaller prompts, so ignore those.
             prompt_tokens = turn.usage.get("prompt_tokens") or turn.usage.get("input_tokens")
-            if isinstance(prompt_tokens, int) and prompt_tokens > 0:
+            if main_loop and isinstance(prompt_tokens, int) and prompt_tokens > 0:
                 self._last_input_tokens = prompt_tokens
+                self._calibrate_estimate(prompt_tokens)
             self._last_activity_ts = time.time()
+
+    # --- token estimate calibration ------------------------------------------
+
+    _CALIBRATION_ALPHA = 0.3          # EMA weight of the newest sample
+    _CALIBRATION_BOUNDS = (0.3, 3.0)  # ignore absurd samples (mocks, proxies)
+
+    def _note_request_size(self, messages: list[dict[str, Any]], schemas: list[dict[str, Any]]) -> None:
+        """Remember the raw estimate of what this main-loop request sends."""
+        tools = estimate_tokens_text(json.dumps(schemas, ensure_ascii=False)) if schemas else 0
+        with self._usage_lock:
+            self._last_request_estimate = estimate_tokens(messages) + tools
+            self._last_request_len = len(self.messages)
+
+    def _calibrate_estimate(self, real_prompt_tokens: int) -> None:
+        """Fold one real/estimate sample into the EMA (caller holds _usage_lock)."""
+        estimate = self._last_request_estimate
+        if estimate <= 0:
+            return
+        low, high = self._CALIBRATION_BOUNDS
+        sample = real_prompt_tokens / estimate
+        if not low <= sample <= high:
+            return
+        if self._estimate_samples == 0:
+            self._estimate_ratio = sample
+        else:
+            alpha = self._CALIBRATION_ALPHA
+            self._estimate_ratio = (1 - alpha) * self._estimate_ratio + alpha * sample
+        self._estimate_samples += 1
+
+    def context_tokens(self) -> int:
+        """Best guess of the next request's prompt size, for compaction and UI.
+
+        The last real ``prompt_tokens`` plus a calibrated estimate of the
+        messages appended since (tool results, the new user turn) - CC's
+        "usage + estimate of the tail". Before any real usage this is the
+        calibrated full estimate, or 0 meaning "no better signal than the raw
+        estimate".
+        """
+        with self._usage_lock:
+            last, ratio, samples = self._last_input_tokens, self._estimate_ratio, self._estimate_samples
+            since = self._last_request_len
+        if last > 0:
+            tail = self.messages[since:] if 0 < since <= len(self.messages) else []
+            return last + int(estimate_tokens(tail) * ratio)
+        if samples:
+            return int(estimate_tokens(self.messages) * ratio)
+        return 0
+
+    def token_calibration(self) -> dict[str, Any]:
+        """Estimate-vs-real numbers for /tokens."""
+        with self._usage_lock:
+            return {
+                "ratio": round(self._estimate_ratio, 3),
+                "samples": self._estimate_samples,
+                "last_prompt_tokens": self._last_input_tokens,
+                "last_request_estimate": self._last_request_estimate,
+            }
+
+    # --- auxiliary model -----------------------------------------------------
+
+    def _side_provider(self) -> BaseProvider:
+        """Provider for side queries: LILBOT_AUX_MODEL when set, else the main one."""
+        model = (getattr(self.config, "aux_model", "") or "").strip()
+        if not model:
+            return self.provider
+        base_url = (getattr(self.config, "aux_base_url", "") or self.config.base_url).rstrip("/")
+        if model == self.config.model and base_url == self.config.base_url.rstrip("/"):
+            return self.provider
+        key = (model, base_url, self.config.api_key)
+        with self._aux_lock:
+            if self._aux_provider is None or self._aux_key != key:
+                stale = self._aux_provider
+                self._aux_provider = self._build_aux_provider(
+                    dataclasses.replace(self.config, model=model, base_url=base_url)
+                )
+                self._aux_key = key
+                if stale is not None:
+                    stale.close()
+            return self._aux_provider
+
+    def _build_aux_provider(self, config: LilBotConfig) -> BaseProvider:
+        return choose_provider(config)
 
     def _record_cache_usage(self, usage: dict[str, int]) -> None:
         """Track prompt-cache hit-rate and breaks for main-loop calls (#17).

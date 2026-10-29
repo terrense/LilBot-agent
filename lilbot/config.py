@@ -39,6 +39,11 @@ class LilBotConfig:
     max_retries: int = DEFAULT_MAX_RETRIES
     fallback_model: str = ""
     fallback_base_url: str = ""
+    # Auxiliary model for side queries (memory recall / extraction, session
+    # notes, delegation planning): a cheaper/faster model can serve them.
+    # Empty => the main model. Reuses api_key, like the fallback.
+    aux_model: str = ""
+    aux_base_url: str = ""
 
     @property
     def state_dir(self) -> Path:
@@ -145,6 +150,10 @@ def apply_env_overrides(cfg: LilBotConfig) -> LilBotConfig:
         cfg.fallback_model = _env("LILBOT_FALLBACK_MODEL").strip()
     if _env("LILBOT_FALLBACK_BASE_URL"):
         cfg.fallback_base_url = _env("LILBOT_FALLBACK_BASE_URL").strip().rstrip("/")
+    if _env("LILBOT_AUX_MODEL"):
+        cfg.aux_model = _env("LILBOT_AUX_MODEL").strip()
+    if _env("LILBOT_AUX_BASE_URL"):
+        cfg.aux_base_url = _env("LILBOT_AUX_BASE_URL").strip().rstrip("/")
     return cfg
 
 

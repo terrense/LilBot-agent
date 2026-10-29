@@ -10,6 +10,7 @@ from typing import Iterable
 
 from .config import LilBotConfig, load_config, save_config
 from .core.agent import Agent
+from .core.compaction import estimate_tokens_text
 from .llm.providers import KNOWN_PROVIDERS, ProviderError, choose_provider, resolve_endpoint
 from .mcp import MCPManager
 from .memory import FileMemoryStore, MemoryStore
@@ -343,15 +344,31 @@ def _show_slash_help(args: str, ui: LilBotUI) -> None:
 
 
 def _estimate_message_tokens(messages: list[dict[str, object]]) -> int:
-    total_chars = 0
+    total = 0
     for message in messages:
-        total_chars += len(str(message.get("role", "")))
         content = message.get("content", "")
         if isinstance(content, list):
-            total_chars += sum(len(str(item)) for item in content)
-        else:
-            total_chars += len(str(content))
-    return max(0, total_chars // 4)
+            content = " ".join(str(item) for item in content)
+        total += estimate_tokens_text(str(content)) + 4
+    return max(0, total)
+
+
+def _context_tokens(agent: object, messages: list[dict[str, object]]) -> int:
+    """Agent's calibrated context size when available, else a raw estimate."""
+    fn = getattr(agent, "context_tokens", None)
+    value = fn() if callable(fn) else 0
+    return value or _estimate_message_tokens(messages)
+
+
+def _calibration_text(agent: object) -> str:
+    fn = getattr(agent, "token_calibration", None)
+    info = fn() if callable(fn) else None
+    if not info or not info.get("samples"):
+        return "not calibrated yet (no real usage)"
+    return (
+        f"real/estimate x{info['ratio']} over {info['samples']} call(s); "
+        f"last prompt {info['last_prompt_tokens']} real vs {info['last_request_estimate']} est"
+    )
 
 
 def _token_rows(agent: Agent, ctx: ToolContext) -> list[tuple[str, str]]:
@@ -372,7 +389,8 @@ def _token_rows(agent: Agent, ctx: ToolContext) -> list[tuple[str, str]]:
         ("tools_visible", str(visible_tools)),
         ("tool_catalog_fp", catalog_fp),
         ("messages", str(len(messages))),
-        ("approx_context_tokens", str(_estimate_message_tokens(messages))),
+        ("approx_context_tokens", str(_context_tokens(agent, messages))),
+        ("estimate_calibration", _calibration_text(agent)),
         ("context_window", str(getattr(ctx.config, "context_window", 128_000))),
         ("prompt_tokens", str(prompt_tokens)),
         ("cache_read_tokens", f"{cache_read} ({cache_rate} of prompt)"),
@@ -598,7 +616,10 @@ def handle_slash(line: str, agent: Agent, registry: ToolRegistry, ctx: ToolConte
             ("workspace", str(ctx.config.workspace)),
             ("provider", ctx.config.provider),
             ("model", ctx.config.model),
+            ("aux_model", getattr(ctx.config, "aux_model", "") or "(main model)"),
+            ("fallback_model", getattr(ctx.config, "fallback_model", "") or "(none)"),
             ("messages", str(len(agent.messages))),
+            ("context_tokens", f"~{_context_tokens(agent, agent.messages)}"),
             ("permission", ctx.permissions.mode),
             ("font_size", str(ctx.config.font_size)),
         ])

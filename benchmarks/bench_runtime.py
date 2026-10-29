@@ -10,7 +10,7 @@ Measures:
   2. 10 sequential streaming requests: new client each time vs provider reuse,
      plus how many TCP connections the server saw
   3. grep over the repo for a string that does not exist (Day 4)
-  4. token estimate for Chinese text (Day 3)
+  4. token estimate vs real MiniMax-M3 counts on benchmarks/samples (Day 3)
 """
 from __future__ import annotations
 
@@ -124,9 +124,22 @@ def bench_grep() -> dict[str, float]:
     return {"grep_repo_no_match_ms": _ms(time.perf_counter() - t)}
 
 
-def bench_tokens() -> dict[str, float]:
-    zh = "这是一个用于测试中文分词的句子，包含常见的汉字和标点符号。" * 50
-    return {"zh_chars": len(zh), "zh_estimated_tokens": estimate_tokens_text(zh)}
+# Real prompt_tokens for benchmarks/samples/*, measured on MiniMax-M3
+# (2026-10-28, minus the fixed per-request overhead). Other tokenizers differ;
+# the agent calibrates against live usage at runtime.
+_REAL_TOKENS_MINIMAX_M3 = {"zh_doc.txt": 2610, "zh_code.txt": 1511, "en_code.txt": 1413}
+
+
+def bench_tokens() -> dict[str, object]:
+    out: dict[str, object] = {}
+    samples = ROOT / "benchmarks" / "samples"
+    for name, real in _REAL_TOKENS_MINIMAX_M3.items():
+        text = (samples / name).read_text(encoding="utf-8")
+        est = estimate_tokens_text(text)
+        old = len(text) // 4
+        stem = name.removesuffix(".txt")
+        out[f"tokens_{stem}"] = f"real {real} | est {est} ({(est - real) / real:+.0%}) | old len/4 {old} ({(old - real) / real:+.0%})"
+    return out
 
 
 def main() -> int:

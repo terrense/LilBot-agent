@@ -15,6 +15,7 @@ It operates on OpenAI-style message dicts (the format LilBot's Agent keeps).
 """
 from __future__ import annotations
 
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -37,7 +38,18 @@ KEEP_MAX_TOKENS = 20_000
 # Summarising a tiny prefix costs more than it saves.
 MIN_SUMMARIZE_PREFIX_TOKENS = 1_500
 
-_CHARS_PER_TOKEN = 4.0
+_CHARS_PER_TOKEN = 4.0  # ASCII (English, code, JSON)
+_CHARS_PER_TOKEN_OTHER = 2.0  # non-ASCII, non-CJK (accents, Cyrillic, emoji…)
+
+# CJK ideographs, kana, hangul and full-width punctuation: BPE vocabularies
+# (cl100k, Qwen, DeepSeek, MiniMax) spend roughly 0.6–1.5 tokens per character
+# here, so ``len/4`` undercounted Chinese 3–4x and compaction fired far too
+# late. Counted at 1 token/char — slightly conservative, like Hermes' rough
+# estimator; the agent then calibrates against the provider's real usage.
+_CJK_RE = re.compile(
+    "[⺀-⿿　-〿぀-ヿ㄀-ㇿ㐀-䶿"
+    "一-鿿가-힯豈-﫿＀-￯]"
+)
 
 # Recovery attachment budgets.
 RECOVERY_FILE_LIMIT = 5
@@ -79,7 +91,15 @@ PTL_RETRY_MARKER = "[earlier conversation truncated so the summary request fits]
 
 
 def estimate_tokens_text(text: str) -> int:
-    return int(len(text) / _CHARS_PER_TOKEN) if text else 0
+    """Rough token count by character class (ASCII /4, CJK x1, other /2)."""
+    if not text:
+        return 0
+    ascii_chars = len(text.encode("ascii", "ignore"))
+    if ascii_chars == len(text):
+        return int(ascii_chars / _CHARS_PER_TOKEN)
+    cjk = len(_CJK_RE.findall(text))
+    other = len(text) - ascii_chars - cjk
+    return int(ascii_chars / _CHARS_PER_TOKEN + cjk + other / _CHARS_PER_TOKEN_OTHER)
 
 
 def message_tokens(msg: dict[str, Any]) -> int:
@@ -191,8 +211,10 @@ class RecoveryState:
         # Total-token budget (CC caps post-compact restore at ~50k tokens): never
         # let the recovery attachment itself grow the post-compact window without
         # bound — trim from the end (tool list / note first).
-        if estimate_tokens_text(attachment) > RECOVERY_TOTAL_TOKENS:
-            budget_chars = int(RECOVERY_TOTAL_TOKENS * _CHARS_PER_TOKEN)
+        estimated = estimate_tokens_text(attachment)
+        if estimated > RECOVERY_TOTAL_TOKENS:
+            # Scale by this text's own chars-per-token so CJK isn't cut 4x too late.
+            budget_chars = int(len(attachment) * RECOVERY_TOTAL_TOKENS / estimated)
             attachment = attachment[:budget_chars] + "\n… (recovery attachment truncated to fit budget)\n"
         return attachment
 

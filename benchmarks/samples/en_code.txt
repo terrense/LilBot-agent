@@ -1,0 +1,169 @@
+from __future__ import annotations
+
+import json
+import re
+import threading
+from dataclasses import dataclass, field
+from typing import Any, Iterable, Iterator
+
+from ..config import LilBotConfig
+from ..core.events import ProviderTurn, StreamEvent, ToolCall
+from .retry import parse_retry_after
+
+
+class ProviderError(RuntimeError):
+    """Provider failure. Carries a structured ``status_code`` and ``is_overflow``
+    flag so the agent can react to a context-overflow (413 / context_length_exceeded)
+    by compacting and retrying, instead of matching error strings (CC's lesson:
+    judge errors by structured signals, use text only as a fallback).
+
+    ``reason`` names a transport failure with no HTTP status (``"timeout"`` /
+    ``"network"``) and ``retry_after`` carries the server's Retry-After, both
+    read by ``llm.errors.classify``."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        is_overflow: bool = False,
+        reason: str | None = None,
+        retry_after: float | None = None,
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        self.is_overflow = is_overflow
+        self.reason = reason
+        self.retry_after = retry_after
+
+
+def _transport_error(provider: str, url: str, model: str, exc: Exception) -> ProviderError:
+    """Wrap an httpx transport failure (no response) as a classified ProviderError."""
+    import httpx
+
+    reason = "timeout" if isinstance(exc, httpx.TimeoutException) else "network"
+    return ProviderError(
+        f"{provider} chat request failed for {url} (model={model}): {type(exc).__name__}: {exc}",
+        reason=reason,
+    )
+
+
+class BaseProvider:
+    def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> ProviderTurn:
+        raise NotImplementedError
+
+    def complete_stream(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> Iterator[StreamEvent]:
+        """Default: no real streaming — run the blocking call and emit the turn.
+
+        Providers without an incremental transport (rule-based, test fakes) keep
+        working: the agent sees a single terminal event and renders one block.
+        """
+        yield StreamEvent(final=self.complete(messages, tools))
+
+    def close(self) -> None:
+        """Release network resources (no-op for providers without any)."""
+
+
+def _normalize_usage(usage: dict[str, Any]) -> dict[str, Any]:
+    """Flatten provider usage and surface prompt-cache hits as a plain int.
+
+    DeepSeek/OpenAI-compatible endpoints cache common prefixes server-side and
+    report the hit count differently:
+      * DeepSeek: ``prompt_cache_hit_tokens`` / ``prompt_cache_miss_tokens``
+      * OpenAI:   ``prompt_tokens_details.cached_tokens``
+    We normalize both into ``cache_read_tokens`` so the agent's usage accounting
+    (and the /status view) can show how much of the prompt was served from cache.
+    A stable message prefix — system prompt first, deferred-tool reminder kept at
+    the tail — is what makes these hits happen in the first place.
+    """
+    out: dict[str, Any] = {k: v for k, v in usage.items() if isinstance(v, int)}
+    cached = usage.get("prompt_cache_hit_tokens")
+    if not isinstance(cached, int):
+        details = usage.get("prompt_tokens_details")
+        if isinstance(details, dict) and isinstance(details.get("cached_tokens"), int):
+            cached = details["cached_tokens"]
+    if isinstance(cached, int):
+        out["cache_read_tokens"] = cached
+    return out
+
+
+def _truncate(text: str, limit: int = 2000) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "... truncated ..."
+
+
+def _is_overflow_error(status_code: int, detail: str) -> bool:
+    """Structured context-overflow classification (CC parity).
+
+    A 413 ("request entity too large") is always overflow; otherwise fall back to
+    the error-body text markers (``context_length_exceeded`` / "prompt too long"
+    are usually returned as 400 with a specific message).
+    """
+    if status_code == 413:
+        return True
+    from ..core.compaction import is_context_overflow_error  # local: avoids cycle
+    return is_context_overflow_error(detail)
+
+
+def _response_error_detail(response: Any) -> str:
+    try:
+        data = response.json()
+    except Exception:
+        text = str(getattr(response, "text", "")).strip()
+        return _truncate(text) if text else "empty response body"
+
+    if isinstance(data, dict):
+        error = data.get("error")
+        if isinstance(error, dict):
+            parts = []
+            for key in ("message", "type", "code", "param"):
+                value = error.get(key)
+                if value:
+                    parts.append(f"{key}={value}")
+            if parts:
+                return "; ".join(parts)
+    return _truncate(json.dumps(data, ensure_ascii=False))
+
+
+def _extract_path(text: str) -> str:
+    quoted = re.findall(r"`([^`]+)`|'([^']+)'|\"([^\"]+)\"", text)
+    for group in quoted:
+        value = next((item for item in group if item), "")
+        if value:
+            return value
+    tokens = re.findall(r"[\w./\\-]+\.[A-Za-z0-9]+|[\w./\\-]+", text)
+    skip = {"read", "list", "show", "file", "files"}
+    for token in reversed(tokens):
+        if token.lower() not in skip:
+            return token
+    return "."
+
+
+def _looks_like_web_query(text: str) -> bool:
+    terms = {
+        "openclaw",
+        "latest",
+        "current",
+        "today",
+        "news",
+        "website",
+        "web",
+        "internet",
+    }
+    lower = text.lower()
+    return any(term in lower for term in terms)
+
+
+def _http_timeout() -> Any:
+    """Split timeout: fail fast on a stalled connect, stay patient on reads.
+
+    A dead network no longer blocks the whole 120s window with zero feedback;
+    a genuinely slow (but alive) generation still gets a generous read budget,
+    and with streaming the read clock resets on every chunk.
+    """
+    import httpx
+
+ 

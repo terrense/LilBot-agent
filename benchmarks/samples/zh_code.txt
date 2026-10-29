@@ -1,0 +1,111 @@
+d=workspace)
+        # Hot-reload support: re-read hooks.json when it changes, so edits take
+        # effect on the next turn without restarting the session.
+        self._hooks_path = (Path(state_dir) / "hooks.json") if state_dir else None
+        self._hooks_mtime = self._current_hooks_mtime()
+        # Memory recall / extraction state.
+        self._turn_count = 0
+        self._recent_tools: list[str] = []
+        self._surfaced_memory_ids: set[str] = set()
+        self._pending_recall = ""
+        # Recall prefetch (M9): the selector side-query runs on a daemon thread
+        # concurrently with the main provider call instead of blocking the turn.
+        self._recall_prefetch: SideQueryPrefetch | None = None
+        self._recall_waited = False
+        # usage is now written from side-query threads too — guard the
+        # read-modify-write in _add_usage.
+        self._usage_lock = threading.Lock()
+        # Serializes background extraction runs (and their read-modify-write
+        # against the memory store).
+        self._extract_lock = threading.Lock()
+        self._extract_thread: threading.Thread | None = None
+        # Session-memory living document (#12): a structured notes file the model
+        # updates incrementally in the background, and which survives compaction.
+        self.session_memory = SessionMemory(state_dir)
+        self._sm_lock = threading.Lock()
+        self._sm_thread: threading.Thread | None = None
+        # Session persistence. One file per session.
+        self.sessions = SessionStore(state_dir) if state_dir else None
+        self.session_id = time.strftime("%Y%m%d-%H%M%S")
+        # File history / rewind. Snapshots before edits.
+        self.file_history = (
+            FileHistory(state_dir, workspace) if state_dir and workspace else None
+        )
+        # Auto diagnostics injection (M2).
+        self._edited_this_turn: list[str] = []
+        self._pending_diagnostics = ""
+        # Cycle memory archive (M4). Each compaction
+        # archives a briefing recoverable via the recall_archive tool.
+        self.cycles = CycleArchive(state_dir) if state_dir else None
+        # Stop-hook continuations this turn (CC's death-spiral guard).
+        self._stop_continuations = 0
+        # Output-truncation resume count this turn (finish_reason == "length").
+        self._output_truncations = 0
+        # Observable recovery transitions (CC's transition.reason) — for tests,
+        # UI, and telemetry.
+        self._recovery_transitions: list[str] = []
+        # Prompt-cache accounting (#17): make cache hit-rate an operable metric
+        # and count breaks (a large main-loop prompt served with no cache read).
+        self._prompt_total = 0
+        self._cache_read_total = 0
+        self._cache_breaks = 0
+        # Structured event log (#18): JSONL sink for tool/compaction/recovery
+        # events — the raw material for success-rate / bad-case analysis.
+        self.events = EventLog(state_dir)
+        # Provider failure handling (Hermes gap P2): backoff sleep is injectable
+        # so tests run instantly; the fallback provider is built lazily and used
+        # for the rest of the turn once the main model gives up.
+        self._sleep: Callable[[float], None] = time.sleep
+        self._fallback_provider: BaseProvider | None = None
+        self._fallback_key: tuple[str, str, str] | None = None
+        self._turn_provider: BaseProvider | None = None
+
+    def run_turn(self, user_text: str) -> Iterator[object]:
+        """One user turn. A failure (provider error, Ctrl+C) still persists the
+        messages gathered so far before the exception propagates."""
+        self._turn_provider = None  # every turn starts on the main model again
+        try:
+            yield from self._run_turn_body(user_text)
+        except (Exception, KeyboardInterrupt) as exc:
+            self._persist_after_failure(exc)
+            raise
+
+    def _persist_after_failure(self, exc: BaseException) -> None:
+        try:
+            self._persist_session()
+            self.events.log("turn_error", turn=self._turn_count, error=type(exc).__name__)
+        except Exception:  # noqa: BLE001 - never mask the original failure
+            pass
+
+    def _run_turn_body(self, user_text: str) -> Iterator[object]:
+        # ============================================================
+        # 【简历·1 Agent 执行框架｜ReAct 主循环】
+        # 这是整个 Runtime 的心脏：一次用户输入 -> 一轮或多轮
+        # “思考(LLM) -> 行动(工具) -> 观察(工具结果)”的 ReAct 循环。
+        #   · 入口先做三件“回合级”准备：压缩上下文(_maybe_compact)、
+        #     召回相关记忆(_maybe_recall)、触发生命周期钩子(turn_start)。
+        #   · 下面的 while 循环就是 ReAct 的 Reason–Act–Observe：
+        #       1) _stream_turn  -> 让模型思考并流式产出文本/工具调用(Reason)
+        #       2) 若无 tool_calls -> 收尾返回最终答案(纯对话，单 Agent 直答)
+        #       3) 若有 tool_calls -> 执行工具(Act) 并把结果回灌进 messages(Observe)
+        #   · max_steps 是“工具步数预算”，是复杂任务不失控的护栏；超预算后
+        #     由 _synthesize_after_step_limit 用已有证据强制收敛出答案。
+        # 简单任务：模型第一轮就不产工具调用 -> 单 Agent 直接响应。
+        # 复杂任务：模型多轮调用工具/子代理，逐步执行并校验中间结果。
+        # ============================================================
+        self._reload_hooks_if_changed()
+        self.messages.append({"role": "user", "content": user_text})
+        self._turn_count += 1
+        self._edited_this_turn = []
+        self._stop_continuations = 0
+        self._output_truncations = 0
+        self.events.log("turn_start", turn=self._turn_count, chars=len(user_text))
+        if self.hooks.has_hooks():
+            self.hooks.run("user_prompt_submit", HookContext(event="user_prompt_submit", message=user_text))
+        self._maybe_compact()      # 回合开始先按 token 预算压缩历史（见 compaction.py）
+        # 记忆召回改为“并行预取”（M9，对标 CC 的 startRelevantMemoryPrefetch）：
+        # 这里只是发射后台侧查询，不再阻塞；结果由 _provider_messages 里的
+        # _consume_recall_prefetch 轮询消费（首次调用给一个有界等待）。
+        self._start_recall_prefetch(user_text)
+        if self.hooks.has_hooks():
+            self.hooks.run("turn_start", HookContext(event="turn_start", message=use
