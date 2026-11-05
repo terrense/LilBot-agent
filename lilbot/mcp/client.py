@@ -14,6 +14,8 @@ import subprocess
 import threading
 from typing import Any
 
+from ..security.env import scrubbed_env
+
 PROTOCOL_VERSION = "2024-11-05"
 
 
@@ -23,6 +25,11 @@ def _resolve_env(env: dict[str, str]) -> dict[str, str]:
     for k, v in (env or {}).items():
         out[k] = os.path.expandvars(str(v))
     return out
+
+
+def mcp_child_env(configured_env: dict[str, str] | None = None) -> dict[str, str]:
+    """Build a scrubbed environment with explicitly configured values restored."""
+    return {**scrubbed_env(), **_resolve_env(configured_env or {})}
 
 
 class StdioMCPClient:
@@ -54,7 +61,7 @@ class StdioMCPClient:
     # -- lifecycle --------------------------------------------------------
 
     def start(self) -> None:
-        child_env = {**os.environ, **_resolve_env(self.env)}
+        child_env = mcp_child_env(self.env)
         self._proc = subprocess.Popen(
             [self.command, *self.args],
             stdin=subprocess.PIPE,
@@ -67,22 +74,37 @@ class StdioMCPClient:
         )
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
-        result = self._request("initialize", {
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {"tools": {}},
-            "clientInfo": {"name": "LilBot", "version": "0.1"},
-        }, timeout=min(self.timeout, 15.0))
-        self.server_info = result.get("serverInfo", {}) if isinstance(result, dict) else {}
-        self._notify("notifications/initialized")
-        self.alive = True
+        try:
+            result = self._request("initialize", {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {"tools": {}},
+                "clientInfo": {"name": "LilBot", "version": "0.1"},
+            }, timeout=min(self.timeout, 15.0))
+            self.server_info = result.get("serverInfo", {}) if isinstance(result, dict) else {}
+            self._notify("notifications/initialized")
+            self.alive = True
+        except Exception:
+            self.close()
+            raise
 
     def close(self) -> None:
         self.alive = False
         if self._proc is not None:
             try:
                 self._proc.terminate()
+                self._proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                self._proc.wait(timeout=2.0)
             except OSError:
                 pass
+            if self._reader is not None:
+                self._reader.join(timeout=2.0)
+            for pipe in (self._proc.stdin, self._proc.stdout):
+                if pipe is not None:
+                    pipe.close()
+            self._proc = None
+            self._reader = None
 
     # -- transport --------------------------------------------------------
 

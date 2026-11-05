@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from contextlib import nullcontext
+import hashlib
 import json
+from pathlib import Path
 import re
+import threading
 from time import perf_counter
 from typing import Any, Callable
 
@@ -83,6 +87,33 @@ PLAN_APPROVAL_GATED_TOOLS = {
     "worktree_merge_back",
 }
 
+_PLAN_APPROVAL_CACHE: dict[Path, tuple[int, int, dict[str, Any] | None]] = {}
+_PLAN_APPROVAL_CACHE_LOCK = threading.Lock()
+
+
+def _read_cached_plan_approval(path: Path) -> dict[str, Any] | None:
+    """Read and parse plan state once per file version (mtime + size)."""
+    key = path.resolve()
+    try:
+        stat = path.stat()
+    except OSError:
+        with _PLAN_APPROVAL_CACHE_LOCK:
+            _PLAN_APPROVAL_CACHE.pop(key, None)
+        return None
+    signature = (stat.st_mtime_ns, stat.st_size)
+    with _PLAN_APPROVAL_CACHE_LOCK:
+        cached = _PLAN_APPROVAL_CACHE.get(key)
+        if cached is not None and cached[:2] == signature:
+            return cached[2]
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, json.JSONDecodeError):
+            parsed = None
+        else:
+            parsed = data if isinstance(data, dict) else None
+        _PLAN_APPROVAL_CACHE[key] = (signature[0], signature[1], parsed)
+        return parsed
+
 
 @dataclass
 class ValidationResult:
@@ -154,6 +185,24 @@ class ToolDef:
     # per-input answer (e.g. `bash rm` destructive, `bash ls` not).
     destructive: bool = False
     destructive_check: Callable[[dict[str, Any]], bool] | None = None
+    # Optional detailed approval preflight, shared with an existing handler's
+    # exact action checks. Return a denial result or None when approved.
+    permission_check: Callable[[dict[str, Any], "ToolContext"], ToolResult | None] | None = None
+    # Conditional operations can expose a read-only preview for some inputs.
+    permission_required: Callable[[dict[str, Any], "ToolContext"], bool] | None = None
+
+    def needs_permission(self, arguments: dict[str, Any], ctx: "ToolContext") -> bool:
+        if self.approval_requirement == ApprovalRequirement.Required:
+            return True
+        effectful = bool(self.criteria.intersection({ToolCapability.WritesFiles, ToolCapability.ExecutesCode, ToolCapability.RequiresApproval}))
+        if not effectful and self.approval_requirement == ApprovalRequirement.Auto:
+            return False
+        if self.permission_required is not None:
+            try:
+                return bool(self.permission_required(arguments, ctx))
+            except Exception:
+                return True
+        return True
 
     def is_destructive(self, args: dict[str, Any] | None = None) -> bool:
         """Resolve destructiveness for these arguments (per-input then static)."""
@@ -416,6 +465,12 @@ class ToolRegistry:
                 schema["description"] = f"{base}\n\n{listing}"
 
     def execute(self, name: str, arguments: dict[str, Any], ctx: ToolContext) -> tuple[ToolResult, int]:
+        scope = getattr(getattr(ctx, "permissions", None), "tool_scope", None)
+        with scope() if callable(scope) else nullcontext():
+            return self._execute(name, arguments, ctx)
+
+    def _execute(self, name: str, arguments: dict[str, Any], ctx: ToolContext) -> tuple[ToolResult, int]:
+        arguments = dict(arguments or {})
         resolved_name = self.resolve(name) or name
         tool = self.get(resolved_name)
         if not tool:
@@ -427,14 +482,14 @@ class ToolRegistry:
         # Input validation (CC's validateInput) runs BEFORE the plan gate and the
         # handler: a malformed call gets a readable reason back to the model and
         # never executes — no side effects, no permission prompt, no wasted step.
-        validation = tool.run_validation(arguments or {}, ctx)
+        validation = tool.run_validation(arguments, ctx)
         if not validation.ok:
             return ToolResult(
                 False,
                 validation.message or f"Invalid input for {tool.name}.",
                 {"validation_error": True, "error_code": validation.error_code},
             ), 0
-        plan_gate = _plan_approval_gate(resolved_name, ctx)
+        plan_gate = _plan_approval_gate(resolved_name, ctx, tool=tool, arguments=arguments)
         if plan_gate is not None:
             return plan_gate, 0
         # 【简历·2/5 错误类型统一 + 耗时观测】
@@ -444,14 +499,16 @@ class ToolRegistry:
         # 工具异常炸掉整轮。这就是“统一错误类型”的落点。
         started = perf_counter()
         try:
-            result = tool.handler(arguments or {}, ctx)
+            result = _tool_permission_gate(tool, arguments, ctx)
+            if result is None:
+                result = tool.handler(arguments, ctx)
         except SandboxError as exc:
             result = ToolResult(False, f"Sandbox error: {exc}")
         except Exception as exc:  # pragma: no cover - defensive boundary
             result = ToolResult(False, f"Tool error: {type(exc).__name__}: {exc}")
         elapsed_ms = int((perf_counter() - started) * 1000)
         # Surface destructiveness for observation/telemetry (CC's isDestructive).
-        if tool.is_destructive(arguments or {}):
+        if tool.is_destructive(arguments):
             result.metadata.setdefault("destructive", True)
         # Credential isolation: the model never sees the value of a secret
         # LilBot holds, whichever tool surfaced it (read_file on .env, grep, MCP).
@@ -470,18 +527,48 @@ class ToolRegistry:
         return result, elapsed_ms
 
 
-def _plan_approval_gate(tool_name: str, ctx: ToolContext) -> ToolResult | None:
-    if tool_name not in PLAN_APPROVAL_GATED_TOOLS:
+def _tool_permission_gate(tool: ToolDef, arguments: dict[str, Any], ctx: ToolContext) -> ToolResult | None:
+    if not tool.needs_permission(arguments, ctx):
+        return None
+    permissions = getattr(ctx, "permissions", None)
+    metadata = {"gate": "tool_permission", "tool": tool.name}
+    if permissions is None or not callable(getattr(permissions, "check", None)):
+        return ToolResult(False, "Permission denied: permission manager is unavailable.", metadata)
+    if getattr(permissions, "mode", None) == "deny-all":
+        return ToolResult(False, "Permission denied by deny-all mode.", metadata)
+    if tool.permission_check is not None:
+        return tool.permission_check(arguments, ctx)
+    canonical = json.dumps(arguments, sort_keys=True, ensure_ascii=False, default=str)
+    signature = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    action = f"tool:{tool.name}:{signature}"
+    description = f"run {tool.name}: {redact_known_secrets(canonical)[:500]}"
+    if not permissions.check(action, description).allowed:
+        return ToolResult(False, "Permission denied.", metadata)
+    return None
+
+
+def _plan_approval_gate(
+    tool_name: str,
+    ctx: ToolContext,
+    *,
+    tool: ToolDef | None = None,
+    arguments: dict[str, Any] | None = None,
+) -> ToolResult | None:
+    effectful = tool.needs_permission(arguments if arguments is not None else {}, ctx) if tool is not None else False
+    if tool is not None and tool.permission_required is not None and not effectful:
+        return None
+    if tool_name not in PLAN_APPROVAL_GATED_TOOLS and not effectful:
         return None
     config = getattr(ctx, "config", None)
     state_dir = getattr(config, "state_dir", None)
     if state_dir is None:
         return None
     try:
-        data = json.loads((state_dir / "plan_mode.json").read_text(encoding="utf-8"))
-    except (OSError, TypeError, json.JSONDecodeError):
+        path = Path(state_dir) / "plan_mode.json"
+    except TypeError:
         return None
-    if not isinstance(data, dict):
+    data = _read_cached_plan_approval(path)
+    if data is None:
         return None
     approval_state = str(data.get("approval_state") or "").strip().lower()
     requires_approval = bool(data.get("requires_approval", approval_state == "pending_approval"))

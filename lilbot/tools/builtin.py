@@ -183,10 +183,18 @@ def _permission(ctx: ToolContext, action: str, description: str) -> bool:
     return ctx.permissions.check(action, description).allowed
 
 
+def _permission_preflight(ctx: ToolContext, action: str, description: str) -> ToolResult | None:
+    if not _permission(ctx, action, description):
+        return ToolResult(False, "Permission denied.", {"gate": "tool_permission"})
+    return None
+
+
 def _shell_permission(ctx: ToolContext, action: str, description: str, command: str, *, background: bool = False) -> tuple[bool, dict[str, Any], ToolResult | None]:
     safety = _shell_safety(ctx, command, background=background)
     if safety and safety.get("blocked"):
         return False, safety, ToolResult(False, str(safety.get("summary") or "PowerShell safety gate blocked command."), {"powershell_safety": safety})
+    if getattr(ctx.permissions, "mode", None) == "deny-all":
+        return False, safety, ToolResult(False, "Permission denied by deny-all mode.", _with_shell_safety({}, safety))
     # Command-safety engine (M3): hard-deny
     # catastrophic commands; auto-allow known safe read-only ones (arity-aware,
     # flags ignored) to skip pointless approval prompts.
@@ -208,6 +216,23 @@ def _shell_permission(ctx: ToolContext, action: str, description: str, command: 
         metadata = {"powershell_safety": safety} if safety else {}
         return False, safety, ToolResult(False, "Permission denied.", metadata)
     return True, safety, None
+
+
+def _shell_tool_preflight(name: str, args: dict[str, Any], ctx: ToolContext) -> ToolResult | None:
+    command = str(args.get("command") or "")
+    background = name == "task_shell_start" or bool(args.get("background"))
+    if name == "run_tests":
+        command = command.strip() or ("python -m pytest" if (ctx.sandbox.root / "pyproject.toml").exists() else "python -m unittest discover")
+        if args.get("args"):
+            command = f"{command} {args['args']}"
+        action, description = f"test:{command}", f"run test command: {command}"
+    elif name == "task_gate_run":
+        action, description = f"gate:{command}", f"run verification gate: {command}"
+    else:
+        action = f"bash:{command}"
+        description = f"start background command: {command}" if background else f"run shell command: {command}"
+    allowed, _safety, denied = _shell_permission(ctx, action, description, command, background=background)
+    return None if allowed else denied or ToolResult(False, "Permission denied.")
 
 
 def _shell_safety(ctx: ToolContext, command: str, *, background: bool = False) -> dict[str, Any]:
@@ -3796,6 +3821,81 @@ def _parallel_tool(args: dict[str, Any], registry: ToolRegistry, ctx: ToolContex
     return ToolResult(True, _json({"results": results, "count": len(results)}), {"count": len(results)})
 
 
+def _worktree_permission_required(name: str, args: dict[str, Any], ctx: ToolContext) -> bool:
+    if name == "EnterWorktree":
+        if _optional_bool(args.get("create")) is False:
+            return False
+        path = args.get("path") or (f".lilbot/worktrees/{args['name']}" if args.get("name") else "")
+        return not path or not ctx.sandbox.resolve(str(path)).exists()
+    if name == "ExitWorktree":
+        cleanup = args.get("cleanup") if args.get("cleanup") is not None else args.get("remove")
+        if _optional_bool(cleanup) is not True:
+            return False
+        state = _load_state(ctx, "worktree.json", {})
+        return bool(isinstance(state, dict) and state.get("status") == "active" and state.get("created")
+                    and state.get("path") and Path(str(state["path"])).exists()
+                    and Path(str(state.get("previous_root") or "")).exists())
+    return _optional_bool(args.get("dry_run")) is False
+
+
+def _worktree_tool_preflight(name: str, args: dict[str, Any], ctx: ToolContext) -> ToolResult | None:
+    if name == "EnterWorktree":
+        supported, support = _git_worktree_support(ctx)
+        if not supported:
+            return ToolResult(False, _json(support), support)
+        if not args.get("name"):
+            args["name"] = f"worktree_{uuid4().hex[:8]}"
+        target = ctx.sandbox.resolve(str(args.get("path") or f".lilbot/worktrees/{args['name']}"))
+        return _permission_preflight(ctx, f"worktree:add:{target}", f"create git worktree at {target}")
+    if name == "ExitWorktree":
+        state = _load_state(ctx, "worktree.json", {})
+        target = Path(str(state.get("path") or ""))
+        return _permission_preflight(ctx, f"worktree:remove:{target}", f"remove git worktree at {target}")
+    if name == "worktree_prune":
+        preview = _worktree_prune({**args, "dry_run": True}, ctx)
+        if not preview.ok:
+            return preview
+        count = int(preview.metadata.get("count", 0))
+        if not count:
+            return None
+        return _permission_preflight(ctx, "worktree:prune", f"remove {count} stale worktree(s)")
+    preview = _worktree_merge_back({**args, "dry_run": True}, ctx)
+    if not preview.ok:
+        return preview
+    data = preview.metadata
+    if data.get("worktree_dirty"):
+        return ToolResult(False, "Worktree has uncommitted changes; commit or clean it before merge-back.", {"status": "blocked", "reason": "worktree_dirty"})
+    if data.get("target_dirty"):
+        return ToolResult(False, "Target workspace has uncommitted changes; clean it before merge-back.", {"status": "blocked", "reason": "target_dirty"})
+    source, target = data["source_branch"], data["target_branch"]
+    args.update(source_branch=source, target_branch=target, path=data["worktree_path"])
+    return _permission_preflight(ctx, f"worktree:merge:{source}->{target}", f"merge worktree branch {source} into {target}")
+
+
+def _github_tool_preflight(name: str, args: dict[str, Any], ctx: ToolContext) -> ToolResult | None:
+    if name == "github_comment":
+        target = str(args.get("target") or args.get("issue") or args.get("pr") or args.get("number") or "")
+        if not target or not (args.get("body") or args.get("comment")):
+            return ToolResult(False, "target and body/comment are required.")
+        description = f"post GitHub comment to {target}"
+    else:
+        key, label = ("issue", "issue") if name == "github_close_issue" else ("pr", "PR")
+        target = str(args.get(key) or args.get("number") or args.get("url") or "")
+        if not target:
+            return ToolResult(False, f"Missing {key}/number/url.")
+        description = f"close GitHub {label} {target}"
+    return _permission_preflight(ctx, f"{name}:{target}", description)
+
+
+def _pandoc_preflight(args: dict[str, Any], ctx: ToolContext) -> ToolResult | None:
+    if not shutil.which("pandoc"):
+        return _external_missing("pandoc_convert", "pandoc")
+    source, output = str(args.get("input") or args.get("path") or ""), str(args.get("output") or "")
+    if not source or not output:
+        return ToolResult(False, "input/path and output are required.")
+    return _permission_preflight(ctx, f"pandoc:{source}->{output}", f"convert {source} to {output}")
+
+
 def register_builtins(registry: ToolRegistry) -> None:
     registry.register(ToolDef("list_dir", "List files under a workspace path.", _schema({
         "path": _string("Directory path relative to workspace."),
@@ -4522,8 +4622,56 @@ def register_builtins(registry: ToolRegistry) -> None:
         if tool is not None and not tool.criteria:
             tool.criteria = ToolCapability.READ
 
+    # Declare effectful operations at registration, so the registry protects a
+    # new handler even when it omits its own permission check.
+    for name in WRITE_TOOLS:
+        tool = registry.get(name)
+        if tool is not None:
+            tool.criteria = ToolCapability.WRITE_APPROVAL
+    for name in EXECUTION_TOOLS:
+        tool = registry.get(name)
+        if tool is not None:
+            tool.criteria = ToolCapability.CODE_APPROVAL
+    for name in {"github_comment", "github_close_issue", "github_close_pr", "mcp_call"}:
+        tool = registry.get(name)
+        if tool is not None:
+            tool.criteria = frozenset({ToolCapability.RequiresApproval})
+
+    # Core handlers keep their exact action/path approval keys. PermissionManager
+    # scopes reuse these same decisions on the handler's second check.
+    checks = {
+        "write_file": lambda args, ctx: _permission_preflight(ctx, f"write:{args['path']}", f"write file {args['path']}"),
+        "edit_file": lambda args, ctx: _permission_preflight(ctx, f"edit:{args['path']}", f"edit file {args['path']}"),
+        "apply_patch": lambda args, ctx: _permission_preflight(ctx, "apply_patch", "apply a unified diff to the workspace"),
+        "code_execution": lambda args, ctx: _permission_preflight(ctx, "code_execution", "execute Python code"),
+        "js_execution": lambda args, ctx: _permission_preflight(ctx, "js_execution", "execute JavaScript code"),
+        "pandoc_convert": _pandoc_preflight,
+        "slop_ledger_export": lambda args, ctx: _permission_preflight(ctx, f"write:{args['path']}", f"export slop ledger to {args['path']}"),
+    }
+    for name, check in checks.items():
+        registry.get(name).permission_check = check
+    for name in SHELL_TOOLS:
+        registry.get(name).permission_check = lambda args, ctx, name=name: _shell_tool_preflight(name, args, ctx)
+    for name in {"github_comment", "github_close_issue", "github_close_pr"}:
+        registry.get(name).permission_check = lambda args, ctx, name=name: _github_tool_preflight(name, args, ctx)
+    for name in WORKTREE_TOOLS:
+        registry.get(name).permission_check = lambda args, ctx, name=name: _worktree_tool_preflight(name, args, ctx)
+        registry.get(name).permission_required = lambda args, ctx, name=name: _worktree_permission_required(name, args, ctx)
+    registry.get("slop_ledger_export").permission_required = lambda args, ctx: bool(args.get("path"))
+
     # Allowlist: keep the daily-driver tools loaded every turn; defer the rest.
     registry.defer_all_except(CORE_TOOLS)
+
+
+WRITE_TOOLS = {
+    "write_file", "edit_file", "apply_patch", "memory_save", "memory_delete", "note", "remember",
+    "EnterWorktree", "ExitWorktree", "WorktreeMergeBack", "worktree_merge_back", "worktree_prune",
+    "automation_create", "automation_update", "automation_pause", "automation_resume", "automation_delete", "automation_run",
+    "slop_ledger_append", "slop_ledger_update", "slop_ledger_export", "pandoc_convert",
+}
+WORKTREE_TOOLS = {"EnterWorktree", "ExitWorktree", "WorktreeMergeBack", "worktree_merge_back", "worktree_prune"}
+SHELL_TOOLS = {"bash", "exec_shell", "task_shell_start", "run_tests", "task_gate_run"}
+EXECUTION_TOOLS = SHELL_TOOLS | {"exec_shell_interact", "exec_interact", "code_execution", "js_execution", "rlm_eval"}
 
 
 # Pure read-only tools: no writes, no code execution, no approval. The agent may

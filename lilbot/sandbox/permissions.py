@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -27,6 +29,18 @@ class PermissionManager:
         self.rules_path = state_dir / "permissions.json"
         self.rules = self._load_rules()
         self.quiet = False
+        self._tool_decisions: ContextVar[dict[str, PermissionDecision] | None] = ContextVar(
+            "tool_permission_decisions", default=None
+        )
+
+    @contextmanager
+    def tool_scope(self):
+        """Reuse exact-action decisions inside one invocation, isolated per thread."""
+        token = self._tool_decisions.set({})
+        try:
+            yield
+        finally:
+            self._tool_decisions.reset(token)
 
     def _load_rules(self) -> dict[str, bool]:
         try:
@@ -50,6 +64,9 @@ class PermissionManager:
             return PermissionDecision(False)
         if action in self.rules:
             return PermissionDecision(self.rules[action], True)
+        decisions = self._tool_decisions.get()
+        if decisions is not None and action in decisions:
+            return decisions[action]
         if not self.interactive:
             return PermissionDecision(False)
 
@@ -66,4 +83,7 @@ class PermissionManager:
             self.rules[action] = False
             self.save()
             return PermissionDecision(False, True)
-        return PermissionDecision(answer in {"y", "yes"})
+        decision = PermissionDecision(answer in {"y", "yes"})
+        if decisions is not None:
+            decisions[action] = decision
+        return decision

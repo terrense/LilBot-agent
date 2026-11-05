@@ -9,9 +9,9 @@ A denylist (not an allowlist) on purpose: PowerShell and dev toolchains on
 Windows depend on many variables (SystemRoot, PSModulePath, VIRTUAL_ENV, …) and
 an allowlist breaks them in hard-to-diagnose ways.
 
-Applies only to processes whose command line the model controls (shell, code
-execution). Hooks and MCP servers are configured by the user and keep the full
-environment, since they may legitimately need credentials.
+Applies to shell, code execution, and MCP subprocesses. MCP configurations can
+explicitly supply credentials through each server's ``env`` mapping. Hooks
+inherit the parent environment.
 """
 from __future__ import annotations
 

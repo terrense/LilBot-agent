@@ -77,6 +77,7 @@ class MCPManager:
         for name, server in self.servers.items():
             if name in self._clients:
                 continue
+            client = None
             try:
                 client = StdioMCPClient(
                     name=name,
@@ -89,6 +90,8 @@ class MCPManager:
                 client.list_tools()
                 self._clients[name] = client
             except Exception as exc:  # noqa: BLE001 - never crash startup
+                if client is not None:
+                    client.close()
                 self.connect_errors.append(f"MCP server '{name}': {exc}")
         return self.connect_errors
 
@@ -96,7 +99,7 @@ class MCPManager:
         """Register each discovered MCP tool as a first-class deferred tool
         named ``mcp__<server>__<tool>``. Returns the number registered.
         """
-        from ..tools.registry import ToolDef, ToolResult
+        from ..tools.registry import ApprovalRequirement, ToolCapability, ToolDef, ToolResult
 
         count = 0
         for server_name, client in self._clients.items():
@@ -115,7 +118,15 @@ class MCPManager:
                         return ToolResult(False, f"MCP tool call failed: {exc}")
                     return ToolResult(not is_error, text)
 
-                registry.register(ToolDef(full, desc, schema, _handler, should_defer=True))
+                registry.register(ToolDef(
+                    full,
+                    desc,
+                    schema,
+                    _handler,
+                    criteria=frozenset({ToolCapability.RequiresApproval}),
+                    approval_requirement=ApprovalRequirement.Required,
+                    should_defer=True,
+                ))
                 count += 1
         return count
 
@@ -132,6 +143,8 @@ class MCPManager:
         self._clients.clear()
 
     def call_tool(self, server_name: str, tool_name: str, arguments: dict[str, Any]) -> str:
+        from .client import mcp_child_env
+
         # Prefer a live persistent client (M7); fall back to the legacy one-shot.
         client = self._clients.get(server_name)
         if client is not None and getattr(client, "alive", False):
@@ -161,6 +174,7 @@ class MCPManager:
             capture_output=True,
             cwd=cwd,
             timeout=30,
+            env=mcp_child_env(server.env),
         )
         output = (proc.stdout or "") + (proc.stderr or "")
         return output.strip() or f"MCP server exited with code {proc.returncode}"
