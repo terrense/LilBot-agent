@@ -11,6 +11,8 @@ Measures:
      plus how many TCP connections the server saw
   3. grep (no match) and glob **/*.py over the repo, median of 3 (Day 4)
   4. token estimate vs real MiniMax-M3 counts on benchmarks/samples (Day 3)
+  5. durable SQLite append latency for 100 messages (Day 5)
+  6. plan approval state reads before and after the mtime cache (Day 6)
 """
 from __future__ import annotations
 
@@ -19,6 +21,7 @@ import json
 import os
 import statistics
 import sys
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -33,9 +36,11 @@ import httpx  # noqa: E402
 
 from lilbot.config import LilBotConfig  # noqa: E402
 from lilbot.core.compaction import estimate_tokens_text  # noqa: E402
+from lilbot.core.session_db import SessionDB  # noqa: E402
 from lilbot.llm import providers  # noqa: E402
 from lilbot.sandbox import Sandbox  # noqa: E402
 from lilbot.tools.builtin import _glob, _grep  # noqa: E402
+from lilbot.tools.registry import _read_cached_plan_approval  # noqa: E402
 
 _SSE = (
     b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
@@ -155,6 +160,62 @@ def bench_tokens() -> dict[str, object]:
     return out
 
 
+def bench_session_append(messages: int = 100) -> dict[str, object]:
+    """Measure the durable per-message SQLite append path used during turns."""
+    with tempfile.TemporaryDirectory(prefix="lilbot-session-bench-") as tmp:
+        db = SessionDB(Path(tmp) / "sessions.sqlite3")
+        samples: list[float] = []
+        started = time.perf_counter()
+        db.begin_turn()
+        open_ms = (time.perf_counter() - started) * 1000
+        try:
+            for index in range(messages):
+                message = {"role": "tool", "tool_call_id": f"bench-{index}", "content": "ok"}
+                started = time.perf_counter()
+                db.append_message("benchmark", message, {"total_tokens": index}, {"turns": 1})
+                samples.append((time.perf_counter() - started) * 1000)
+        finally:
+            db.end_turn()
+            db.close()
+    steady = samples[1:] if len(samples) > 1 else samples
+    ordered = sorted(steady)
+    p95 = ordered[min(len(ordered) - 1, int(0.95 * (len(ordered) - 1)))]
+    return {
+        "session_append_messages": messages,
+        "session_db_open_ms": round(open_ms, 3),
+        "session_append_first_ms": round(samples[0], 3) if samples else 0.0,
+        "session_append_median_ms": round(statistics.median(steady), 3) if steady else 0.0,
+        "session_append_mean_ms": round(statistics.mean(steady), 3) if steady else 0.0,
+        "session_append_p95_ms": round(p95, 3) if steady else 0.0,
+    }
+
+
+def bench_plan_cache(reads: int = 200) -> dict[str, object]:
+    with tempfile.TemporaryDirectory(prefix="lilbot-plan-bench-") as directory:
+        path = Path(directory) / "plan_mode.json"
+        path.write_text(json.dumps({
+            "active": True,
+            "approval_state": "pending_approval",
+            "requires_approval": True,
+            "plan": "Inspect the source and report findings. " * 10,
+        }), encoding="utf-8")
+        _read_cached_plan_approval(path)
+
+        def median_ms(read_state) -> float:
+            samples = []
+            for _ in range(reads):
+                started = time.perf_counter()
+                read_state()
+                samples.append((time.perf_counter() - started) * 1000)
+            return round(statistics.median(samples), 3)
+
+        return {
+            "plan_state_reads": reads,
+            "plan_uncached_read_median_ms": median_ms(lambda: json.loads(path.read_text(encoding="utf-8"))),
+            "plan_cached_read_median_ms": median_ms(lambda: _read_cached_plan_approval(path)),
+        }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--json", action="store_true")
@@ -168,6 +229,8 @@ def main() -> int:
     results.update(bench_sequential_requests())
     results.update(bench_grep())
     results.update(bench_tokens())
+    results.update(bench_session_append())
+    results.update(bench_plan_cache())
 
     if args.json:
         print(json.dumps(results, ensure_ascii=False, indent=2))

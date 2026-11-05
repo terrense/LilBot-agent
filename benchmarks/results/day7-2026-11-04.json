@@ -1,0 +1,68 @@
+{
+  "date": "2026-11-04",
+  "environment": {
+    "python": "3.11",
+    "httpx": "0.28.1",
+    "rich": "15.0.0",
+    "prompt_toolkit": "3.0.53"
+  },
+  "benchmark_command": ".\\.venv\\Scripts\\python.exe -B benchmarks\\bench_runtime.py --json",
+  "benchmark": {
+    "ssl_context_once_ms": 277.3,
+    "old_per_request_client_ms": 810.2,
+    "shared_factory_client_ms": 0.2,
+    "requests": 10,
+    "old_total_ms": 7825.5,
+    "old_tcp_connections": 10,
+    "reuse_total_ms": 8.4,
+    "reuse_tcp_connections": 1,
+    "grep_repo_no_match_ms": 51.4,
+    "glob_py_ms": 7.8,
+    "glob_py_lines": 122,
+    "tokens_zh_doc": "real 2610 | est 2965 (+14%) | old len/4 1500 (-43%)",
+    "tokens_zh_code": "real 1511 | est 1727 (+14%) | old len/4 1500 (-1%)",
+    "tokens_en_code": "real 1413 | est 1500 (+6%) | old len/4 1500 (+6%)",
+    "session_append_messages": 100,
+    "session_db_open_ms": 10.705,
+    "session_append_first_ms": 0.198,
+    "session_append_median_ms": 0.071,
+    "session_append_mean_ms": 0.075,
+    "session_append_p95_ms": 0.096,
+    "plan_state_reads": 200,
+    "plan_uncached_read_median_ms": 0.587,
+    "plan_cached_read_median_ms": 0.252
+  },
+  "sqlite_initialization_samples_ms": [117.894, 110.679, 112.273, 114.628, 109.883, 12.31, 10.705],
+  "regression": {
+    "command": ".\\.venv\\Scripts\\python.exe -B -m pytest tests -q -p no:cacheprovider",
+    "passed": 571,
+    "skipped": 7,
+    "subtests_passed": 9,
+    "failed": 0,
+    "warnings": 0,
+    "seconds": 26.53,
+    "new_cases_since_day5": 56
+  },
+  "live_smoke": {
+    "provider": "minimax",
+    "model": "MiniMax-M3",
+    "permission_mode": "deny-all",
+    "task": "Locate jittered_backoff and count Python files under lilbot using grep and glob",
+    "tool_steps": 4,
+    "process_wall_seconds": 25.72,
+    "definition": "lilbot/llm/retry.py:19",
+    "python_files": 68,
+    "independently_verified": true,
+    "session_id": "20261104-100453",
+    "persisted_messages": 9,
+    "persisted_tool_results": 4
+  },
+  "demo_command": ".\\.venv\\Scripts\\python.exe -B benchmarks\\demo_day7.py",
+  "notes": [
+    "The HTTP benchmark uses a local fake SSE server and reconstructs the old client-per-request pattern in the same run.",
+    "Grep and glob report the median of three runs. File counts change with repository contents and ignore rules.",
+    "Token reference counts were measured on MiniMax-M3 on 2026-10-28. They are corpus-specific historical references.",
+    "The live task is a correctness smoke run. Its model choices and network latency differ from historical runs.",
+    "The demo simulates the old missing approval boundary with a direct handler call and uses a synthetic credential."
+  ]
+}
