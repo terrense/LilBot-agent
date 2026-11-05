@@ -32,8 +32,9 @@ from ..memory import extract_memories, recall
 from .cycles import CycleArchive
 from .eventlog import EventLog
 from .history import FileHistory
-from .session import SessionStore
+from .session import SessionStore, interrupted_tool_result_messages
 from .session_memory import SessionMemory
+from .guardrails import GuardrailNotice, ToolCallGuardrailController
 
 # Tools that mutate a file at a `path` arg — snapshot before they run so /rewind
 # can undo them.
@@ -151,6 +152,15 @@ from ..llm.errors import classify
 from ..llm.providers import BaseProvider, choose_provider
 from ..llm.retry import retry_delay
 from ..tools import ToolContext, ToolRegistry, ToolResult
+from ..tools.registry import ToolCapability
+
+
+class _TurnInterrupted(Exception):
+    """Internal signal used to finish a user-requested interruption cleanly."""
+
+    def __init__(self, partial_text: str = "") -> None:
+        super().__init__("turn interrupted")
+        self.partial_text = partial_text
 
 
 class Agent:
@@ -166,6 +176,7 @@ class Agent:
         self.registry = registry
         self.ctx = ctx
         self.agent_id = "lead"
+        self._messages_lock = threading.RLock()
         self.messages: list[dict[str, Any]] = [
             {"role": "system", "content": build_system_prompt(ctx.memory, ctx.skills)}
         ]
@@ -212,6 +223,7 @@ class Agent:
         # Session persistence. One file per session.
         self.sessions = SessionStore(state_dir) if state_dir else None
         self.session_id = time.strftime("%Y%m%d-%H%M%S")
+        self._session_bootstrapped = False
         # File history / rewind. Snapshots before edits.
         self.file_history = (
             FileHistory(state_dir, workspace) if state_dir and workspace else None
@@ -241,6 +253,8 @@ class Agent:
         # so tests run instantly; the fallback provider is built lazily and used
         # for the rest of the turn once the main model gives up.
         self._sleep: Callable[[float], None] = time.sleep
+        self._interrupt_event = threading.Event()
+        self._tool_guardrails = ToolCallGuardrailController()
         self._fallback_provider: BaseProvider | None = None
         self._fallback_key: tuple[str, str, str] | None = None
         self._turn_provider: BaseProvider | None = None
@@ -262,11 +276,36 @@ class Agent:
         """One user turn. A failure (provider error, Ctrl+C) still persists the
         messages gathered so far before the exception propagates."""
         self._turn_provider = None  # every turn starts on the main model again
+        self._interrupt_event.clear()
+        self._tool_guardrails.reset()
+        if self.sessions is not None:
+            self.sessions.begin_turn()
         try:
             yield from self._run_turn_body(user_text)
         except (Exception, KeyboardInterrupt) as exc:
             self._persist_after_failure(exc)
             raise
+        finally:
+            if self.sessions is not None:
+                self.sessions.end_turn()
+
+    def request_interrupt(self) -> None:
+        """Request a cooperative stop at the next safe agent checkpoint."""
+        self._interrupt_event.set()
+
+    def _raise_if_interrupted(self) -> None:
+        if self._interrupt_event.is_set():
+            raise _TurnInterrupted()
+
+    def _wait_retry(self, delay: float) -> None:
+        """Wait between retries without making Ctrl+C wait out the backoff."""
+        if self._sleep is time.sleep:
+            if self._interrupt_event.wait(max(0.0, delay)):
+                raise _TurnInterrupted()
+        else:
+            # Preserve the injectable sleeper used by callers and test doubles.
+            self._sleep(delay)
+            self._raise_if_interrupted()
 
     def _persist_after_failure(self, exc: BaseException) -> None:
         try:
@@ -274,6 +313,49 @@ class Agent:
             self.events.log("turn_error", turn=self._turn_count, error=type(exc).__name__)
         except Exception:  # noqa: BLE001 - never mask the original failure
             pass
+
+    def _session_meta(self) -> dict[str, Any]:
+        return {
+            "turns": self._turn_count,
+            "surfaced_memory_ids": sorted(self._surfaced_memory_ids),
+        }
+
+    def _usage_snapshot(self) -> dict[str, int]:
+        with self._usage_lock:
+            return dict(self.usage)
+
+    def _append(self, message: dict[str, Any]) -> None:
+        """Append to memory and commit the same message to SQLite immediately."""
+        with self._messages_lock:
+            if self.sessions is not None and not self._session_bootstrapped:
+                self.sessions.ensure_incremental(
+                    self.session_id,
+                    self.messages,
+                    self._usage_snapshot(),
+                    self._session_meta(),
+                )
+                self._session_bootstrapped = True
+            self.messages.append(message)
+            if self.sessions is not None:
+                self.sessions.append_message(
+                    self.session_id,
+                    message,
+                    self._usage_snapshot(),
+                    self._session_meta(),
+                )
+
+    def _replace_messages(self, messages: list[dict[str, Any]]) -> None:
+        """Persist structural history rewrites such as compaction and reset."""
+        with self._messages_lock:
+            self.messages = messages
+            if self.sessions is not None:
+                self.sessions.replace_messages(
+                    self.session_id,
+                    self.messages,
+                    self._usage_snapshot(),
+                    self._session_meta(),
+                )
+                self._session_bootstrapped = True
 
     def _run_turn_body(self, user_text: str) -> Iterator[object]:
         # ============================================================
@@ -292,8 +374,8 @@ class Agent:
         # 复杂任务：模型多轮调用工具/子代理，逐步执行并校验中间结果。
         # ============================================================
         self._reload_hooks_if_changed()
-        self.messages.append({"role": "user", "content": user_text})
         self._turn_count += 1
+        self._append({"role": "user", "content": user_text})
         self._edited_this_turn = []
         self._stop_continuations = 0
         self._output_truncations = 0
@@ -307,25 +389,35 @@ class Agent:
         self._start_recall_prefetch(user_text)
         if self.hooks.has_hooks():
             self.hooks.run("turn_start", HookContext(event="turn_start", message=user_text))
+        if self._interrupt_event.is_set():
+            yield from self._finish_interrupted(0)
+            return
         steps = self._auto_delegate(user_text)
         while steps < self.config.max_steps:
+            if self._interrupt_event.is_set():
+                yield from self._finish_interrupted(steps)
+                return
             self._drain_team_notifications()
             render_ctx = self.ctx.subagents.get_render_context() if getattr(self.ctx, "subagents", None) else None
-            turn, streamed = yield from self._stream_turn(render_ctx)
+            try:
+                turn, streamed = yield from self._stream_turn(render_ctx)
+            except _TurnInterrupted as exc:
+                yield from self._finish_interrupted(steps, exc.partial_text)
+                return
             self._add_usage(turn, main_loop=True)
             self._record_cache_usage(turn.usage)
             # When the text already streamed live, don't re-emit it as a block.
             if turn.content and not streamed:
                 yield TextDelta(turn.content, interim=bool(turn.tool_calls))
             if not turn.tool_calls:
-                self.messages.append(self._assistant_content_message(turn.content, turn.reasoning_content))
+                self._append(self._assistant_content_message(turn.content, turn.reasoning_content))
                 # Output-truncation recovery (CC parity, #9): the model was cut
                 # off at max output tokens. Inject a terse resume instruction and
                 # continue so it finishes, bounded so it can't loop forever.
                 if turn.finish_reason == "length" and self._output_truncations < MAX_OUTPUT_TRUNCATIONS:
                     self._output_truncations += 1
                     self._record_transition("max_output_tokens_recovery")
-                    self.messages.append({
+                    self._append({
                         "role": "user",
                         "content": (
                             "Output token limit hit. Resume directly — no apology, no recap. "
@@ -338,7 +430,7 @@ class Agent:
                 # (CC's handleStopHooks), bounded so a misbehaving hook can't spin.
                 cont = self._run_stop_hook()
                 if cont is not None:
-                    self.messages.append({
+                    self._append({
                         "role": "user",
                         "content": (
                             "A stop hook requires more work before ending. "
@@ -361,15 +453,21 @@ class Agent:
             # 以 role=tool 消息写回 messages，构成下一轮模型能“观察”到的证据。
             remaining_steps = self.config.max_steps - steps
             calls_to_run = turn.tool_calls[:remaining_steps]
-            self.messages.append(self._assistant_tool_message(
+            self._append(self._assistant_tool_message(
                 ProviderTurn(turn.content, calls_to_run, turn.usage, turn.reasoning_content)
             ))
             for batch in self._partition_calls(calls_to_run):
+                if self._interrupt_event.is_set():
+                    yield from self._finish_interrupted(steps)
+                    return
                 # Announce the whole batch, then execute (in parallel when the
                 # batch is >1 read-only tool), then report results in order.
                 for call in batch:
                     self._recent_tools.append(call.name)
                     yield ToolStarted(call.name, call.arguments)
+                if self._interrupt_event.is_set():
+                    yield from self._finish_interrupted(steps)
+                    return
                 if len(batch) > 1:
                     results = self._run_calls_parallel(batch)
                 else:
@@ -385,12 +483,15 @@ class Agent:
                     )
                     yield ToolFinished(call.name, result.ok, result.output, elapsed_ms, result.metadata)
                     # Observe：把工具输出作为 role=tool 消息回灌，成为下一轮模型的证据。
-                    self.messages.append({
+                    self._append({
                         "role": "tool",
                         "tool_call_id": call.call_id,
                         "name": call.name,
                         "content": result.output,
                     })
+                if self._interrupt_event.is_set():
+                    yield from self._finish_interrupted(steps)
+                    return
             # After this turn's tool batch, diagnose freshly edited files so the
             # next LLM call sees type/syntax errors and can self-correct.
             self._run_post_edit_diagnostics()
@@ -399,11 +500,21 @@ class Agent:
         self._maybe_extract()
         self._maybe_update_session_memory()
         final = self._synthesize_after_step_limit()
-        self.messages.append(self._assistant_content_message(final.content, final.reasoning_content))
+        self._append(self._assistant_content_message(final.content, final.reasoning_content))
         self._persist_session()
         self._log_turn_finished(steps, "step_limit")
         yield TextDelta(final.content)
         yield TurnFinished(steps, dict(self.usage))
+
+    def _finish_interrupted(self, steps: int, partial_text: str = ""):
+        """Persist known progress and close any unfinished tool-call protocol."""
+        if partial_text.strip():
+            self._append(self._assistant_content_message(partial_text, ""))
+        for message in interrupted_tool_result_messages(self.messages):
+            self._append(message)
+        self._persist_session()
+        self._log_turn_finished(steps, "interrupted")
+        yield TurnFinished(steps, dict(self.usage), outcome="interrupted")
 
     def _log_turn_finished(self, steps: int, outcome: str) -> None:
         stats = self.cache_stats()
@@ -547,8 +658,9 @@ class Agent:
         self.sessions.save(
             self.session_id,
             self.messages,
-            self.usage,
-            meta={"turns": self._turn_count, "surfaced_memory_ids": sorted(self._surfaced_memory_ids)},
+            self._usage_snapshot(),
+            meta=self._session_meta(),
+            sync_database=False,
         )
 
     def resume(self, session_id: str | None = None) -> str:
@@ -564,12 +676,26 @@ class Agent:
         messages = data.get("messages") or []
         if not messages:
             return f"Session '{sid}' is empty."
-        self.messages = messages
+        with self._messages_lock:
+            self.messages = messages
         self.usage = dict(data.get("usage") or {})
         self.session_id = sid
+        # Let the first post-resume append re-check/seed SQLite. This is a no-op
+        # for a DB-backed session and also covers a legacy JSON session whose
+        # one-time migration could not write because the DB was unavailable.
+        self._session_bootstrapped = False
         meta = data.get("meta") or {}
         self._turn_count = int(meta.get("turns") or 0)
         self._surfaced_memory_ids = set(meta.get("surfaced_memory_ids") or [])
+        recovered = interrupted_tool_result_messages(self.messages)
+        for message in recovered:
+            self._append(message)
+        if recovered:
+            self._persist_session()
+            return (
+                f"Resumed session '{sid}' ({len(self.messages)} messages); "
+                f"marked {sum(1 for item in recovered if item.get('role') == 'tool')} interrupted tool result(s) as unknown."
+            )
         return f"Resumed session '{sid}' ({len(messages)} messages)."
 
     # -- Memory recall / extraction ------------------
@@ -743,7 +869,7 @@ class Agent:
         except Exception:
             return
         for note in notes:
-            self.messages.append({
+            self._append({
                 "role": "user",
                 "content": (
                     "Internal LilBot team notification (coordination signal, not a new user "
@@ -789,7 +915,7 @@ class Agent:
         result, elapsed_ms = self.registry.execute(call.name, call.arguments, self.ctx)
         yield ToolFinished(call.name, result.ok, result.output, elapsed_ms, result.metadata)
         if name == "agent_eval":
-            self.messages.append(self._internal_observation_message(name, arguments, result.output))
+            self._append(self._internal_observation_message(name, arguments, result.output))
         return result
 
     def _is_concurrency_safe(self, call: ToolCall) -> bool:
@@ -821,11 +947,27 @@ class Agent:
         return batches
 
     def _run_one_call(self, call: ToolCall) -> tuple[ToolResult, int]:
+        tool = self.registry.get(call.name)
+        guardrail_name = tool.name if tool is not None else call.name
+        blocked = self._tool_guardrails.before_call(guardrail_name, call.arguments)
+        if blocked is not None:
+            return self._result_with_guardrail_notice(
+                ToolResult(False, blocked.message, {"guardrail": blocked.metadata}),
+                [blocked],
+            ), 0
         block = self._pre_tool_hook(call)
         if block is not None:
             return ToolResult(False, f"Blocked by hook: {block}"), 0
         self._snapshot_before_edit(call)
         result, elapsed_ms = self.registry.execute(call.name, call.arguments, self.ctx)
+        notices = self._tool_guardrails.after_call(
+            guardrail_name,
+            call.arguments,
+            ok=bool(result.ok),
+            output=str(result.output or ""),
+            read_only=bool(tool and ToolCapability.ReadOnly in tool.criteria),
+        )
+        self._result_with_guardrail_notice(result, notices)
         # Apply a tool's functional context edit (CC's contextModifier). Only for
         # non-concurrency-safe tools, which run as singletons — mutating the shared
         # ctx from a parallel worker would race, so CC only honors it here too.
@@ -842,6 +984,22 @@ class Agent:
                 self._edited_this_turn.append(path)
         self._post_tool_hook(call, result)
         return result, elapsed_ms
+
+    @staticmethod
+    def _result_with_guardrail_notice(result: ToolResult, notices: list[GuardrailNotice]) -> ToolResult:
+        if not notices:
+            return result
+        result.output = (result.output or "") + "\n\n" + "\n".join(
+            f"[Guardrail] {notice.message}" for notice in notices
+        )
+        metadata = getattr(result, "metadata", None)
+        if not isinstance(metadata, dict):
+            metadata = {}
+            result.metadata = metadata
+        metadata.setdefault("guardrails", []).extend(
+            {"kind": notice.kind, **notice.metadata} for notice in notices
+        )
+        return result
 
     def _run_calls_parallel(self, batch: list[ToolCall]) -> list[tuple[ToolResult, int]]:
         max_workers = min(len(batch), max(1, getattr(self.config, "subagent_max_concurrent", 8)))
@@ -982,7 +1140,7 @@ class Agent:
         if result.method == "summarize" and self.cycles is not None and len(result.messages) > 1:
             briefing = str(result.messages[1].get("content") or "")
             self.cycles.archive(briefing, result.summarized, result.before_tokens)
-        self.messages = result.messages
+        self._replace_messages(result.messages)
         self.events.log(
             "compaction", method=result.method,
             before_tokens=result.before_tokens, after_tokens=result.after_tokens,
@@ -1022,7 +1180,7 @@ class Agent:
         if self.cycles is not None and direction == "up_to" and len(result.messages) > 1:
             briefing = str(result.messages[1].get("content") or "")
             self.cycles.archive(briefing, result.summarized, result.before_tokens)
-        self.messages = result.messages
+        self._replace_messages(result.messages)
         self._post_compact_cleanup("summarize")
         return (
             f"Partial compact ({direction}): ~{result.before_tokens:,} -> "
@@ -1045,10 +1203,11 @@ class Agent:
         self._pending_diagnostics = ""
 
     def reset_conversation(self) -> str:
-        self.messages = [
+        messages = [
             {"role": "system", "content": build_system_prompt(self.ctx.memory, self.ctx.skills)}
         ]
         self.usage.clear()
+        self._replace_messages(messages)
         return "Conversation reset. Messages now: 1"
 
     def _compaction_tail_start(self, target_tail: int) -> int:
@@ -1069,7 +1228,7 @@ class Agent:
         """
         new_messages, replaced = enforce_tool_result_budget(self.messages, self._tool_budget)
         if replaced:
-            self.messages = new_messages
+            self._replace_messages(new_messages)
 
     def _maybe_compact(self) -> None:
         # L0 tool-result budget first (cheapest, cache-safe), then the
@@ -1122,6 +1281,7 @@ class Agent:
         overflow_attempts = 0
         retries = 0
         while True:
+            self._raise_if_interrupted()
             progress = {"emitted": False}
             messages = self._provider_messages()
             schemas = self.registry.schemas(render_ctx)
@@ -1133,8 +1293,13 @@ class Agent:
                     provider=self._turn_provider or self.provider,
                     progress=progress,
                 )
+                self._raise_if_interrupted()
                 return result
+            except _TurnInterrupted:
+                raise
             except Exception as exc:
+                if self._interrupt_event.is_set():
+                    raise _TurnInterrupted() from exc
                 if progress["emitted"]:
                     raise
                 info = classify(exc)
@@ -1151,7 +1316,7 @@ class Agent:
                     delay = retry_delay(retries, info.retry_after)
                     self._record_transition(f"retry_{info.reason.value}")
                     yield ProviderRetry(info.reason.value, "retry", retries, delay, _brief_error(exc))
-                    self._sleep(delay)
+                    self._wait_retry(delay)
                     continue
                 if info.should_fallback and self._activate_fallback():
                     retries = 0
@@ -1196,6 +1361,8 @@ class Agent:
         self._fallback_provider = None
         self._turn_provider = None
         self._aux_provider = None
+        if self.sessions is not None:
+            self.sessions.close()
 
     def _drive_stream(
         self,
@@ -1217,25 +1384,50 @@ class Agent:
         progress = progress if progress is not None else {}
         stream_fn = getattr(provider, "complete_stream", None)
         if stream_fn is None:
+            self._raise_if_interrupted()
             turn = provider.complete(messages, schemas)
+            self._raise_if_interrupted()
             return turn, False
 
         show = bool(getattr(self.config, "stream_output", True))
         final: ProviderTurn | None = None
         parts: list[str] = []
         streamed = False
-        for event in stream_fn(messages, schemas):
-            if getattr(event, "final", None) is not None:
-                final = event.final
-                continue
-            text = getattr(event, "text", "")
-            if text:
-                parts.append(text)
-                if show:
-                    streamed = True
-                    progress["emitted"] = True
-                    yield TextDelta(text, interim=True, streaming=True)
-            # reasoning deltas are consumed (drive the stream) but not displayed.
+        stream = iter(stream_fn(messages, schemas))
+        try:
+            while True:
+                try:
+                    self._raise_if_interrupted()
+                except _TurnInterrupted as exc:
+                    raise _TurnInterrupted("".join(parts)) from exc
+                try:
+                    event = next(stream)
+                except StopIteration:
+                    break
+                if getattr(event, "final", None) is not None:
+                    final = event.final
+                    continue
+                text = getattr(event, "text", "")
+                if text:
+                    parts.append(text)
+                    if show:
+                        streamed = True
+                        progress["emitted"] = True
+                        yield TextDelta(text, interim=True, streaming=True)
+                # reasoning deltas are consumed (drive the stream) but not displayed.
+        except Exception as exc:
+            if self._interrupt_event.is_set():
+                raise _TurnInterrupted("".join(parts)) from exc
+            raise
+        finally:
+            if self._interrupt_event.is_set():
+                close_stream = getattr(stream, "close", None)
+                if callable(close_stream):
+                    try:
+                        close_stream()
+                    except Exception:
+                        pass
+        self._raise_if_interrupted()
         if final is None:
             final = ProviderTurn(content="".join(parts))
         return final, streamed

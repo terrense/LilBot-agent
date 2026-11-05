@@ -246,7 +246,10 @@ class LilBotUI:
         elif isinstance(event, ProviderRetry):
             self.print(_retry_notice(event), "yellow")
         elif isinstance(event, TurnFinished):
-            self.print(f"completed {event.steps} steps", "bold green")
+            if event.outcome == "interrupted":
+                self.print(f"interrupted after {event.steps} steps; session saved", "bold yellow")
+            else:
+                self.print(f"completed {event.steps} steps", "bold green")
 
     def error(self, message: str) -> None:
         if self.enabled:

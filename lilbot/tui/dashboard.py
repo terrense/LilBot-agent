@@ -777,7 +777,10 @@ class DashboardUI:
         elif isinstance(event, ProviderRetry):
             self._append(_retry_notice(event))
         elif isinstance(event, TurnFinished):
-            self._append(f"completed {event.steps} steps")
+            if event.outcome == "interrupted":
+                self._append(f"interrupted after {event.steps} steps; session saved")
+            else:
+                self._append(f"completed {event.steps} steps")
             self.work_items = ["No active work."]
 
     def _permission_popup(self):
@@ -1030,6 +1033,10 @@ class DashboardUI:
 
         @kb.add("c-c")
         def _exit(event) -> None:
+            if self.busy:
+                self.agent.request_interrupt()
+                self._append("Interrupt requested; waiting for the current operation to finish safely.")
+                return
             # Claude-Code behavior: a non-empty composer is cleared first; only an
             # already-empty composer arms/confirms exit on a second Ctrl+C.
             if self.input.buffer.text.strip():

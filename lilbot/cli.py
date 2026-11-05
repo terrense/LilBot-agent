@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import signal
 import shutil
 import shlex
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -303,8 +305,23 @@ def apply_args(cfg: LilBotConfig, args: argparse.Namespace) -> LilBotConfig:
 
 
 def run_prompt(agent: Agent, ui: LilBotUI, prompt: str) -> None:
-    for event in agent.run_turn(prompt):
-        ui.event(event)
+    previous_sigint = None
+    installed_sigint = False
+    if threading.current_thread() is threading.main_thread():
+        try:
+            previous_sigint = signal.getsignal(signal.SIGINT)
+            signal.signal(signal.SIGINT, lambda _signum, _frame: agent.request_interrupt())
+            installed_sigint = True
+        except (ValueError, OSError):
+            # Signal handlers can only be installed by Python's main thread;
+            # the dashboard uses its own Ctrl+C key binding instead.
+            installed_sigint = False
+    try:
+        for event in agent.run_turn(prompt):
+            ui.event(event)
+    finally:
+        if installed_sigint:
+            signal.signal(signal.SIGINT, previous_sigint)
 
 
 REVIEW_PROMPT = """Review the current workspace changes like a senior code reviewer.

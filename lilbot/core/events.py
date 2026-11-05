@@ -81,6 +81,7 @@ class ToolFinished:
 class TurnFinished:
     steps: int  # 本回合实际执行的工具步数
     usage: dict[str, int] = field(default_factory=dict)  # 累计 token 用量
+    outcome: str = "completed"  # "completed" or cooperative "interrupted"
 
 
 @dataclass
