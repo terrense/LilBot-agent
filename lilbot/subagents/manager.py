@@ -750,35 +750,50 @@ class SubAgentManager:
                 task.error = ""
             self._persist_tasks_locked()
         self._append_transcript(task, "running", {"agent_type": task.agent_type})
+        outcome = "completed"
         try:
-            if not self._prepare_worktree(task):
-                return
-            task.result = self.run_agent_turn(definition, task, task.prompt)
-            completed = False
-            with self._lock:
-                if task.status != "cancelled":
-                    task.status = "completed"
-                    completed = True
-                    self._persist_tasks_locked()
-            if completed:
-                self._append_transcript(task, "completed", {"result": task.result})
+            if self._prepare_worktree(task):
+                task.result = self.run_agent_turn(definition, task, task.prompt)
+            else:
+                outcome = "failed"
         except Exception as exc:  # pragma: no cover - defensive boundary
-            failed = False
             with self._lock:
                 if task.status != "cancelled":
                     task.error = str(exc)
-                    task.status = "failed"
-                    failed = True
-                    self._persist_tasks_locked()
-            if failed:
-                self._append_transcript(task, "failed", {"error": str(exc)})
+            outcome = "failed"
         finally:
-            self._cleanup_worktree(task)
-            with self._lock:
-                task.finished_at = task.finished_at or time.time()
-                self._persist_tasks_locked()
-            if acquired:
-                self._semaphore.release()
+            try:
+                try:
+                    self._cleanup_worktree(task)
+                except Exception as exc:
+                    outcome = "failed"
+                    task.error = str(exc)
+                with self._lock:
+                    finished_at = task.finished_at or time.time()
+                    if task.status != "cancelled":
+                        data = {"result": task.result} if outcome == "completed" else {"error": task.error}
+                        self._append_transcript(task, outcome, data)
+                        snapshot = replace(task, status=outcome, finished_at=finished_at)
+                        self._persist_tasks_locked(snapshot)
+                        # Publish the terminal status only after all transcript,
+                        # cleanup and task-state writes have finished. Callers
+                        # may release workspace resources as soon as they see it.
+                        task.finished_at = finished_at
+                        task.status = outcome
+                    else:
+                        task.finished_at = finished_at
+                        self._persist_tasks_locked()
+            except OSError as exc:
+                # Persistence can itself fail. Publish that failure in memory
+                # without attempting another write to the broken destination.
+                with self._lock:
+                    task.error = f"Subagent finalization failed ({type(exc).__name__}): {exc}"
+                    task.finished_at = task.finished_at or time.time()
+                    task.last_event = "failed"
+                    task.status = "failed"
+            finally:
+                if acquired:
+                    self._semaphore.release()
 
     def run_agent_turn(
         self,
@@ -1069,7 +1084,6 @@ class SubAgentManager:
 
     def _fail_worktree(self, task: SubAgentTask, reason: str, *, status: str = "error", output: str = "") -> bool:
         with self._lock:
-            task.status = "failed"
             task.error = f"Worktree isolation {status}: {reason}"
             task.worktree_status = status
             task.worktree_error = reason
@@ -1254,10 +1268,13 @@ class SubAgentManager:
             if task.recovered and task.status == "queued":
                 self._append_transcript(task, "recovered_after_restart", {"resume_count": task.resume_count})
 
-    def _persist_tasks_locked(self) -> None:
+    def _persist_tasks_locked(self, task_snapshot: SubAgentTask | None = None) -> None:
         if self.tasks_path is None:
             return
-        records = [_task_to_record(task) for task in sorted(self.tasks.values(), key=lambda item: item.created_at)]
+        records = [
+            _task_to_record(task_snapshot if task_snapshot is not None and task.id == task_snapshot.id else task)
+            for task in sorted(self.tasks.values(), key=lambda item: item.created_at)
+        ]
         self.tasks_path.parent.mkdir(parents=True, exist_ok=True)
         self.tasks_path.write_text(json.dumps(records, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 

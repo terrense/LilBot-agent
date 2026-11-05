@@ -2,7 +2,7 @@
 
 teams/mailbox.py. Each agent gets a ``{agent_id}.json``
 inbox under *base_dir*, guarded by a companion ``.lock`` file (O_EXCL create,
-10 retries, 10s staleness reclaim) so concurrent teammate threads — and even
+40 retries, 10s staleness reclaim) so concurrent teammate threads — and even
 separate processes — can append safely.
 """
 
@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -53,6 +54,7 @@ class Mailbox:
     def __init__(self, base_dir: str | Path) -> None:
         self._base_dir = Path(base_dir)
         self._base_dir.mkdir(parents=True, exist_ok=True)
+        self._thread_lock = threading.RLock()
 
     @property
     def base_dir(self) -> Path:
@@ -65,6 +67,12 @@ class Mailbox:
         return self._base_dir / f"{agent_id}.json.lock"
 
     def _with_lock(self, agent_id: str, fn: Callable[[list], list]) -> Any:
+        # Serialize threads sharing this mailbox before contending on the
+        # cross-process file lock, especially on Windows filter drivers.
+        with self._thread_lock:
+            return self._with_file_lock(agent_id, fn)
+
+    def _with_file_lock(self, agent_id: str, fn: Callable[[list], list]) -> Any:
         lock_file = self._lock_path(agent_id)
         lock_fd = None
         last_err: Exception | None = None
@@ -93,8 +101,10 @@ class Mailbox:
                 last_err = e
                 break
 
-        if lock_fd is None and last_err is not None:
-            raise last_err
+        if lock_fd is None:
+            if last_err is not None:
+                raise last_err
+            raise TimeoutError(f"Could not acquire mailbox lock for {agent_id}")
 
         try:
             messages = self._read_inbox(agent_id)

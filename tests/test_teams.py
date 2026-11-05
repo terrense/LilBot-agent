@@ -40,6 +40,26 @@ def test_mailbox_concurrent_writes_no_loss(tmp_path: Path) -> None:
     assert mb.consume("lead") == []  # consume marks read
 
 
+def test_mailbox_lock_timeout_keeps_other_owners_lock(tmp_path: Path, monkeypatch) -> None:
+    import lilbot.teams.mailbox as mailbox_module
+
+    mb = Mailbox(tmp_path / "mb")
+    lock_path = mb.base_dir / "lead.json.lock"
+    lock_path.write_text("owned by another writer", encoding="utf-8")
+
+    def already_locked(*args, **kwargs):
+        raise FileExistsError("busy")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(mailbox_module.os, "open", already_locked)
+        patch.setattr(mailbox_module.time, "sleep", lambda delay: None)
+        with pytest.raises(TimeoutError):
+            mb.write("lead", create_message("writer", "lead", "must wait"))
+
+    assert lock_path.read_text(encoding="utf-8") == "owned by another writer"
+    assert not (mb.base_dir / "lead.json").exists()
+
+
 def test_shared_task_dependencies(tmp_path: Path) -> None:
     store = SharedTaskStore(tmp_path / "tasks.json")
     store.init_empty()
