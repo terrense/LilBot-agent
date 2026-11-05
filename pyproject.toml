@@ -8,9 +8,9 @@ version = "0.1.0"
 description = "LilBot: a clean-room local coding agent playground."
 requires-python = ">=3.10"
 dependencies = [
-  "httpx>=0.27.0",
-  "prompt_toolkit>=3.0.0",
-  "rich>=13.0.0",
+  "httpx>=0.27.0,<1",
+  "prompt_toolkit>=3.0.0,<4",
+  "rich>=13.0.0,<16",
 ]
 
 [project.scripts]
@@ -18,4 +18,4 @@ lilbot = "lilbot.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["lilbot*"]
+include = ["lilbot*", "evaluation*"]

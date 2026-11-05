@@ -1,0 +1,2 @@
+reserved: 7
+available: 18

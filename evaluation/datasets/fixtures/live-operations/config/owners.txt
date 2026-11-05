@@ -1,0 +1,3 @@
+Owner for ingest: ops-legacy
+Owner for delivery: ops-legacy
+Owner for billing: ops-finance

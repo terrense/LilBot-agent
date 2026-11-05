@@ -1,0 +1,2 @@
+Approved handoff code: LANTERN-7316
+Previous, retired code: LANTERN-1840

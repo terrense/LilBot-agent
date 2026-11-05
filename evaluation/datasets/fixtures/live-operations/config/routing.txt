@@ -1,0 +1,3 @@
+primary=east-1
+backup=west-1
+max_attempts=3

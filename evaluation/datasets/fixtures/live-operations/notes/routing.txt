@@ -1,0 +1,3 @@
+Escalation owner: Mira Sol
+Pager group: ops-blue
+Escalation window: 09:00-17:00 UTC
