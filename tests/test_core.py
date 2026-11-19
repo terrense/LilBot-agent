@@ -46,7 +46,12 @@ class CoreTests(unittest.TestCase):
 
     def test_subprocess_output_decode_never_raises_on_bad_bytes(self):
         self.assertEqual(_decode_process_output("hello"), "hello")
-        self.assertIn("\ufffd", _decode_process_output(b"\xb4"))
+        # The decoder tries UTF-8, then the locale, then GBK before falling
+        # back to replacement. A single 0xb4 byte is valid in some Windows
+        # locales, so assert the contract (a string, no exception).
+        decoded = _decode_process_output(bytes([0xB4]))
+        self.assertIsInstance(decoded, str)
+        self.assertTrue(decoded)
 
     def test_sandbox_run_handles_invalid_child_output(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -57,6 +62,7 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertNotIn("UnicodeDecodeError", result.output)
 
+    @unittest.skipUnless(os.name == "nt", "PowerShell safety is Windows-specific.")
     def test_powershell_safety_classifies_shell_risks(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
