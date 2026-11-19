@@ -17,6 +17,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from itertools import islice
@@ -233,8 +234,16 @@ def read_texts(paths: Iterable[Path], *, workers: int = SEARCH_READ_WORKERS,
 # --- glob ------------------------------------------------------------------------
 
 def glob_matches_dirs_only(pattern: str) -> bool:
-    """Only an explicit trailing slash selects directories (``pkg/``, ``**/``)."""
-    return pattern.replace("\\", "/").rstrip().endswith("/")
+    """Match the directory-only behavior of ``Path.rglob`` for this interpreter.
+
+    An explicit trailing slash always selects directories. A bare ``**`` is
+    directory-only on pathlib <= 3.12, while 3.13 changed ``rglob("**")`` to
+    include files; keep the tool's behavior aligned with the running version.
+    """
+    normalized = pattern.replace("\\", "/").rstrip()
+    if normalized.endswith("/"):
+        return True
+    return normalized == "**" and sys.version_info < (3, 13)
 
 
 def glob_to_regex(pattern: str) -> re.Pattern[str]:
