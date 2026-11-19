@@ -1,6 +1,7 @@
 """Tests for parallel read-only tool execution."""
 from __future__ import annotations
 
+import threading
 import time
 
 from lilbot.config import LilBotConfig
@@ -33,8 +34,13 @@ def _agent(tmp_path, registry, scripted_turns):
 
 
 def test_read_only_calls_run_in_parallel(tmp_path):
+    # A barrier proves overlap deterministically: four workers must all reach
+    # it, so a sequential executor breaks the barrier instead of merely being
+    # slow on a loaded CI machine.
+    barrier = threading.Barrier(4)
+
     def slow_read(args, ctx):
-        time.sleep(0.2)
+        barrier.wait(timeout=3)
         return ToolResult(True, f"read {args.get('n')}")
 
     registry = ToolRegistry()
@@ -47,12 +53,7 @@ def test_read_only_calls_run_in_parallel(tmp_path):
         ProviderTurn(content="done"),
     ])
 
-    started = time.perf_counter()
     events = list(agent.run_turn("read everything"))
-    elapsed = time.perf_counter() - started
-
-    # 4 x 0.2s sequential would be ~0.8s; parallel should be well under.
-    assert elapsed < 0.6, f"too slow ({elapsed:.2f}s) — not parallel?"
     finished = [e for e in events if isinstance(e, ToolFinished)]
     assert [f.output for f in finished] == [f"read {i}" for i in range(4)]
 
