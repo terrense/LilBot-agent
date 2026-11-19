@@ -24,11 +24,18 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .. import __version__
 from ..sandbox import analyze_powershell_command
 from ..sandbox.walk import NOISY_DIRS, is_noisy_dir, iter_files, read_texts, walk  # noqa: F401  (NOISY_DIRS re-exported)
 from ..security.env import scrubbed_env
 from ..subagents import SubAgentGateError
-from .registry import ApprovalRequirement, ToolCapability, ToolContext, ToolDef, ToolRegistry, ToolResult
+from .registry import (
+    ToolCapability,
+    ToolContext,
+    ToolDef,
+    ToolRegistry,
+    ToolResult,
+)
 
 
 def _schema(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
@@ -58,7 +65,7 @@ def _bool(description: str, default: bool | None = None) -> dict[str, Any]:
     return data
 
 
-WEB_USER_AGENT = "LilBot/0.1 (+https://github.com/terrense/LilBot-agent)"
+WEB_USER_AGENT = f"LilBot/{__version__} (+https://github.com/terrense/LilBot-agent)"
 MAX_WEB_RESULTS = 10
 MAX_FETCH_CHARS = 40000
 # NOISY_DIRS lives in sandbox/walk.py (one walker for every search tool).
@@ -199,7 +206,8 @@ def _shell_permission(ctx: ToolContext, action: str, description: str, command: 
     # catastrophic commands; auto-allow known safe read-only ones (arity-aware,
     # flags ignored) to skip pointless approval prompts.
     from ..sandbox.execpolicy import classify
-    decision, reason = classify(command)
+    rules = getattr(ctx, "permission_rules", None)
+    decision, reason = classify(command, rules=rules)
     if decision == "deny":
         meta = {"command_safety": {"decision": "deny", "reason": reason}}
         if safety:
@@ -2259,7 +2267,7 @@ def _handle_read(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
 
 
 def _read_only_command_safe(args: dict[str, Any]) -> bool:
-    """Per-input concurrency predicate for shell tools (CC's isConcurrencySafe).
+    """Per-input concurrency predicate for shell tools (per-input concurrency safety).
 
     A shell call may join a parallel read-only batch only when it is a known
     read-only command (`git status`, `ls`, `grep`, …) with no shell operators —
@@ -2281,12 +2289,12 @@ _DESTRUCTIVE_SHELL = re.compile(
 
 
 def _shell_is_destructive(args: dict[str, Any]) -> bool:
-    """Per-input destructiveness for shell tools (CC's isDestructive)."""
+    """Per-input destructiveness for shell tools (per-input destructiveness)."""
     return bool(_DESTRUCTIVE_SHELL.search(str(args.get("command") or "")))
 
 
 def _edit_file_validate(args: dict[str, Any], ctx: ToolContext):
-    """Pre-execution validation for edit_file (CC's validateInput).
+    """Pre-execution validation for edit_file (input validation).
 
     Give the model an actionable reason instead of a confusing no-op result
     when the edit can't possibly do anything.
@@ -3312,8 +3320,8 @@ def _spawn_teammate(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         else:
             wt_note = "worktree unavailable (no git repo); running in shared workspace"
 
-    from ..teams.progress import TeammateProgress, random_verb
     from ..teams.models import TeammateInfo
+    from ..teams.progress import TeammateProgress, random_verb
     from ..teams.spawn_inprocess import spawn_inprocess_teammate
 
     progress = TeammateProgress(name=teammate_name, team_name=team_name, spinner_verb=random_verb())
@@ -4369,7 +4377,7 @@ def register_builtins(registry: ToolRegistry) -> None:
         "cleanup_worktree": _bool("Remove managed subagent worktree after completion.", True),
         "worktree_branch": _string("Optional branch name for worktree isolation."),
     }, ["prompt"]), _agent_open))
-    registry.register(ToolDef("Task", "Legacy Claude-style alias for Agent. Use for autonomous specialized subagent work and parallel independent tasks.", _schema({
+    registry.register(ToolDef("Task", "Legacy alias for Agent. Use for autonomous specialized subagent work and parallel independent tasks.", _schema({
         "description": _string("Short task description."),
         "prompt": _string("Task for the agent to perform."),
         "subagent_type": _string("Specialized agent type."),

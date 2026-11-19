@@ -3,9 +3,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from lilbot.tools.registry import ToolContext, ToolDef, ToolRegistry, ToolResult
 from lilbot.tools.builtin import _retrieve_tool_result
 from lilbot.tools.offload import INLINE_LIMIT
+from lilbot.tools.registry import ToolContext, ToolDef, ToolRegistry, ToolResult
 
 
 def _ctx(tmp_path):

@@ -11,7 +11,7 @@ VALID_EVENTS = {
     "post_tool_use",
     "turn_end",
     "session_end",
-    # CC parity: "stop" fires when the model is about to end the turn; a hook can
+    # "stop" fires when the model is about to end the turn; a hook can
     # force continuation. "user_prompt_submit" fires on each new user message.
     "stop",
     "user_prompt_submit",
@@ -67,7 +67,7 @@ class HookAction:
 class HookResult:
     success: bool
     output: str
-    # CC-parity structured protocol: a command hook may print JSON on stdout to
+    # structured protocol: a command hook may print JSON on stdout to
     # do more than pass/fail. All optional; empty/None means "not specified".
     decision: str = ""                       # "approve" | "block"
     updated_input: dict[str, Any] | None = None  # rewrite the tool's arguments

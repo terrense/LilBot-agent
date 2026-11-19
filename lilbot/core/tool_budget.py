@@ -1,8 +1,8 @@
 """L0 — per-turn tool-result budget with a frozen/fresh/replaced state machine.
 
-Faithful port of Claude Code's ``utils/toolResultStorage.ts::enforceToolResultBudget``,
-adapted from Anthropic's "many tool_results per user message" shape to LilBot's
-OpenAI-style transcript (one ``role=="tool"`` message per call).
+LilBot's per-turn tool-result budget: replace oversized results with a preview
+while keeping the full output on disk, so the transcript stays small without
+rewriting content that has already entered the provider's cached prefix.
 
 The point is to shed oversized tool output *without ever rewriting content that
 has already been sent to the model* — because that content sits in the
@@ -18,7 +18,7 @@ When a window's tool output exceeds the budget we only ever replace *fresh*
 candidates (largest first), so the cached prefix stays byte-stable. Fresh
 candidates we don't replace are marked seen → they become frozen next pass.
 
-This mirrors CC's ordering discipline: unselected candidates are marked seen
+This follows the ordering discipline: unselected candidates are marked seen
 immediately; selected ones are marked seen together with the replacement so no
 observer sees ``id ∈ seen but id ∉ replacements`` (which would misclassify it as
 frozen and send full content — a cache miss).
@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # Aggregate budget (chars) for tool output in the scanned window. ~50k chars
-# ≈ 12.5k tokens, matching CC's per-message MAX_TOOL_RESULTS_PER_MESSAGE_CHARS
+# ≈ 12.5k tokens, matching the per-message tool-result cap
 # order of magnitude.
 DEFAULT_TOOL_RESULT_BUDGET_CHARS = 50_000
 

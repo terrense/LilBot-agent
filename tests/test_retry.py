@@ -1,4 +1,4 @@
-"""Day 2 (Hermes gap P2): classify provider failures, back off and retry
+"""Classify provider failures, back off and retry
 transient ones, fall back to a second model, and persist a failed turn."""
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ from lilbot.llm.errors import FailoverReason, classify
 from lilbot.llm.providers import OpenAICompatibleProvider, ProviderError
 from lilbot.llm.retry import jittered_backoff, parse_retry_after, retry_delay
 from lilbot.tools import ToolContext, ToolRegistry
-
 
 # ── classify ─────────────────────────────────────────────────────────────
 

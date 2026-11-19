@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 from lilbot.config import LilBotConfig
 from lilbot.core.agent import Agent

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import argparse
-import signal
-import shutil
+import os
 import shlex
+import shutil
+import signal
 import sys
 import threading
 from dataclasses import dataclass
@@ -13,17 +14,22 @@ from typing import Iterable
 from .config import LilBotConfig, load_config, save_config
 from .core.agent import Agent
 from .core.compaction import estimate_tokens_text
-from .llm.providers import KNOWN_PROVIDERS, ProviderError, choose_provider, resolve_endpoint
+from .llm.providers import (
+    KNOWN_PROVIDERS,
+    ProviderError,
+    choose_provider,
+    resolve_endpoint,
+)
 from .mcp import MCPManager
 from .memory import FileMemoryStore, MemoryStore
 from .sandbox import PermissionManager, Sandbox
+from .sandbox.permission_rules import load_rules
 from .skills import SkillRegistry
 from .subagents import SubAgentManager
 from .teams.manager import TeamManager
 from .tools import ToolContext, ToolRegistry, register_builtins
 from .tui.classic import LilBotUI
 from .tui.windows_console import configure_windows_console, console_font_status
-
 
 # Convenience presets for DeepSeek's REAL model ids. `flash`/`pro` are kept as
 # friendly aliases (they used to map to fictional `deepseek-v4-*` ids that the
@@ -184,7 +190,16 @@ def build_runtime(cfg: LilBotConfig, ui: LilBotUI, interactive: bool = True) -> 
     teams = TeamManager(cfg.state_dir)
     registry = ToolRegistry()
     register_builtins(registry)
-    ctx = ToolContext(sandbox, permissions, memory, skills, subagents, mcp, cfg, teams)
+    policy_path = Path(os.environ["LILBOT_POLICY_FILE"]) if os.environ.get("LILBOT_POLICY_FILE") else None
+    permission_rules = load_rules(
+        cfg.state_dir,
+        user_dir=Path.home() / ".lilbot",
+        policy_path=policy_path,
+    )
+    ctx = ToolContext(
+        sandbox, permissions, memory, skills, subagents, mcp, cfg, teams,
+        permission_rules=permission_rules,
+    )
     subagents.configure_tools(registry, ctx)
     # M7: connect configured MCP servers and register their tools as first-class
     # deferred tools (mcp__<server>__<tool>). Best-effort — never blocks startup.

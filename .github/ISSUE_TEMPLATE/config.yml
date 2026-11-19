@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/terrense/LilBot-agent/tree/main/docs
+    about: Architecture, design, evaluation, and guides.
+  - name: Security report
+    url: https://github.com/terrense/LilBot-agent/security/advisories/new
+    about: Report a vulnerability privately. Do not open a public issue.

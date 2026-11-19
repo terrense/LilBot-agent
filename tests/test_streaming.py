@@ -8,8 +8,14 @@ from pathlib import Path
 
 from lilbot.config import LilBotConfig
 from lilbot.core.agent import Agent
-from lilbot.core.events import ProviderTurn, StreamEvent, TextDelta, ToolCall, TurnFinished
-from lilbot.llm.providers import OpenAICompatibleProvider, _iter_stream_events
+from lilbot.core.events import (
+    ProviderTurn,
+    StreamEvent,
+    TextDelta,
+    ToolCall,
+    TurnFinished,
+)
+from lilbot.llm.providers import OpenAICompatibleProvider, ProviderError, _iter_stream_events
 from lilbot.tools import ToolContext, ToolDef, ToolRegistry, ToolResult
 from lilbot.tui.classic import LilBotUI
 from lilbot.tui.dashboard import DashboardUI
@@ -31,6 +37,15 @@ def _sse(*data_lines: str) -> list[str]:
 
 
 class StreamParserTests(unittest.TestCase):
+
+    def test_error_frame_raises_instead_of_returning_an_empty_turn(self):
+        lines = _sse(
+            '{"error": {"message": "quota exceeded", "code": "insufficient_quota"}}'
+        )
+        with self.assertRaises(ProviderError) as ctx:
+            list(_iter_stream_events(lines))
+        self.assertIn("quota exceeded", str(ctx.exception))
+
     def test_content_deltas_stream_then_assemble_final_turn(self):
         lines = _sse(
             '{"choices":[{"delta":{"content":"Hel"}}]}',

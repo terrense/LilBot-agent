@@ -1,0 +1,55 @@
+name: Feature request
+description: Propose a capability or a design change
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is hard, missing, or unreliable today? Describe the situation, not only the solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should LilBot do? Include the user-visible behavior and a rough implementation sketch.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches, workarounds, or reasons to keep the current behavior.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Agent loop
+        - Tools and permissions
+        - Context and memory
+        - Subagents and teams
+        - TUI and CLI
+        - Providers
+        - Evaluation and benchmarks
+        - Documentation
+        - Packaging and CI
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and discussions.
+          required: true
+        - label: This is a request about LilBot's runtime, not a request to change a third-party model.
+          required: false

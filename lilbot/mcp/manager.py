@@ -99,7 +99,12 @@ class MCPManager:
         """Register each discovered MCP tool as a first-class deferred tool
         named ``mcp__<server>__<tool>``. Returns the number registered.
         """
-        from ..tools.registry import ApprovalRequirement, ToolCapability, ToolDef, ToolResult
+        from ..tools.registry import (
+            ApprovalRequirement,
+            ToolCapability,
+            ToolDef,
+            ToolResult,
+        )
 
         count = 0
         for server_name, client in self._clients.items():

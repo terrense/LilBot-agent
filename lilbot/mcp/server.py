@@ -13,6 +13,8 @@ import json
 import sys
 from typing import Any, TextIO
 
+from .. import __version__
+
 PROTOCOL_VERSION = "2024-11-05"
 
 
@@ -73,7 +75,7 @@ class LilBotMCPServer:
             return self._ok(mid, {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "lilbot", "version": "0.1"},
+                "serverInfo": {"name": "lilbot", "version": __version__},
             })
         if method == "ping":
             return self._ok(mid, {})

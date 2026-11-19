@@ -12,8 +12,10 @@ import os
 import queue
 import subprocess
 import threading
+import time
 from typing import Any
 
+from .. import __version__
 from ..security.env import scrubbed_env
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -78,7 +80,7 @@ class StdioMCPClient:
             result = self._request("initialize", {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {"tools": {}},
-                "clientInfo": {"name": "LilBot", "version": "0.1"},
+                "clientInfo": {"name": "LilBot", "version": __version__},
             }, timeout=min(self.timeout, 15.0))
             self.server_info = result.get("serverInfo", {}) if isinstance(result, dict) else {}
             self._notify("notifications/initialized")
@@ -145,11 +147,22 @@ class StdioMCPClient:
         payload: dict[str, Any] = {"jsonrpc": "2.0", "id": mid, "method": method}
         if params is not None:
             payload["params"] = params
+        deadline = time.monotonic() + (timeout if timeout is not None else self.timeout)
         try:
             self._write(payload)
-            msg = q.get(timeout=timeout if timeout is not None else self.timeout)
-        except queue.Empty:
-            raise TimeoutError(f"MCP request '{method}' to '{self.name}' timed out")
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"MCP request '{method}' to '{self.name}' timed out")
+                try:
+                    msg = q.get(timeout=min(0.1, remaining))
+                    break
+                except queue.Empty:
+                    if self._proc is not None and self._proc.poll() is not None:
+                        raise RuntimeError(
+                            f"MCP server '{self.name}' exited with code "
+                            f"{self._proc.returncode} before answering '{method}'"
+                        )
         finally:
             with self._pending_lock:
                 self._pending.pop(mid, None)

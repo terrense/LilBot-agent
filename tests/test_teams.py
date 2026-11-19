@@ -18,7 +18,6 @@ from lilbot.teams.models import TeammateInfo
 from lilbot.teams.shared_task import SharedTaskStore
 from lilbot.tui.classic import LilBotUI
 
-
 # ── data layer ───────────────────────────────────────────────────────────
 
 
@@ -66,6 +65,7 @@ def test_shared_task_dependencies(tmp_path: Path) -> None:
     a = store.create("impl", assignee="impl")
     b = store.create("review", assignee="rev", blocked_by=[a.id])
     store.update(a.id, status="completed")
+    assert store.get(b.id).blocked_by == [a.id]
     assert store.get(a.id).status == "completed"
     assert store.list_tasks(assignee="rev")[0].blocked_by == [a.id]
     assert {t.status for t in store.list_tasks(status="completed")} == {"completed"}

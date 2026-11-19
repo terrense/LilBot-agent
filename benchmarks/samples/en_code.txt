@@ -14,7 +14,7 @@ from .retry import parse_retry_after
 class ProviderError(RuntimeError):
     """Provider failure. Carries a structured ``status_code`` and ``is_overflow``
     flag so the agent can react to a context-overflow (413 / context_length_exceeded)
-    by compacting and retrying, instead of matching error strings (CC's lesson:
+    by compacting and retrying, instead of matching error strings (the lesson:
     judge errors by structured signals, use text only as a fallback).
 
     ``reason`` names a transport failure with no HTTP status (``"timeout"`` /
@@ -96,7 +96,7 @@ def _truncate(text: str, limit: int = 2000) -> str:
 
 
 def _is_overflow_error(status_code: int, detail: str) -> bool:
-    """Structured context-overflow classification (CC parity).
+    """Structured context-overflow classification.
 
     A 413 ("request entity too large") is always overflow; otherwise fall back to
     the error-body text markers (``context_length_exceeded`` / "prompt too long"

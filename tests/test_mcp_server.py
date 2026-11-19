@@ -87,6 +87,7 @@ def test_roundtrip_m7_client_against_m8_server(tmp_path):
     import os
     import sys
     import textwrap
+
     from lilbot.mcp.client import StdioMCPClient
 
     # A tiny launcher that builds a registry and serves it.

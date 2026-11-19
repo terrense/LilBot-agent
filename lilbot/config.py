@@ -6,7 +6,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-
 DEFAULT_MAX_STEPS = 20
 DEFAULT_TUI_FONT_SIZE = 22
 DEFAULT_SUBAGENT_MAX_CONCURRENT = 8

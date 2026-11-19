@@ -5,15 +5,23 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+from prompt_toolkit.keys import Keys
 
 from lilbot.cli import run_prompt
 from lilbot.config import LilBotConfig
 from lilbot.core.agent import Agent
-from lilbot.core.events import ProviderRetry, ProviderTurn, StreamEvent, TextDelta, ToolCall, ToolStarted, TurnFinished
+from lilbot.core.events import (
+    ProviderRetry,
+    ProviderTurn,
+    StreamEvent,
+    TextDelta,
+    ToolCall,
+    ToolStarted,
+    TurnFinished,
+)
 from lilbot.llm.providers import ProviderError
 from lilbot.tools import ToolContext, ToolDef, ToolRegistry, ToolResult
 from lilbot.tui.dashboard import DashboardUI
-from prompt_toolkit.keys import Keys
 
 
 class _Memory:

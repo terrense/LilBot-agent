@@ -1,18 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from contextlib import nullcontext
 import hashlib
 import json
-from pathlib import Path
 import re
 import threading
+from contextlib import nullcontext
+from dataclasses import dataclass, field
+from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable
 
 from ..sandbox import SandboxError
 from ..security.env import redact_known_secrets
-
 
 # ── Direct tools crate ──────────────────────────────
 # Tool capability + approval-requirement enums.
@@ -117,7 +116,7 @@ def _read_cached_plan_approval(path: Path) -> dict[str, Any] | None:
 
 @dataclass
 class ValidationResult:
-    """Outcome of a tool's pre-execution input validation (CC's ValidationResult).
+    """Outcome of a tool's pre-execution input validation (the validation result).
 
     Distinct from permission: validation tells the MODEL why its call is
     malformed (so it can fix and retry) without running the tool or prompting the
@@ -134,7 +133,7 @@ class ToolResult:
     ok: bool
     output: str
     metadata: dict[str, Any] = field(default_factory=dict)
-    # Optional functional context edit applied AFTER the tool runs (CC's
+    # Optional functional context edit applied AFTER the tool runs (the runtime's
     # ToolResult.contextModifier). Only honored for non-concurrency-safe tools —
     # a tool that mutates the shared context (e.g. adds a working directory) must
     # not run interleaved with a parallel read batch. Returns the new context.
@@ -161,27 +160,27 @@ class ToolDef:
     # the full schema on demand via the ToolSearch tool. This keeps the per-turn
     # tool payload small even though LilBot registers ~150 tools.
     should_defer: bool = False
-    # Optional per-INPUT concurrency predicate (CC's isConcurrencySafe(input)).
+    # Optional per-INPUT concurrency predicate (per-input concurrency safety).
     # When set, the agent loop calls it with the tool arguments to decide whether
     # THIS call can join a parallel read-only batch — e.g. `bash("ls")` is safe
     # but `bash("rm -rf x")` is not, even though the tool is the same. Overrides
     # the static capability-based `concurrency_safe` when present.
     concurrency_check: Callable[[dict[str, Any]], bool] | None = None
-    # Short capability phrase for ToolSearch keyword matching (CC's searchHint):
+    # Short capability phrase for ToolSearch keyword matching (the search hint):
     # 3-10 words, terms NOT already in the tool name, so deferred tools surface.
     search_hint: str = ""
-    # Optional input validation (CC's validateInput): runs BEFORE the handler and
+    # Optional input validation (input validation): runs BEFORE the handler and
     # BEFORE any permission prompt; on failure the model gets a readable reason
     # and the handler never runs. May return a ValidationResult, a (ok, message)
     # tuple, or None (== valid).
     validate: Callable[[dict[str, Any], "ToolContext"], "ValidationResult | tuple[bool, str] | None"] | None = None
-    # Per-tool result-size cap for offloading (CC's maxResultSizeChars).
+    # Per-tool result-size cap for offloading (the per-tool result cap).
     #   0  -> use the global default (INLINE_LIMIT)
-    #   -1 -> never offload (CC's Infinity; e.g. read_file, whose output the model
+    #   -1 -> never offload (an infinite cap; e.g. read_file, whose output the model
     #         would just Read back — persisting it is circular)
     max_result_chars: int = 0
     # Whether this tool performs an irreversible operation (delete/overwrite/send).
-    # Fail-closed default False (CC's buildTool default). A predicate allows a
+    # Fail-closed default False (the fail-closed default). A predicate allows a
     # per-input answer (e.g. `bash rm` destructive, `bash ls` not).
     destructive: bool = False
     destructive_check: Callable[[dict[str, Any]], bool] | None = None
@@ -219,8 +218,8 @@ class ToolDef:
             return ValidationResult(True)
         try:
             out = self.validate(args or {}, ctx)
-        except Exception as exc:  # a broken validator must not crash the call
-            return ValidationResult(True, f"(validator error ignored: {exc})")
+        except Exception as exc:  # a broken validator fails closed
+            return ValidationResult(False, f"validator error: {type(exc).__name__}: {exc}")
         if out is None:
             return ValidationResult(True)
         if isinstance(out, ValidationResult):
@@ -247,10 +246,10 @@ class ToolDef:
         return ToolCapability.ReadOnly in self.criteria and not (self.criteria & unsafe)
 
     def is_concurrency_safe(self, args: dict[str, Any] | None = None) -> bool:
-        """Per-input concurrency safety (CC parity).
+        """Per-input concurrency safety .
 
         Prefer the per-input predicate when the tool defines one; a predicate
-        that raises is treated as not-safe (fail-closed, like CC's try/catch).
+        that raises is treated as not-safe (fail-closed, fail-closed).
         Falls back to the static capability-based property otherwise.
         """
         if self.concurrency_check is not None:
@@ -276,6 +275,10 @@ class ToolContext:
     # (SendMessage / Task*) know who is acting and which team they belong to.
     team_name: Any = None
     agent_name: Any = None
+    # Layered policy/project/user rules loaded once at startup. None keeps the
+    # historical behavior for tests and embedding callers that build a context
+    # by hand.
+    permission_rules: Any = None
 
 
 class ToolRegistry:
@@ -391,7 +394,7 @@ class ToolRegistry:
             # Name hits weigh more than description hits.
             score += sum(3 for term in terms if term in tool.name.lower())
             # searchHint hits weigh more too — it exists precisely to surface a
-            # deferred tool via terms not in its name (CC's searchHint intent).
+            # deferred tool via terms not in its name (the search hint intent).
             score += sum(2 for term in terms if tool.search_hint and term in tool.search_hint.lower())
             if score:
                 scored.append((score, tool))
@@ -446,7 +449,7 @@ class ToolRegistry:
     ) -> None:
         """Dynamically expand agent_open / agent_eval descriptions from live registry."""
         try:
-            from ..subagents.render import render_agent_types, render_active_agents  # noqa: PLC0415
+            from ..subagents.render import render_active_agents, render_agent_types  # noqa: PLC0415
         except ImportError:
             return
 
@@ -479,7 +482,7 @@ class ToolRegistry:
         # honor it and reveal its schema for subsequent turns — no regression.
         if tool.should_defer and tool.name not in self._discovered:
             self._discovered.add(tool.name)
-        # Input validation (CC's validateInput) runs BEFORE the plan gate and the
+        # Input validation (input validation) runs BEFORE the plan gate and the
         # handler: a malformed call gets a readable reason back to the model and
         # never executes — no side effects, no permission prompt, no wasted step.
         validation = tool.run_validation(arguments, ctx)
@@ -507,7 +510,7 @@ class ToolRegistry:
         except Exception as exc:  # pragma: no cover - defensive boundary
             result = ToolResult(False, f"Tool error: {type(exc).__name__}: {exc}")
         elapsed_ms = int((perf_counter() - started) * 1000)
-        # Surface destructiveness for observation/telemetry (CC's isDestructive).
+        # Surface destructiveness for observation/telemetry (per-input destructiveness).
         if tool.is_destructive(arguments):
             result.metadata.setdefault("destructive", True)
         # Credential isolation: the model never sees the value of a secret
@@ -534,6 +537,22 @@ def _tool_permission_gate(tool: ToolDef, arguments: dict[str, Any], ctx: ToolCon
     metadata = {"gate": "tool_permission", "tool": tool.name}
     if permissions is None or not callable(getattr(permissions, "check", None)):
         return ToolResult(False, "Permission denied: permission manager is unavailable.", metadata)
+    rules = getattr(ctx, "permission_rules", None)
+    canonical = json.dumps(arguments, sort_keys=True, ensure_ascii=False, default=str)
+    if rules is not None and callable(getattr(rules, "evaluate", None)):
+        # Pattern rules on file tools should see the path, not the JSON wrapper.
+        rule_text = canonical
+        for key in ("path", "file_path", "target"):
+            if arguments.get(key):
+                rule_text = str(arguments[key])
+                break
+        decision, rule = rules.evaluate(tool.name, rule_text)
+        if decision == "deny":
+            source = getattr(rule, "source", "user")
+            spec = rule.spec() if hasattr(rule, "spec") else "rule"
+            return ToolResult(False, f"Permission denied by [{source}] {spec}.", metadata)
+        if decision == "allow":
+            return None
     if getattr(permissions, "mode", None) == "deny-all":
         return ToolResult(False, "Permission denied by deny-all mode.", metadata)
     if tool.permission_check is not None:

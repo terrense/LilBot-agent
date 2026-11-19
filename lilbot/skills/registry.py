@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
-import shlex
 from typing import Any
 
 
@@ -39,7 +39,6 @@ class Skill:
             "{{args}}": args_text,
             "$ARGUMENTS": args_text,
             "${LILBOT_SKILL_DIR}": str(self.skill_dir),
-            "${CLAUDE_SKILL_DIR}": str(self.skill_dir),
         }
         for key, value in replacements.items():
             result = result.replace(key, value)

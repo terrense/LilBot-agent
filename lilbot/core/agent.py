@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..config import LilBotConfig
+from ..hooks import HookContext, HookEngine, load_hooks
+from ..memory import extract_memories, recall
 from .compaction import (
     CACHE_TTL_SECONDS,
     SUMMARY_INSTRUCTION,
@@ -21,20 +23,18 @@ from .compaction import (
     is_context_overflow_error,
     partial_compact,
 )
-from .tool_budget import ToolBudgetState, enforce_tool_result_budget
+from .cycles import CycleArchive
 from .delegation import (
     parse_semantic_delegation_plan,
     semantic_delegation_messages,
     should_consult_semantic_delegation,
 )
-from ..hooks import HookContext, HookEngine, load_hooks
-from ..memory import extract_memories, recall
-from .cycles import CycleArchive
 from .eventlog import EventLog
+from .guardrails import GuardrailNotice, ToolCallGuardrailController
 from .history import FileHistory
 from .session import SessionStore, interrupted_tool_result_messages
 from .session_memory import SessionMemory
-from .guardrails import GuardrailNotice, ToolCallGuardrailController
+from .tool_budget import ToolBudgetState, enforce_tool_result_budget
 
 # Tools that mutate a file at a `path` arg — snapshot before they run so /rewind
 # can undo them.
@@ -86,16 +86,16 @@ Valid section names: "Session Title", "Current State", "Task Specification",
 Respond with JSON only, e.g. {"Current State": "...", "Worklog": "..."}."""
 
 # Max times a stop hook may force the turn to continue before we let it end
-# anyway — CC's death-spiral guard against a hook that always blocks.
+# anyway — a death-spiral guard against a hook that always blocks.
 MAX_STOP_CONTINUATIONS = 3
 
 # Max reactive compact+retry cycles for a single overflowing request before the
-# error surfaces — CC bounds every recovery loop so an irrecoverable prompt
+# error surfaces — Every recovery loop is bounded so an irrecoverable prompt
 # can't spin forever.
 MAX_OVERFLOW_RECOVERIES = 2
 
 # Max "resume from truncation" continuations per turn when the model is cut off
-# at max output tokens (finish_reason == "length"). CC caps this at 3.
+# at max output tokens (finish_reason == "length"). The cap is 3.
 MAX_OUTPUT_TRUNCATIONS = 3
 
 
@@ -105,14 +105,14 @@ def _brief_error(exc: BaseException, limit: int = 160) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 # A main-loop prompt at least this large that comes back with zero cache-read is
-# treated as a prompt-cache break — the signal CC's break-detection service
+# treated as a prompt-cache break — the signal a cache-break detector
 # tracks so cache hit-rate becomes an operable metric.
 CACHE_BREAK_MIN_PROMPT = 2_000
 
 # Bounded wait (seconds) for the recall prefetch before the FIRST provider call
 # of a turn. A fast side-query still lands in the very first completion; a slow
 # one is skipped there and picked up by a later iteration's non-blocking poll.
-# (Claude Code's memory prefetch never blocks at all; the bounded first wait is
+# (A fully non-blocking prefetch would never wait; the bounded first wait is
 # a deliberate trade-off to keep recall coverage for single-shot answers.)
 RECALL_FIRST_WAIT_S = 1.0
 
@@ -120,8 +120,7 @@ RECALL_FIRST_WAIT_S = 1.0
 class SideQueryPrefetch:
     """One-shot background side-query on a daemon thread.
 
-    Mirrors Claude Code's startRelevantMemoryPrefetch pattern: fire the side
-    LLM query at turn start so it runs concurrently with the main provider
+    Fire the side LLM query at turn start so it runs concurrently with the main provider
     call, then let the consume point poll for the result without blocking.
     The job must not raise (failures resolve to None) and must not touch
     agent state that the main thread mutates — thread-shared bits (usage)
@@ -146,13 +145,21 @@ class SideQueryPrefetch:
         return self._done.wait(timeout)
 
 
-from .events import ProviderRetry, ProviderTurn, TextDelta, ToolCall, ToolFinished, ToolStarted, TurnFinished
-from .prompts import build_system_prompt
 from ..llm.errors import classify
 from ..llm.providers import BaseProvider, choose_provider
 from ..llm.retry import retry_delay
 from ..tools import ToolContext, ToolRegistry, ToolResult
 from ..tools.registry import ToolCapability
+from .events import (
+    ProviderRetry,
+    ProviderTurn,
+    TextDelta,
+    ToolCall,
+    ToolFinished,
+    ToolStarted,
+    TurnFinished,
+)
+from .prompts import build_system_prompt
 
 
 class _TurnInterrupted(Exception):
@@ -184,7 +191,7 @@ class Agent:
         # Context compaction state.
         self.recovery = RecoveryState()
         self.compact_breaker = CompactCircuitBreaker()
-        # CC-parity: real prompt-token count from the last provider response
+        # Real prompt-token count from the last provider response
         # (trigger decisions trust this over the char/4 estimate), and the
         # timestamp of the last model call (for cache-cold detection).
         self._last_input_tokens = 0
@@ -234,11 +241,11 @@ class Agent:
         # Cycle memory archive (M4). Each compaction
         # archives a briefing recoverable via the recall_archive tool.
         self.cycles = CycleArchive(state_dir) if state_dir else None
-        # Stop-hook continuations this turn (CC's death-spiral guard).
+        # Stop-hook continuations this turn (a death-spiral guard).
         self._stop_continuations = 0
         # Output-truncation resume count this turn (finish_reason == "length").
         self._output_truncations = 0
-        # Observable recovery transitions (CC's transition.reason) — for tests,
+        # Observable recovery transitions (a recorded transition reason) — for tests,
         # UI, and telemetry.
         self._recovery_transitions: list[str] = []
         # Prompt-cache accounting (#17): make cache hit-rate an operable metric
@@ -249,7 +256,7 @@ class Agent:
         # Structured event log (#18): JSONL sink for tool/compaction/recovery
         # events — the raw material for success-rate / bad-case analysis.
         self.events = EventLog(state_dir)
-        # Provider failure handling (Hermes gap P2): backoff sleep is injectable
+        # Provider failure handling: backoff sleep is injectable
         # so tests run instantly; the fallback provider is built lazily and used
         # for the rest of the turn once the main model gives up.
         self._sleep: Callable[[float], None] = time.sleep
@@ -264,7 +271,7 @@ class Agent:
         self._aux_provider: BaseProvider | None = None
         self._aux_key: tuple[str, str, str] | None = None
         self._aux_lock = threading.Lock()
-        # Token-estimate calibration (Hermes gap P3): the char-class estimate is
+        # Token-estimate calibration: the char-class estimate is
         # scaled by an EMA of real prompt_tokens / estimate from main-loop calls,
         # so each model's tokenizer is learned instead of guessed.
         self._estimate_ratio = 1.0
@@ -383,7 +390,7 @@ class Agent:
         if self.hooks.has_hooks():
             self.hooks.run("user_prompt_submit", HookContext(event="user_prompt_submit", message=user_text))
         self._maybe_compact()      # 回合开始先按 token 预算压缩历史（见 compaction.py）
-        # 记忆召回改为“并行预取”（M9，对标 CC 的 startRelevantMemoryPrefetch）：
+        # 记忆召回改为“并行预取”（M9，与主模型并行预取）：
         # 这里只是发射后台侧查询，不再阻塞；结果由 _provider_messages 里的
         # _consume_recall_prefetch 轮询消费（首次调用给一个有界等待）。
         self._start_recall_prefetch(user_text)
@@ -409,9 +416,37 @@ class Agent:
             # When the text already streamed live, don't re-emit it as a block.
             if turn.content and not streamed:
                 yield TextDelta(turn.content, interim=bool(turn.tool_calls))
+            # A tool call cut off at max output tokens can carry incomplete JSON.
+            # Never execute it: re-issue the complete call instead, bounded so a
+            # model that keeps truncating cannot spin forever.
+            if turn.finish_reason == "length" and turn.tool_calls:
+                if self._output_truncations < MAX_OUTPUT_TRUNCATIONS:
+                    self._output_truncations += 1
+                    self._record_transition("max_output_tokens_recovery")
+                    self._append({
+                        "role": "user",
+                        "content": (
+                            "Output token limit hit while emitting a tool call. The incomplete "
+                            "tool call was NOT executed. Re-issue the complete tool call with "
+                            "full JSON arguments, or break the work into smaller steps."
+                        ),
+                    })
+                    continue
+                self._append(self._assistant_content_message(
+                    turn.content
+                    or "The response was truncated while emitting a tool call. The call was not executed.",
+                    turn.reasoning_content,
+                ))
+                self._fire_turn_end()
+                self._maybe_extract()
+                self._maybe_update_session_memory()
+                self._persist_session()
+                self._log_turn_finished(steps, "truncated_tool_call")
+                yield TurnFinished(steps, dict(self.usage))
+                return
             if not turn.tool_calls:
                 self._append(self._assistant_content_message(turn.content, turn.reasoning_content))
-                # Output-truncation recovery (CC parity, #9): the model was cut
+                # Output-truncation recovery (recovery path #9): the model was cut
                 # off at max output tokens. Inject a terse resume instruction and
                 # continue so it finishes, bounded so it can't loop forever.
                 if turn.finish_reason == "length" and self._output_truncations < MAX_OUTPUT_TRUNCATIONS:
@@ -427,7 +462,7 @@ class Agent:
                     })
                     continue
                 # Then consult stop hooks: one may force the model to keep working
-                # (CC's handleStopHooks), bounded so a misbehaving hook can't spin.
+                # (the stop-hook path), bounded so a misbehaving hook can't spin.
                 cont = self._run_stop_hook()
                 if cont is not None:
                     self._append({
@@ -588,7 +623,7 @@ class Agent:
         )
         outcome = self.hooks.run_pre_tool(ctx)
         # Structured protocol: a hook may rewrite the tool's arguments before it
-        # runs (CC's updatedInput). Apply in place so the executed call and its
+        # runs (the updated input). Apply in place so the executed call and its
         # snapshot/diagnostics all see the rewritten input.
         if outcome.updated_input is not None and isinstance(outcome.updated_input, dict):
             call.arguments = outcome.updated_input
@@ -607,11 +642,11 @@ class Agent:
         self.hooks.run("post_tool_use", ctx)
 
     def _run_stop_hook(self) -> str | None:
-        """Stop hook (CC parity): a hook may force the turn to continue.
+        """Stop hook: a hook may force the turn to continue.
 
         Returns a continuation instruction, or None to let the turn end. Capped
         by MAX_STOP_CONTINUATIONS so a hook that always blocks can't loop forever
-        (CC's death-spiral guard — the same reason API-error paths skip stop
+        (a death-spiral guard — the same reason API-error paths skip stop
         hooks entirely).
         """
         if not self.hooks.has_hooks():
@@ -757,8 +792,8 @@ class Agent:
 
         First consume of the turn waits up to RECALL_FIRST_WAIT_S so a fast
         selector still lands in the very first completion; later consumes are
-        pure polls (mirrors Claude Code's "consume point polls settledAt,
-        never blocks"). An unconsumed prefetch is simply dropped at turn end —
+        pure polls (the consume point checks whether the result is ready
+        and never blocks). An unconsumed prefetch is simply dropped at turn end —
         surfaced ids stay unmarked, so those memories remain eligible next turn.
         """
         prefetch = self._recall_prefetch
@@ -919,7 +954,7 @@ class Agent:
         return result
 
     def _is_concurrency_safe(self, call: ToolCall) -> bool:
-        # Per-input concurrency (CC parity): a tool like bash is safe to fan out
+        # Per-input concurrency: a tool like bash is safe to fan out
         # only for a read-only command (`ls`) and not a mutating one (`rm`), so
         # ask the ToolDef with the actual arguments.
         tool = self.registry.get(call.name)
@@ -968,9 +1003,9 @@ class Agent:
             read_only=bool(tool and ToolCapability.ReadOnly in tool.criteria),
         )
         self._result_with_guardrail_notice(result, notices)
-        # Apply a tool's functional context edit (CC's contextModifier). Only for
+        # Apply a tool's functional context edit (the context modifier). Only for
         # non-concurrency-safe tools, which run as singletons — mutating the shared
-        # ctx from a parallel worker would race, so CC only honors it here too.
+        # ctx from a parallel worker would race, so only the serial path honors it here too.
         modifier = getattr(result, "context_modifier", None)
         if modifier is not None and not self._is_concurrency_safe(call):
             try:
@@ -1077,7 +1112,7 @@ class Agent:
         return turn.content
 
     def _message_summarizer(self, system: dict[str, Any], to_summarize: list[dict[str, Any]]) -> str:
-        """Prompt-cache-sharing summary (CC's fork-based cache reuse, adapted).
+        """Prompt-cache-sharing summary (cache-sharing summaries, adapted).
 
         Send the SAME message objects the main loop used (system + prefix) plus a
         trailing summary instruction, so the provider's cached prefix is reused
@@ -1101,7 +1136,7 @@ class Agent:
         """True when the server prompt cache has likely expired since last call.
 
         Past the cache TTL the whole prefix is re-tokenized anyway, so a proactive
-        tool-result prune is "free". Mirrors CC's time-based microcompact trigger.
+        tool-result prune is "free". A time-based compaction trigger.
         """
         if self._last_activity_ts <= 0.0:
             return False
@@ -1161,7 +1196,7 @@ class Agent:
         )
 
     def partial_compact(self, pivot: int, direction: str = "up_to") -> str:
-        """User-selected partial compaction around a pivot message (CC's L4c).
+        """User-selected partial compaction around a pivot message (partial compaction).
 
         ``up_to`` summarizes everything before the pivot (keep recent); ``from``
         keeps the old context and compresses everything from the pivot onward.
@@ -1188,14 +1223,14 @@ class Agent:
         )
 
     def _post_compact_cleanup(self, method: str) -> None:
-        """Unified post-compact reset (CC's runPostCompactCleanup analogue).
+        """Unified post-compact reset (post-compact cleanup).
 
         Centralizes what a compaction invalidates so every path behaves the same:
           * the real prompt-token count is stale after a summary rewrite — clear
             it so the trigger uses the estimate until a fresh response arrives;
           * a one-shot pending-diagnostics message may reference pruned context;
           * discovered deferred tools are INTENTIONALLY kept (registry state
-            survives) so the model needn't ToolSearch them again — CC carries
+            survives) so the model needn't ToolSearch them again — the runtime carries
             preCompactDiscoveredTools across the boundary for the same reason.
         """
         if method == "summarize":
@@ -1220,7 +1255,7 @@ class Agent:
     def _apply_tool_budget(self) -> None:
         """L0: shed oversized tool output cache-safely before compaction.
 
-        Runs before the token-budget trigger (CC's ordering: tool-result budget
+        Runs before the token-budget trigger (the ordering: tool-result budget
         precedes microcompact/autocompact). Only fresh (never-sent) tool results
         are replaced with previews, so the cached prefix stays byte-stable; the
         Recovery/offload paths let the model re-run a tool if it needs the full
@@ -1240,7 +1275,7 @@ class Agent:
             self.compact(manual=True)
 
     def _is_overflow_error(self, exc: Exception) -> bool:
-        """Structured-first overflow classification (CC parity, #23).
+        """Structured-first overflow classification (structured-first classification).
 
         Trust the provider's structured ``is_overflow`` flag when present; fall
         back to matching the error string only when it isn't.
@@ -1250,7 +1285,7 @@ class Agent:
         return is_context_overflow_error(str(exc))
 
     def _record_transition(self, reason: str) -> None:
-        """Record why the loop recovered/continued — CC's ``transition.reason``.
+        """Record why the loop recovered/continued — a recorded ``transition_reason``.
 
         Kept as an observable list (bounded) so tests can assert a recovery path
         fired without inspecting message contents, and the UI/telemetry can show
@@ -1263,7 +1298,7 @@ class Agent:
 
     def _stream_turn(self, render_ctx: object):
         """Drive one model completion as a stream, with an ordered, bounded
-        recovery chain (CC parity #8/#1 + Hermes error classifier).
+        recovery chain (ordered compact/retry + provider error classification).
 
         Yields ``TextDelta`` chunks live and returns ``(turn, streamed)``. Each
         failure is classified (``llm.errors.classify``) and handled in order:
@@ -1481,7 +1516,7 @@ class Agent:
         """Best guess of the next request's prompt size, for compaction and UI.
 
         The last real ``prompt_tokens`` plus a calibrated estimate of the
-        messages appended since (tool results, the new user turn) - CC's
+        messages appended since (tool results, the new user turn) - the runtime's
         "usage + estimate of the tail". Before any real usage this is the
         calibrated full estimate, or 0 meaning "no better signal than the raw
         estimate".
@@ -1535,7 +1570,7 @@ class Agent:
         """Track prompt-cache hit-rate and breaks for main-loop calls (#17).
 
         A "break" is a substantial prompt served with zero cache read after we've
-        already established a cache — the signal CC's break-detection service
+        already established a cache — the signal cache-break detection
         surfaces so cache efficiency is observable, not guessed.
         """
         prompt = usage.get("prompt_tokens") or usage.get("input_tokens") or 0

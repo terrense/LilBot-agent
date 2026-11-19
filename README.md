@@ -1,921 +1,298 @@
 <div align="center">
 
-# LILBOT AGENT
+# LilBot
 
-### Clean-room Local Coding Agent / Windows-first / DeepSeek-ready
+**A local-first coding agent that runs in your terminal.**
 
-![LilBot hero placeholder](docs/assets/1.png)
+[![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](#requirements)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-4B5563?style=for-the-badge)](#requirements)
+[![Tests](https://img.shields.io/badge/tests-660%20passing-16A34A?style=for-the-badge)](#development)
+[![License](https://img.shields.io/badge/license-MIT-7C3AED?style=for-the-badge)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.2.0-DB2777?style=for-the-badge)](CHANGELOG.md)
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-36C5F0?style=for-the-badge&logo=python&logoColor=white)](#windows-quick-start)
-[![Windows](https://img.shields.io/badge/Windows-Terminal-0078D4?style=for-the-badge&logo=windows-terminal&logoColor=white)](#windows-terminal-notes)
-[![DeepSeek](https://img.shields.io/badge/DeepSeek-V4-7C3AED?style=for-the-badge)](#deepseek)
-[![TUI](https://img.shields.io/badge/TUI-prompt__toolkit%20Fullscreen-F9A8D4?style=for-the-badge)](#flight-deck)
-
-`LilBot` is a futuristic local coding-agent lab: agent loop, tool bus, permission gate, sandbox, memory core, skills, subagents, and MCP-style adapters.
+[English](README.md) · [简体中文](README.zh-CN.md)
 
 </div>
 
+![LilBot dashboard](docs/assets/screenshots/dashboard.png)
+
+LilBot is a coding-agent runtime you can read, run, and extend. It gives a model a
+workspace, a shell, a permission gate, and durable memory — then gets out of the way.
+The core is roughly 20k lines of Python, it speaks any OpenAI-compatible endpoint,
+and it ships with an offline provider so the loop can be exercised without an API key.
+
+It is built for the unglamorous parts of an agent: what happens when a tool fails,
+when the context is full, when a subagent is still running, when the process dies
+mid-turn, or when a model asks to delete something it should not touch.
+
 ---
 
-## Current Status
+## Why LilBot
 
-LilBot is now past the empty-shell stage. The project has a working local agent
-loop, OpenAI-compatible provider layer, tool registry, workspace sandbox,
-permission manager, durable memory, markdown skills, subagents, MCP-style
-adapters, a Windows-first TUI, and a growing compatibility surface inspired by
- and LilBot.
+- **Local-first.** Your workspace, sessions, memory, and event log live on disk under
+  `.lilbot/`. There is no hosted control plane and no account.
+- **Model-agnostic.** DeepSeek, OpenAI, OpenRouter, Moonshot, Qwen, Groq, Mistral,
+  xAI, a local Ollama/vLLM/LM Studio server — if it exposes OpenAI-style Chat
+  Completions, LilBot can drive it.
+- **Small enough to audit.** No framework, no plugin runtime, no hidden prompt
+  compiler. The agent loop is one generator you can read in an afternoon.
+- **Failure paths are first-class.** Retries, fallback, context overflow, output
+  truncation, duplicate-call guardrails, and crash-safe session writes all have
+  explicit code paths and tests.
 
-The main quality focus has shifted from adding more compatible names to making
-core capabilities enforceable and durable:
+## What it does
 
-- Subagent `allowed_tools` are enforced at runtime, including explicit empty
-  allowlists and Claude-style tool names such as `Read` and `Grep`.
-- Custom subagents now use a five-gate allowed-tool flow: gates 1-3 reject
-  unsafe creation, while gates 4-5 deny unsafe runtime tool calls and record
-  transcript evidence.
-- Forked skills now execute through the subagent runtime instead of only
-  rendering prompt text back into the parent conversation.
-- Subagent transcripts are persisted under `.lilbot/subagent-transcripts/` and
-  exposed through `transcript_handle`.
-- Subagent lifecycle now has a configurable concurrency cap, persisted task
-  restart resume, transcript-cursor reads, structured dashboard progress, and
-  optional subagent-level `worktree` isolation.
-- `agent_open`, `Agent`, and `Task` now expose dynamic tool
-  descriptions: active built-in/custom agents, when-to-use guidance, full tool
-  allowlists, active subagent status, and continue-existing-agent guidance are
-  rendered into the tool schemas seen by the parent model.
-- The deterministic delegation planner remains as a tested probe/reference for
-  question bursts, code exploration, research, mixed public facts, and writing
-  fallback, while the main loop now relies on the parent model reading the
-  dynamic Agent tool prompt to choose subagents during normal tool-calling.
-- Delegation routing now has a regression matrix and a local probe script for
-  simple prompts, no-question-mark Chinese question bursts, code exploration,
-  research, mixed public facts, and semantic-planner writing fallback.
-- `EnterPlanMode` and `ExitPlanMode` persist plan lifecycle and approval state.
-- Pending plan approval now blocks write and execution tools through the central
-  tool registry until the plan is approved or rejected.
-- Windows shell execution now runs through a PowerShell safety analyzer that
-  classifies separators, redirection, subprocess boundaries, background
-  launches, destructive commands, and unsafe delete/move targets before
-  permission prompts.
-- `EnterWorktree` and `ExitWorktree` probe git worktree support, return an
-  honest unsupported result, and support cleanup/remove for created worktrees.
-- Worktree isolation now has branch naming and `WorktreeMergeBack` dry-run or
-  merge execution for bringing a worktree branch back into the target branch.
-- LSP phase 2 is available through symbols, definitions, workspace symbols,
-  references, diagnostics, and rename preview tools. LilBot uses a local
-  language server when one is installed, otherwise it falls back to Python AST,
-  regex symbols, grep evidence, and project-map context.
-- Batch 1 workspace cleanup is implemented: `apply_patch` has a pure-Python
-  fallback, `run_tests` writes log artifacts under `.lilbot/test-artifacts/`,
-  and `project_map` now detects frameworks, entrypoints, package managers, and
-  key source files.
-- The dashboard Trace panel starts with a `WELCOME` banner, the left Agent info
-  card shows a wider grouped tool/skill inventory, the Work panel shows runtime,
-  active tool, subagent, transcript, and worktree status, and Windows `/copy` /
-  `F2` uses the native Unicode clipboard format for Chinese text instead of
-  `clip.exe`.
-- Composer slash commands now have an explicit fast path: `local` and
-  `local-ui` commands such as `/clear`, `/tokens`, `/plan`, and `/do` are
-  handled locally, while `prompt` commands such as `/review` intentionally enter
-  the Agent Loop.
-- The current test suite covers these enforcement and lifecycle paths.
+| Area | What you get |
+|---|---|
+| **Agent loop** | Event-driven ReAct loop, step budget, transition log, provider retry/fallback, overflow and truncation recovery, cooperative interrupts |
+| **Tools** | 146 built-in tools with JSON Schema, input validation, per-input concurrency safety, approval levels, output budgets, deferred loading and `ToolSearch` |
+| **Workspace** | Read/write/edit, unified patches, a single pruning walker behind every search, project map, LSP-backed symbols/definitions/references/diagnostics, test runner |
+| **Shell** | Foreground and background processes, interactive sessions, cancellation, Windows PowerShell safety analysis, arity-aware read-only allowlists |
+| **Context** | L0 tool-result budget, cache-aware pruning, structured summaries, session memory, cycle archive, live token calibration from provider usage |
+| **Memory** | File-backed user/project memory, parallel recall prefetch, background extraction, explicit save/list/search/delete |
+| **Subagents** | 11 built-in roles, custom markdown agents, five-gate tool allowlists, concurrency cap, transcripts, restart resume, optional git worktree isolation |
+| **Teams** | Long-lived in-process teammates, file mailbox with locking and stale recovery, shared task board with dependencies |
+| **Safety** | Permission modes, layered `Tool(pattern)` rules, plan-mode gate, secret isolation, output redaction, deny-by-default for destructive shell commands |
+| **MCP** | Both sides: connect external MCP servers as deferred tools, or expose LilBot's own tools over stdio |
+| **Interface** | Full-screen `prompt_toolkit` dashboard, classic Rich renderer, slash commands, session resume, file rewind |
+| **Evaluation** | Isolated mock and live evaluation harness, JSONL traces, grading, metrics, published baselines |
 
-Current verified baseline:
+## Quick start
 
-```text
-python -m pytest
-109 passed, 6 skipped
+### Requirements
+
+- Python **3.10+** (supported on 3.10–3.13)
+- Windows 10/11, Linux, or macOS
+- Any OpenAI-compatible model endpoint, or the built-in offline provider
+
+### Install
+
+```bash
+git clone https://github.com/terrense/LilBot-agent.git
+cd LilBot-agent
+python -m venv .venv
 ```
 
----
-
-## Whole Architecture
-
-now we only have the CLI version, in the future, I will find some guy to coorperate with me to develop a coller software version like this:
-
-
-
-![Theme placeholder](docs/assets/2.png)
-![Architecture sticker placeholder](docs/assets/3.png)
-
----
-
-## Why `python -m lilbot`
-
-`-m` means **run a Python module as a program**.
-
-When you run:
+Windows PowerShell:
 
 ```powershell
+.\.venv\Scripts\Activate.ps1
+pip install -e .
+copy .env.example .env
+```
+
+macOS / Linux:
+
+```bash
+source .venv/bin/activate
+pip install -e .
+cp .env.example .env
+```
+
+Edit `.env` and set one provider:
+
+```dotenv
+# Cloud provider
+LILBOT_PROVIDER=deepseek
+LILBOT_MODEL=deepseek-chat
+LILBOT_BASE_URL=https://api.deepseek.com
+LILBOT_API_KEY=replace-me
+
+# Local provider (no API key needed)
+# LILBOT_PROVIDER=ollama
+# LILBOT_MODEL=qwen2.5:3b
+# LILBOT_BASE_URL=http://127.0.0.1:11434/v1
+
+# Offline demo (no network, no key)
+# LILBOT_PROVIDER=mock
+```
+
+### Run
+
+```bash
 python -m lilbot
 ```
 
-Python does this:
+The installed console script works too:
 
-```text
-current conda/python environment
-  -> find package named lilbot
-  -> execute lilbot/__main__.py
-  -> __main__.py calls lilbot.cli:main()
-```
-
-Why this is good on Windows:
-
-- It uses the exact `python` from your active conda environment.
-- It avoids hardcoding script paths.
-- It works before installing a global `lilbot.exe` command.
-- It is the standard way to run package-style CLIs during development.
-
-Later we can also expose:
-
-```powershell
+```bash
 lilbot
 ```
 
-through `pyproject.toml`, but `python -m lilbot` is the cleanest dev command.
+If you have no endpoint configured, force the offline provider:
 
----
+```bash
+python -m lilbot --provider mock
+```
 
-## Flight Deck
-
-LilBot is aiming for a terminal cockpit, not a boring command prompt.
+### A 60-second session
 
 ```text
-┌──────────────────────────────────────────────────────────────┐
-│ Agent LilBot-agent-code - deepseek-v4-flash     ready  v0.1  │
-├─────────────────────────────┬────────────────────────────────┤
-│                             │                                │
-│       L I L B O T           │      Work / Tool Stream         │
-│   local coding agent        │      permissions / memory       │
-│                             │      subagents / mcp            │
-├─────────────────────────────┴────────────────────────────────┤
-│ Composer: write a task, use /, or run ! command safely        │
-└──────────────────────────────────────────────────────────────┘
+> List the files in this project, then run the tests.
+  * list_dir  {"path": "."}
+  * exec_shell {"command": "python -m pytest -q"}
+    Permission gate: allow once / always allow / deny once / always deny
+  ok 1 passed in 0.04s
 ```
 
-Current default renderer: `prompt_toolkit` full-screen dashboard.
+![A real tool run in the dashboard](docs/assets/screenshots/coding-session.png)
 
-Classic fallback renderer: `Rich`, available with `--classic`.
+The screenshot above is a real capture of the dashboard running the offline
+provider against the demo workspace: same agent loop, same permission gate, same
+tool execution path as a cloud model.
 
-Python can absolutely build a CLI/TUI as polished as TypeScript tools. Terminals receive ANSI escape sequences, keyboard events, mouse events, and layout redraws. Python libraries like `prompt_toolkit`, `Rich`, and `Textual` can drive those just as well as Node libraries.
+## Commands
 
----
+| Command | Purpose |
+|---|---|
+| `/help` | List commands |
+| `/tools` | List registered tools |
+| `/skills` | List skills |
+| `/memory list\|search\|save\|delete` | Manage persistent memory |
+| `/agents` | List subagent roles |
+| `/permissions ask\|accept-all\|deny-all` | Change the permission mode |
+| `/plan [task]` / `/do` | Enter or approve plan mode |
+| `/review [focus]` | Ask the agent to review the current diff |
+| `/tokens` | Show context and token usage |
+| `/model NAME` | Switch model or provider |
+| `/copy` | Copy the trace (dashboard) |
+| `/exit` | Quit |
 
-## System Map
+Prefix a line with `!` to run a shell command through the permission gate:
 
-```mermaid
-flowchart TB
-    User["User / Windows Terminal"]:::human
-    TUI["LilBot TUI\nprompt_toolkit fullscreen\nRich classic fallback"]:::ui
-    Loop["Agent Loop\nreason -> tool -> observe -> continue"]:::core
-    Provider["Provider Layer\nDeepSeek V4 / OpenAI-compatible / local rule model"]:::model
-    Registry["Tool Registry\nschemas + handlers + result model"]:::tool
-    Gate["Permission Gate\nask / accept-all / deny-all"]:::guard
-    Sandbox["Workspace Sandbox\npath boundary + shell boundary"]:::guard
-    Memory["Memory Core\nproject JSONL + search"]:::memory
-    Skills["Skill Deck\nmarkdown prompt capsules"]:::skill
-    Subagents["Subagent Bay\ncoder / reviewer / researcher / planner"]:::agent
-    MCP["MCP Dock\nexternal tools via JSON-RPC style adapter"]:::mcp
-    Files["Workspace Files"]:::data
-
-    User --> TUI --> Loop
-    Loop <--> Provider
-    Loop --> Registry
-    Registry --> Gate --> Sandbox
-    Sandbox --> Files
-    Registry --> Memory
-    Registry --> Skills
-    Registry --> Subagents
-    Registry --> MCP
-
-    classDef human fill:#111827,stroke:#00e5ff,color:#ffffff,stroke-width:2px
-    classDef ui fill:#061A2E,stroke:#36c5f0,color:#ffffff,stroke-width:2px
-    classDef core fill:#1E1B4B,stroke:#a78bfa,color:#ffffff,stroke-width:2px
-    classDef model fill:#312E81,stroke:#c084fc,color:#ffffff,stroke-width:2px
-    classDef tool fill:#042F2E,stroke:#2dd4bf,color:#ffffff,stroke-width:2px
-    classDef guard fill:#451A03,stroke:#f59e0b,color:#ffffff,stroke-width:2px
-    classDef memory fill:#052E16,stroke:#22c55e,color:#ffffff,stroke-width:2px
-    classDef skill fill:#3B0764,stroke:#e879f9,color:#ffffff,stroke-width:2px
-    classDef agent fill:#172554,stroke:#60a5fa,color:#ffffff,stroke-width:2px
-    classDef mcp fill:#4C0519,stroke:#fb7185,color:#ffffff,stroke-width:2px
-    classDef data fill:#0F172A,stroke:#94a3b8,color:#ffffff,stroke-width:2px
+```text
+> ! python -m pytest -q
 ```
 
----
-
-## Implementation Map
-
-| Layer | Main Files | Current State |
-|---|---|---|
-| CLI and runtime wiring | `lilbot/cli.py`, `lilbot/__main__.py` | Builds config, provider, registry, sandbox, memory, skills, subagents, MCP, TUI, and the typed slash-command fast path. |
-| Agent loop | `lilbot/core/agent.py`, `lilbot/core/delegation.py`, `lilbot/core/events.py`, `lilbot/core/prompts.py` | Runs provider turns, executes tools, tracks usage, compacts history, and exposes live Agent tool schemas so the parent model can choose subagents during normal tool-calling. |
-| Provider layer | `lilbot/llm/providers.py` | Supports the local rule model and OpenAI-compatible providers such as DeepSeek. |
-| Tool bus | `lilbot/tools/registry.py`, `lilbot/tools/builtin.py` | Registers schemas and handlers for workspace, git, shell, memory, skills, subagents, tasks, automation, MCP, web, LSP/navigation, worktree merge-back, document/media probes, compatibility aliases, and central plan-approval gating. |
-| Safety boundary | `lilbot/sandbox/workspace.py`, `lilbot/sandbox/permissions.py` | Enforces workspace path boundaries and ask/accept-all/deny-all permission modes. |
-| Memory | `lilbot/memory/store.py` | Persists project memory as JSONL with list/search/delete helpers. |
-| Skills | `lilbot/skills/registry.py`, `lilbot/skills/bundled/` | Loads inline and forked markdown skills, Claude-style frontmatter, aliases, companion files, allowed tools, agent hints, and model hints. |
-| Subagents | `lilbot/subagents/manager.py`, `lilbot/subagents/render.py` | Provides built-in and custom agents, dynamic Agent tool descriptions, five-gate custom allowed-tool validation, runtime tool allowlists, concurrency limits, restart resume, structured final reports, cancellation, progress events, transcript handles, and optional worktree isolation. |
-| MCP adapter | `lilbot/mcp/manager.py` | Reads `.lilbot/mcp.json` and provides phase-1 server/tool/resource integration. |
-| TUI | `lilbot/tui/classic.py`, `lilbot/tui/dashboard.py`, `lilbot/tui/windows_console.py` | Provides Rich classic fallback and a prompt_toolkit dashboard with Trace, expanded Agent inventory, structured Work status, permission popups, and transcript/progress visibility. |
-
----
-
-## Capability Progress
-
-| Area | Done | Next Gap |
-|---|---|---|
-| Workspace tools | File reads, directory listing, search, git status/diff/log/show/blame, bounded handles, diagnostics, pure-Python patch fallback, test log artifacts, and framework-aware `project_map`. | Richer test classification and artifact retrieval UX. |
-| Code navigation | `lsp_symbols`, `lsp_definition`, `lsp_workspace_symbols`, `lsp_references`, `lsp_diagnostics`, and `lsp_rename_preview`, with local LSP when available and AST/regex/grep fallback when unavailable. | Persistent warm LSP server sessions, references quality for dynamic languages, and safe rename apply. |
-| Skill ecosystem | Bundled skills, `SKILL.md` folders, metadata parsing, `load_skill`, inline skills, forked skill execution through subagents. | Source precedence, hooks, path-filtered skills, safer shell expansion. |
-| Subagents | Built-in roles, custom agents, five-gate allowed-tool protection, Claude tool-name compatibility, dynamic `Agent` tool prompt parity, delegation matrix probes, concurrency cap, restart resume, progress events, structured dashboard status, durable transcript handles, optional worktree isolation. | Exact model-state resume, per-agent resource quotas, richer cancellation semantics. |
-| Planning lifecycle | `update_plan`, checklists, goals, `EnterPlanMode`, `ExitPlanMode`, persisted approval state, write/execute gating while approval is pending. | Better approval UX and plan review surfaces in the TUI. |
-| Worktree lifecycle | `EnterWorktree` / `ExitWorktree` with explicit unsupported fallback and cleanup/remove; subagents can request managed `worktree` isolation; `WorktreeMergeBack` can preflight or merge a source branch back. | Conflict UI, merge-back artifact summaries, stronger cleanup diagnostics. |
-| Shell and PowerShell | Permission-gated shell execution, background jobs, PowerShell safety metadata, destructive command classification, and hard blocks for unsafe delete/move targets. | Expand analyzer coverage for advanced PowerShell AST cases and richer remediation hints. |
-| External integrations | Web search/fetch, GitHub via `gh`, MCP phase-1 adapter, automation records. | Deeper MCP resource discovery, stronger GitHub workflows, real automation scheduler. |
-| Analysis/media/docs | RLM Python sessions, pandoc/OCR/image probes. | Artifact handles, richer document/spreadsheet/presentation workflows. |
-| Composer commands | Typed slash registry with `local`, `local-ui`, and `prompt` command modes; `/clear`, `/tokens`, `/plan`, `/do`, and `/review` are routed without ad hoc composer hard-coding. | User/project contributed slash commands from skills and MCP prompt discovery. |
-
----
-
-## Agent Loop
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant U as User
-    participant UI as LilBot TUI
-    participant A as Agent Loop
-    participant L as DeepSeek / Provider
-    participant R as Tool Registry
-    participant P as Permission Gate
-    participant S as Sandbox
-    participant W as Workspace
-
-    U->>UI: prompt or slash command
-    UI->>A: user message
-    A->>L: messages + tool schemas
-    L-->>A: text or tool calls
-    alt tool call requested
-        A->>R: execute tool
-        R->>P: ask permission if needed
-        P-->>R: allow / deny
-        R->>S: workspace-scoped action
-        S->>W: read / write / search / shell
-        W-->>S: result
-        S-->>R: safe output
-        R-->>A: tool result
-        A->>L: observation
-    else direct answer
-        A-->>UI: final text
-    end
-    UI-->>U: cockpit output
-```
-
----
-
-## Permission Gate
-
-```mermaid
-stateDiagram-v2
-    [*] --> InspectTool
-    InspectTool --> NoApprovalNeeded: read/list/search
-    InspectTool --> ApprovalNeeded: write/edit/bash
-    ApprovalNeeded --> AllowOnce: y
-    ApprovalNeeded --> AlwaysAllow: a
-    ApprovalNeeded --> DenyOnce: n
-    ApprovalNeeded --> AlwaysDeny: d
-    AlwaysAllow --> PersistRule
-    AlwaysDeny --> PersistRule
-    AllowOnce --> ExecuteTool
-    NoApprovalNeeded --> ExecuteTool
-    DenyOnce --> StopTool
-    PersistRule --> ExecuteOrStop
-    ExecuteOrStop --> ExecuteTool: allow
-    ExecuteOrStop --> StopTool: deny
-    ExecuteTool --> [*]
-    StopTool --> [*]
-```
-
----
-
-## Memory / Skills / Subagents
+## Architecture
 
 ```mermaid
 flowchart LR
-    Prompt["User Intent"]:::input
-
-    subgraph MemoryCore["Memory Core"]
-        M1["memory_save"]
-        M2["memory_search"]
-        M3["memory_list"]
-        M4["memory_delete"]
-    end
-
-    subgraph SkillDeck["Skill Deck"]
-        S1["review.md"]
-        S2["plan.md"]
-        S3["commit.md"]
-        S4["summarize.md"]
-    end
-
-    subgraph AgentBay["Subagent Bay"]
-        A1["coder"]
-        A2["reviewer"]
-        A3["researcher"]
-        A4["planner"]
-    end
-
-    Prompt --> MemoryCore
-    Prompt --> SkillDeck
-    Prompt --> AgentBay
-
-    MemoryCore --> Context["Injected Context"]
-    SkillDeck --> Rendered["Rendered Prompt Capsule"]
-    AgentBay --> Result["Background or inline result"]
-
-    Context --> Loop["Agent Loop"]
-    Rendered --> Loop
-    Result --> Loop
-
-    classDef input fill:#020617,stroke:#00e5ff,color:#ffffff
-    classDef default fill:#111827,stroke:#64748b,color:#ffffff
+    UI[CLI / Dashboard] --> A[Agent loop]
+    A --> P[OpenAI-compatible provider]
+    A --> R[Tool registry]
+    A --> C[Context manager]
+    A --> M[Memory store]
+    A --> S[Sessions + event log]
+    R --> W[Workspace sandbox]
+    R --> G[Permission gate]
+    R --> SA[Subagents]
+    R --> T[Teams]
+    R --> MCP[MCP client / server]
+    G --> PS[PowerShell analyzer]
+    C --> TB[Tool-result budget]
+    C --> CP[Compaction + recovery]
+    M --> RP[Recall prefetch]
 ```
 
----
+The loop is simple on purpose:
 
-## Teams / Teammates
+1. Build the provider messages from stable prefixes plus current state.
+2. Stream a model turn; emit text and tool calls as events.
+3. Partition tool calls into concurrent-safe batches and execute them.
+4. Feed tool results back as observations, compact if needed, and continue.
+5. On a terminal failure, persist the turn and surface a structured error.
 
-Subagents are one-shot: spawn → run → collect. **Teams** add long-running
-*teammates* that stay alive across turns, talk to each other, and share a task
-board — modeled on multi-agent "swarm" coordination but built on LilBot's own
-threaded subagent runtime (gates, transcripts, and persistence are all reused).
+Read the details in [Architecture overview](docs/architecture/overview.md) and
+[Runtime call chain](docs/architecture/runtime-call-chain.md).
 
-State lives per-project under `.lilbot/teams/<slug>/`:
+## Safety model
 
-- `config.json` — team + members
-- `tasks.json` — shared task board (assignee + `blocks` / `blocked_by`)
-- `mailbox/<name>.json` — per-agent inbox (file-locked, concurrency-safe)
+LilBot assumes the model can be wrong, curious, or manipulated:
 
-### How a team runs
+- **Approval is centralized.** Tools declare an approval requirement; the registry
+  enforces it. A new tool cannot silently skip the gate.
+- **Layered rules.** `Tool(pattern)` rules come from policy, project, and user
+  sources. `deny > ask > allow`, and shadowed rules are reported.
+- **Shell analysis.** Catastrophic commands are denied first. Known read-only
+  commands use arity-aware prefix matching. PowerShell commands get a token-level
+  risk pass for separators, redirection, subprocesses, background launches, and
+  destructive delete/move targets.
+- **Secrets stay out of reach.** Child processes started by the model lose
+  `*_KEY`, `*_TOKEN`, `*_SECRET`, and `*_PASSWORD` variables by default. Commands
+  that read secret variables or `.env` files are never auto-allowed. Tool output
+  is scrubbed of known secret values before it re-enters the model context.
+- **The sandbox is a boundary, not a container.** Paths must resolve inside the
+  workspace, but the shell is still a host process. For untrusted code, add a
+  container or VM around it.
 
-```mermaid
-flowchart TD
-    Lead["Lead (you)"]:::input
-    Lead -->|team_create| Team["Team: bugfix"]
-    Lead -->|"Agent(team_name, name, subagent_type)"| Impl["impl (implementer)\nlong-running thread"]
-    Lead -->|"Agent(team_name, name, subagent_type)"| Rev["rev (review)\nlong-running thread"]
+## Evaluation
 
-    Impl -->|"send_message to=lead + idle"| Box["mailbox/"]
-    Rev  -->|"send_message to=lead + idle"| Box
-    Box  -->|"drained at next loop turn"| Note["&lt;team-notification&gt; injected"]
-    Note --> Lead
-    Lead -->|"send_message wakes a teammate"| Impl
+LilBot ships an evaluation harness rather than a leaderboard claim. The included
+live suite has 24 trials across reading, searching, editing, recovery, guardrails,
+permissions, memory, and context tasks.
 
-    classDef input fill:#020617,stroke:#00e5ff,color:#ffffff
-    classDef default fill:#111827,stroke:#64748b,color:#ffffff
-```
+| Run | Model | Trials | Pass | Success | Median latency | P95 latency |
+|---|---|---:|---:|---:|---:|---:|
+| 2026-11-04 live baseline | MiniMax-M3 | 24 | 16 | 66.7% | 9.71 s | 21.94 s |
 
-A teammate runs one full agent turn (same tool loop + gates as a subagent),
-reports to `lead`, then goes **idle** and polls its mailbox. The lead never
-blocks: teammate messages are drained at the top of each agent-loop turn and
-injected as `<team-notification>` coordination signals.
+The baseline is intentionally published with its failures and traces. It is a
+starting point for measuring regressions, not evidence of frontier parity. The
+roadmap below targets a harder suite and a higher pass rate before any such claim
+is made.
 
-### Tools (the model uses these autonomously)
+Runtime micro-benchmarks from the same period:
 
-| Tool | Purpose |
-|------|---------|
-| `team_create` / `team_delete` / `team_list` | manage teams |
-| `Agent(team_name=, name=, subagent_type=)` | spawn a long-running teammate (vs. one-shot when `team_name` is omitted) |
-| `send_message` | message a teammate by name, `lead`, or `*` (broadcast); wakes idle teammates |
-| `team_task_create` / `team_task_list` / `team_task_get` / `team_task_update` | shared task board with dependencies |
+| Case | Result |
+|---|---|
+| 10 provider-style HTTP requests | 7,825 ms / 10 TCP connections -> **8.4 ms / 1 connection** |
+| `grep` across the repo (no match) | 51.4 ms median |
+| `glob` for Python files | 7.8 ms median |
+| Session append | 0.071 ms median |
+| Plan-state cached read | 0.252 ms median |
 
-Every teammate automatically gets the coordination tools (`send_message`,
-`team_task_*`) on top of its role's tools, scoped to its identity via the tool
-context — so it knows who it is and which team it belongs to.
-
-### Slash commands
-
-```
-/team list                 # teams, members, live status, last activity
-/team new NAME             # create a team locally
-/team msg NAME TEXT        # send a message (wakes the teammate)
-/team rm NAME              # delete a team
-```
-
-The Flight Deck's **Work** pane (F5) shows a live **Teammates** panel:
-`name [status] activity  tools=N tok=…`.
-
-### Worktree isolation (opt-in)
-
-Pass `isolation: "worktree"` when spawning a teammate to give it its own git
-worktree under `.lilbot/worktrees/`, so concurrent teammates don't edit the same
-files. If the workspace is not a git repo, it degrades gracefully to the shared
-workspace. Worktrees are removed on `team_delete`.
-
-An **isolated teammate auto-accepts writes** (`accept-all`) because its
-PathSandbox confines every file operation to its own worktree — changes can't
-reach the main tree until the lead reviews/merges them. A **non-isolated**
-teammate instead inherits the lead's permission mode, so in the default `ask`
-mode it cannot write unless you approve (or run with `accept-all`).
-
-### Example
-
-> "Build a team: have an implementer fix the null check in `auth.py`, then a
-> reviewer verify the change."
-
-The lead creates a team, spawns `impl` and (after `impl` reports back) `rev`,
-collects both results via auto-injected notifications, and answers you — without
-ever polling.
-
-### Learn more
-
-- Deep dive (source-grounded, interview/teaching grade): [`docs/TEAMS_EXPLAINED.md`](docs/TEAMS_EXPLAINED.md)
-- Live demo: `python experiment/teams_demo.py` (stub, no network) or `--real` (DeepSeek)
-
----
-
-## MCP Dock
-
-```mermaid
-flowchart TB
-    Config[".lilbot/mcp.json"]
-    Manager["MCPManager"]
-    ServerA["server: filesystem"]
-    ServerB["server: browser"]
-    ServerC["server: custom lab tool"]
-    ToolCall["mcp_call(server, tool, args)"]
-    Result["tool result → Agent Loop"]
-
-    Config --> Manager
-    Manager --> ServerA
-    Manager --> ServerB
-    Manager --> ServerC
-    ToolCall --> Manager
-    Manager --> Result
-
-    class Config file
-    class Manager core
-    class ServerA,ServerB,ServerC server
-    class ToolCall toolcall
-    class Result result
-
-    classDef file fill:#172554,stroke:#60a5fa,color:#fff
-    classDef core fill:#1e1b4b,stroke:#a78bfa,color:#fff
-    classDef server fill:#042f2e,stroke:#2dd4bf,color:#fff
-    classDef toolcall fill:#451a03,stroke:#f59e0b,color:#fff
-    classDef result fill:#052e16,stroke:#22c55e,color:#fff
-```
-
----
-
-## Windows Quick Start
-
-Python 3.10 is OK. The project is tested with Python 3.10.20 on Windows.
-
-```powershell
-cd F:\Experiment_laborotory\collection-lilbot-source-code-main\LilBot-agent-code
-conda activate LilBot
-pip install -r requirements.txt
-pip check
-python -m lilbot
-```
-
-Use the legacy printed interface only when debugging:
-
-```powershell
-python -m lilbot --classic
-```
-
-If box lines or Chinese text look wrong, force UTF-8 for the current PowerShell tab:
-
-```powershell
-chcp 65001
-$OutputEncoding = [System.Text.UTF8Encoding]::new()
-[Console]::InputEncoding = [System.Text.UTF8Encoding]::new()
-[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
-python -m lilbot
-```
-
-Recommended terminal:
+## Repository layout
 
 ```text
-Windows Terminal + Cascadia Mono / JetBrains Mono
+lilbot/                 Runtime package
+  core/                 Agent loop, compaction, sessions, events, guardrails
+  llm/                  Provider abstraction, retry, error classification
+  tools/                Tool registry and 146 built-in tools
+  sandbox/              Workspace, permissions, shell policy, PowerShell analysis
+  memory/               File memory, recall, extraction
+  subagents/            Subagent definitions and lifecycle
+  teams/                Mailbox, shared task board, in-process teammates
+  hooks/                Event hooks and structured protocol
+  mcp/                  MCP client and server
+  skills/               Skill registry and bundled skills
+  tui/                  Dashboard and classic renderers
+evaluation/             Mock and live evaluation harness, baselines, traces
+tests/                  660 passing tests
+benchmarks/             Runtime micro-benchmarks and results
+docs/                   Architecture, design, evaluation, guides, assets
+examples/               Small runnable demos
+.github/                CI, issue templates, PR template
 ```
 
----
+## Development
 
-## DeepSeek
-
-Do not commit API keys. Set the key only in your shell or in Windows user environment variables.
-
-For local development, LilBot also auto-loads `.env` from the project root. The file is ignored by Git.
-
-```powershell
-DEEPSEEK_API_KEY=sk-...
-LILBOT_PROVIDER=deepseek
-LILBOT_MODEL=deepseek-v4-flash
-LILBOT_BASE_URL=https://api.deepseek.com
+```bash
+python -m pytest tests -q          # 660 passed, 7 skipped
+python -m compileall lilbot        # syntax check
+ruff check lilbot tests            # lint (optional dev dependency)
 ```
 
-```powershell
-$env:DEEPSEEK_API_KEY="sk-..."
-python -m lilbot --provider deepseek --model deepseek-v4-flash
-```
-
-One-shot real API smoke test:
-
-```powershell
-$env:DEEPSEEK_API_KEY="sk-..."
-python -m lilbot --provider deepseek --model deepseek-v4-flash --print "Reply exactly: LilBot OK"
-```
-
-Endpoint:
-
-```text
-https://api.deepseek.com
-```
-
----
-
-## Command Deck
-
-Slash commands are intercepted in the Composer before the normal Agent Loop.
-They are registered with an explicit execution type:
-
-- `local`: deterministic local read/config action, no model call.
-- `local-ui`: deterministic UI/session action, no model call unless the command
-  explicitly includes a task to send onward.
-- `prompt`: expands into a prompt and intentionally enters the Agent Loop.
-
-| Command | Type | Purpose |
-|---|---|---|
-| `/help [command]` | `local` | Show all commands or one command's metadata |
-| `/clear` | `local-ui` | Clear Trace and reset the local conversation |
-| `/copy` | `local-ui` | Copy the Trace panel to clipboard |
-| `/theme` | `local-ui` | Show theme preview |
-| `/model [flash\|pro]` | `local` | View or switch DeepSeek model |
-| `/tools` | `local` | List registered tools |
-| `/skills` | `local` | List skills |
-| `/skill NAME ARGS` | `prompt` | Render a skill and run it through Agent |
-| `/memory list/search/save/delete` | `local` | Manage memory |
-| `/agents` | `local` | List subagent types and tasks |
-| `/agent TYPE PROMPT` | `local` | Run a focused subagent task |
-| `/mcp` | `local` | List MCP-style server config |
-| `/permissions ask/accept-all/deny-all` | `local` | Switch permission mode |
-| `/tokens` | `local` | Show local token/context usage |
-| `/plan [task]` | `local-ui` | Enter Plan Mode; with `task`, send a planning prompt to Agent |
-| `/do [approved\|rejected]` | `local-ui` | Exit Plan Mode and persist approval state |
-| `/review [focus]` | `prompt` | Ask Agent to review the current git diff |
-| `/display` | `local` | Show terminal and font diagnostics |
-| `/exit` | `local-ui` | Quit |
-
-### Slash Command Theory
-
-Slash commands exist for the "fast lane" cases where calling the LLM would be
-wasteful or impossible. `/clear` is a UI/session reset, `/tokens` is a local
-usage read, and `/plan` without a task is a deterministic state change into
-`EnterPlanMode`. These commands return in milliseconds and do not consume model
-tokens.
-
-Prompt commands are the explicit exception. `/review` and `/skill` are still
-slash commands, but their job is to turn a short command into a structured
-Agent request. `/plan design auth module` first enters Plan Mode locally, then
-sends the task text to the Agent for planning. The dashboard uses the same
-registry metadata to decide whether a slash command should appear as a popup or
-as a normal Trace/Agent turn.
-
-Dashboard interaction notes:
-
-- `Trace` is the main conversation and tool-execution stream.
-- Select text in `Trace` to copy, or use `/copy` / `F2`. On Windows this writes
-  `CF_UNICODETEXT`, so Chinese Trace content should paste without mojibake.
-- Right-click paste and `Ctrl+V` are supported in the Composer.
-- The top bar shows approximate context usage, for example `ctx 03%`.
-- During model work, the footer switches to a wave animation.
-- The `Work` panel shows runtime status, active tool state, recent subagents,
-  last progress event, transcript handles, worktree branch, and worktree state.
-
-### Manual Subagent Concurrency Test
-
-Use this quick local probe to verify queueing without calling a real model:
-
-```powershell
-$env:LILBOT_SUBAGENT_MAX_CONCURRENT='3'
-@'
-from pathlib import Path
-import threading, time
-from lilbot.core.events import ProviderTurn
-from lilbot.subagents import SubAgentManager
-
-release = threading.Event()
-def provider(messages, tools):
-    release.wait(20)
-    return ProviderTurn(content="done")
-
-manager = SubAgentManager(provider, Path(".lilbot/agents"), max_concurrent=3)
-tasks = [manager.open("writer", f"manual concurrency {i}", background=True) for i in range(6)]
-time.sleep(0.3)
-print(manager.runtime_status())
-release.set()
-for task in tasks:
-    while not task.terminal:
-        time.sleep(0.05)
-print(manager.runtime_status())
-'@ | python -
-```
-
-Expected first print: `running` is `3`, `queued` is `3`. Expected second print:
-all six tasks are terminal.
-
-### Manual Delegation Matrix Probe
-
-Use this local probe to inspect routing without calling a model or the network:
-
-```powershell
-python experiment\delegation_matrix.py
-python experiment\delegation_matrix.py "谁是2025年NBA冠军 那谁是那一年的FMVP呢 哦对还有NBA是哪一个国家的比赛呀"
-```
-
-Expected shape for the second command: a deterministic plan with three
-`researcher` probes named `auto_question_01`, `auto_question_02`, and
-`auto_question_03`. A prompt such as `请创作一篇古风的1000字散文...` should show
-`deterministic_plan: null` plus `semantic_planner_if_no_plan: true`, meaning the
-host did not hard-code that genre but the model-side delegation planner should
-be consulted.
-
----
-
-## Lifecycle Theory
-
-LilBot treats long-running agent work as a small lifecycle system rather than a
-single function call. A subagent task moves through `queued`, `running`, and a
-terminal state such as `completed`, `failed`, or `cancelled`. Every meaningful
-transition is also appended to a JSONL transcript. This makes the dashboard and
-tools read the same source of truth:
-
-```text
-SubAgentTask state
-  -> persisted in .lilbot/subagent-tasks.json
-  -> mirrored by transcript events in .lilbot/subagent-transcripts/*.jsonl
-  -> projected into Work panel progress rows
-```
-
-Restart resume is deliberately conservative. If LilBot restarts while a task is
-non-terminal, the task is recovered as `queued`, marked with `recovered=True`,
-and scheduled again after the runtime is configured. This resumes from the
-assignment prompt and transcript evidence, not from hidden model token state.
-That keeps the behavior honest while still avoiding the old failure-only
-recovery path.
-
-Transcript cursors are line-based. `agent_transcript` returns events after a
-cursor and a new cursor, so a dashboard or future GUI can poll progress without
-re-reading the whole transcript.
-
-Question-burst delegation is a separate planner rule. When one user message
-contains three or more unrelated questions, LilBot opens focused `researcher`
-subagents up to `LILBOT_SUBAGENT_MAX_CONCURRENT` and the current step budget.
-If there are more questions than available subagent slots, LilBot groups the
-extra questions into compact ordered question groups instead of dropping them.
-Normal broad code/research/planning tasks keep a more conservative budget so
-they still leave room for parent synthesis.
-
-### Delegation Theory
-
-/Claude-style delegation does not try to hard-code every possible
-task category in the host runtime. The product pattern is:
-
-```text
-agent descriptions + tool prompt
-  -> model decides whether Agent is useful
-  -> runtime validates allowed/disallowed tools, recursion, permissions,
-     lifecycle, transcripts, and isolation
-```
-
-Clean-room notes from the local /LilBot source audit:
-
-- `AgentTool/prompt.ts` dynamically renders available agent types, their
-  `whenToUse` descriptions, and tool limits into the tool prompt, so the parent
-  model can decide when to spawn one or several agents.
-- `loadAgentsDir.ts` loads project/user custom agents from agent files with
-  descriptions, prompts, tool allow/disallow lists, models, and permission mode.
-- `agentToolUtils.ts` and tool constants hard-code safety boundaries: recursive
-  agent tools are disallowed, async/background tools are constrained, and custom
-  agent tool lists are resolved before runtime execution.
-- `forkSubagent.ts` is a lifecycle/runtime path, not a keyword classifier: it
-  inherits context through a directive and still prevents recursive forking.
-
-LilBot now follows that split more closely. `ToolRegistry.schemas()` asks the
-subagent manager for live render context, then `lilbot/subagents/render.py`
-injects lines into `agent_open`, `Agent`, and `Task`:
-
-```text
-- researcher: Use for web research ... (Tools: web_search, fetch_url, ...)
-- explore: Use for codebase mapping ... (Tools: project_map, read_file, ...)
-```
-
-The parent model sees these descriptions during normal tool-calling, including
-active subagent status and guidance to continue an existing agent before
-launching a duplicate. The runtime remains the source of truth: unknown agent
-types, recursive subagent tools, write/execute tools, plan-control tools,
-custom allowlists, transcripts, worktree isolation, and lifecycle state are
-still enforced by the subagent manager and registry gates.
-
-`delegation.py` remains useful as a deterministic probe and planning reference.
-It is covered by a regression matrix for question bursts, no-question-mark
-Chinese clauses, code exploration, mixed public facts, and writing fallback.
-That lets us test routing theory without forcing the host runtime to hard-code
-every future genre or task category.
-
----
-
-## LSP Theory
-
-LilBot's code navigation tools follow a "semantic first, evidence fallback"
-rule:
-
-```text
-local language server available
-  -> use LSP request
-  -> normalize result into path/line/character records
-otherwise
-  -> Python AST for Python symbols and syntax diagnostics
-  -> regex symbol extraction for common languages
-  -> grep-style reference evidence
-```
-
-The current LSP surface includes:
-
-| Tool | Purpose | Fallback |
-|---|---|---|
-| `lsp_symbols` | Document/project symbols | AST/regex scan |
-| `lsp_definition` | Symbol definition | AST/regex definitions, then grep evidence |
-| `lsp_workspace_symbols` | Workspace symbol search | AST/regex project scan |
-| `lsp_references` | Reference lookup | grep-style references |
-| `lsp_diagnostics` | Diagnostics | Python syntax diagnostics |
-| `lsp_rename_preview` | Rename edit preview | reference candidates only |
-
-Rename preview does not write files. It returns candidate edits so a later
-phase can add permission-gated apply semantics with conflict checks.
-
----
-
-## Worktree Theory
-
-Worktree isolation gives a subagent a separate checkout under
-`.lilbot/worktrees/` so it can inspect or modify files without sharing the main
-workspace directory. Branch naming matters because merge-back needs a durable
-source branch, not just a detached checkout.
-
-The current flow is:
-
-```text
-EnterWorktree or subagent isolation=worktree
-  -> probe git worktree support
-  -> create a named branch/worktree when supported
-  -> run work in the worktree sandbox
-  -> optionally cleanup/remove the worktree
-  -> WorktreeMergeBack dry-run shows source -> target diff
-  -> WorktreeMergeBack dry_run=false merges after permission and clean-tree checks
-```
-
-Unsupported systems return structured `unsupported` results rather than
-pretending worktree isolation happened.
-
----
-
-## Update Log
-
-### 2026-06-17
-
-- Added typed Composer slash commands with `local`, `local-ui`, and `prompt`
-  modes, so deterministic UI/session commands bypass the Agent Loop.
-- Added `/clear`, `/tokens`, `/plan`, `/do`, and `/review`.
-  - `/clear` resets the local conversation and clears Trace.
-  - `/tokens` reads local usage/context estimates without a model call.
-  - `/plan` enters persisted Plan Mode locally; `/plan <task>` also sends the
-    task to Agent for planning.
-  - `/do` exits Plan Mode and records approval state.
-  - `/review` is a prompt command that asks Agent to inspect the current diff.
-- Updated dashboard composer routing to use slash command metadata: local
-  commands render in the command popup, while prompt commands render as normal
-  Trace/Agent turns.
-- Added regression tests proving local slash commands do not call
-  `agent.run_turn()` and prompt commands call `run_prompt()` intentionally.
-
-### 2026-06-16
-
-- Added subagent restart resume: persisted non-terminal tasks recover as
-  `queued` and are automatically scheduled after tool/context configuration.
-- Added transcript cursor reads through `agent_transcript` and progress metadata
-  in subagent projections.
-- Added worktree branch naming for managed subagent worktrees and `EnterWorktree`
-  branch/ref options.
-- Added `WorktreeMergeBack` / `worktree_merge_back` for merge-back preflight and
-  permission-gated execution.
-- Added LSP phase 2 tools: `lsp_workspace_symbols`, `lsp_references`,
-  `lsp_diagnostics`, and `lsp_rename_preview`.
-- Updated the Work panel to show subagent last event, event count, resume count,
-  transcript handle, worktree branch, and worktree path.
-- Added dynamic Agent tool prompt parity: `agent_open`,
-  `Agent`, and `Task` now render live agent types, when-to-use guidance, full
-  tool allowlists, active subagent status, and continue-existing-agent guidance
-  into the tool schemas seen by the parent model.
-- Kept deterministic delegation routing as a testable probe/reference instead
-  of host-runtime keyword control: the matrix covers no-question-mark Chinese
-  question bursts, code exploration, research, mixed fact scopes, and semantic
-  writing fallback.
-- Expanded the left Agent dashboard card so the information page shows more of
-  the tool and skill inventory instead of leaving a large blank area.
-- Re-audited the local /LilBot `AgentTool` source and documented
-  the split between dynamic model-side agent selection and host-side safety,
-  permission, lifecycle, transcript, and isolation enforcement.
-- Added `tests/test_delegation_matrix.py` plus
-  `experiment/delegation_matrix.py` to probe the full delegation route for
-  simple prompts, no-question-mark Chinese question bursts, code exploration,
-  research, mixed fact scopes, and semantic-planner writing fallback.
-- Fixed Windows `/copy` / `F2` Chinese clipboard mojibake by writing native
-  `CF_UNICODETEXT` instead of piping text through `clip.exe`.
-
-### 2026-06-15
-
-- Enforced plan approval for write/execute tools.
-- Added PowerShell safety analysis before shell permission prompts.
-- Added custom subagent five-gate allowed-tool protection.
-- Added forked skill execution through subagents.
-- Added durable subagent transcripts, concurrency limits, restart recovery,
-  optional worktree isolation, and structured dashboard subagent status.
-- Added LSP phase 1 symbols/definition tools and Batch 1 workspace cleanup:
-  pure-Python patch fallback, test log artifacts, and framework-aware
-  `project_map`.
-
----
-
-## Next Development Focus
-
-Recommended next batch:
-
-1. Agent listing attachment and continuation UX.
-   - Mirror the optional agent-list attachment path so changing custom
-     agents does not always mutate the tool schema.
-   - Add a stronger "continue existing agent" workflow around `agent_eval`
-     follow-up messages and dashboard transcript handles.
-   - Add tests that assert the parent can reuse an existing matching subagent
-     instead of opening a duplicate.
-
-2. Persistent LSP sessions.
-   - Keep language servers warm across calls instead of one short request per
-     lookup.
-   - Add server lifecycle controls, cache invalidation, and richer diagnostics
-     collection.
-
-3. Worktree merge UX.
-   - Add merge-back artifact summaries.
-   - Add conflict reporting and cleanup diagnostics.
-   - Add safer branch naming policy for repeated task names.
-
-4. Product-level hooks and lifecycle.
-   - Add pre-tool/post-tool hooks.
-   - Surface plan approval and PowerShell risk in the dashboard more clearly.
-   - Add richer task/test artifact retrieval from handles.
-
-5. Subagent resource controls.
-   - Add per-agent time/tool/output quotas.
-   - Add clearer cancellation semantics for queued vs running tasks.
-   - Explore exact resume from structured conversation checkpoints.
-
----
+CI runs the test suite on Python 3.10–3.13 on Ubuntu and Windows. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow.
 
 ## Roadmap
 
-```mermaid
-flowchart LR
-    V01["v0.1\nfullscreen dashboard\nDeepSeek link\ncore tools"] --> V02["v0.2\nlive work panel\nstreaming transcript\nbetter logo motion"]
-    V02 --> V03["v0.3\nstronger sandbox\npatch editor\npermission memory"]
-    V03 --> V04["v0.4\nreal MCP sessions\nsubagent worktrees\nskill marketplace"]
-    V04 --> V05["v1.0\nLilBot mission control"]
-```
+- **Streaming tool execution.** Start safe tools while the model is still
+  streaming, with sibling cancellation on failure.
+- **VCR fixtures.** Record real provider interactions and replay them in tests so
+  the main loop has a regression tape.
+- **Harder evaluation.** SWE-bench-style repository tasks, multi-file refactors,
+  and adversarial permission cases.
+- **Stronger isolation.** Optional container backend behind the existing sandbox
+  interface.
+- **Team-scale runs.** Distributed teammates and a durable task scheduler.
 
----
+## Contributing
 
-## Repository Upload
+Issues and pull requests are welcome. Please read
+[CONTRIBUTING.md](CONTRIBUTING.md) and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+first. For security reports, use [SECURITY.md](SECURITY.md), not a public issue.
 
-Remote:
+## License
 
-```powershell
-git remote -v
-```
-
-Push:
-
-```powershell
-git push -u origin main
-```
-
-If GitHub asks for login, use Git Credential Manager or GitHub CLI:
-
-```powershell
-gh auth login
-gh auth setup-git
-git push -u origin main
-```
+MIT. See [LICENSE](LICENSE).

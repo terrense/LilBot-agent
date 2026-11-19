@@ -1,11 +1,16 @@
 import json
 
-from lilbot.memory import FileMemoryStore
-
 from evaluation.grader import grade
-from evaluation.metrics import classify_failure, make_result, provider_observations, summarize, tool_observations
+from evaluation.metrics import (
+    classify_failure,
+    make_result,
+    provider_observations,
+    summarize,
+    tool_observations,
+)
 from evaluation.report import write_report
 from evaluation.trace import TraceWriter
+from lilbot.memory import FileMemoryStore
 
 
 def test_live_checks_use_final_output_tool_results_and_trial_memory(tmp_path):

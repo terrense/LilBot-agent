@@ -1,4 +1,4 @@
-"""Day 3 (Hermes gap P3/P4): CJK-aware token estimate calibrated against real
+"""CJK-aware token estimate calibrated against real
 usage, side-query usage kept out of the compaction trigger, and an auxiliary
 model for side queries."""
 from __future__ import annotations

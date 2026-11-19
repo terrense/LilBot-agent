@@ -7,7 +7,6 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
-
 SAME_CALL_WARNING_AFTER = 2
 SAME_CALL_BLOCK_AFTER = 5
 SAME_TOOL_WARNING_AFTER = 3

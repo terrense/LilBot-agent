@@ -37,11 +37,11 @@ d=workspace)
         # Cycle memory archive (M4). Each compaction
         # archives a briefing recoverable via the recall_archive tool.
         self.cycles = CycleArchive(state_dir) if state_dir else None
-        # Stop-hook continuations this turn (CC's death-spiral guard).
+        # Stop-hook continuations this turn (a death-spiral guard).
         self._stop_continuations = 0
         # Output-truncation resume count this turn (finish_reason == "length").
         self._output_truncations = 0
-        # Observable recovery transitions (CC's transition.reason) — for tests,
+        # Observable recovery transitions — for tests,
         # UI, and telemetry.
         self._recovery_transitions: list[str] = []
         # Prompt-cache accounting (#17): make cache hit-rate an operable metric
@@ -52,7 +52,7 @@ d=workspace)
         # Structured event log (#18): JSONL sink for tool/compaction/recovery
         # events — the raw material for success-rate / bad-case analysis.
         self.events = EventLog(state_dir)
-        # Provider failure handling (Hermes gap P2): backoff sleep is injectable
+        # Provider failure handling: backoff sleep is injectable
         # so tests run instantly; the fallback provider is built lazily and used
         # for the rest of the turn once the main model gives up.
         self._sleep: Callable[[float], None] = time.sleep
@@ -103,7 +103,7 @@ d=workspace)
         if self.hooks.has_hooks():
             self.hooks.run("user_prompt_submit", HookContext(event="user_prompt_submit", message=user_text))
         self._maybe_compact()      # 回合开始先按 token 预算压缩历史（见 compaction.py）
-        # 记忆召回改为“并行预取”（M9，对标 CC 的 startRelevantMemoryPrefetch）：
+        # 记忆召回改为“并行预取”（M9，与主模型并行预取）：
         # 这里只是发射后台侧查询，不再阻塞；结果由 _provider_messages 里的
         # _consume_recall_prefetch 轮询消费（首次调用给一个有界等待）。
         self._start_recall_prefetch(user_text)

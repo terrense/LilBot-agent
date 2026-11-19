@@ -3,20 +3,31 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
+import sys
 import tempfile
 import threading
 import time
 import unittest
-import os
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 from lilbot.memory import MemoryStore
-from lilbot.sandbox import PermissionManager, Sandbox, SandboxError, analyze_powershell_command
+from lilbot.sandbox import (
+    PermissionManager,
+    Sandbox,
+    SandboxError,
+    analyze_powershell_command,
+)
 from lilbot.sandbox.workspace import _decode_process_output
 from lilbot.skills import SkillRegistry
-from lilbot.tools import ToolContext, ToolDef, ToolRegistry, ToolResult, register_builtins
+from lilbot.tools import (
+    ToolContext,
+    ToolDef,
+    ToolRegistry,
+    ToolResult,
+    register_builtins,
+)
 
 
 class CoreTests(unittest.TestCase):
@@ -123,7 +134,7 @@ class CoreTests(unittest.TestCase):
             self.assertIsNotNone(skills.get("delegate"))
             self.assertIsNotNone(skills.get("v4-best-practices"))
 
-    def test_skill_registry_parses_claude_style_frontmatter(self):
+    def test_skill_registry_parses_markdown_frontmatter(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp)
             skill_dir = state / "skills" / "deep-scan"
@@ -142,7 +153,7 @@ context: fork
 agent: explore
 user-invocable: true
 ---
-Base ${CLAUDE_SKILL_DIR}; area={{area}}; args=$ARGUMENTS; legacy={{args}}
+Base ${LILBOT_SKILL_DIR}; area={{area}}; args=$ARGUMENTS; legacy={{args}}
 """,
                 encoding="utf-8",
             )
@@ -434,7 +445,7 @@ secret
         self.assertEqual(task.allowed_tools, [])
         self.assertEqual(seen_tools[0], [])
 
-    def test_claude_style_allowed_tool_names_expand_for_subagents(self):
+    def test_compatible_allowed_tool_names_expand_for_subagents(self):
         from lilbot.core.events import ProviderTurn
         from lilbot.subagents import SubAgentManager
 

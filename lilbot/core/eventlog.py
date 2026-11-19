@@ -1,16 +1,16 @@
-"""Structured main-loop event log (CC's logEvent analogue, #18).
+"""Structured main-loop event log (Structured main-loop event log, #18).
 
 A best-effort JSONL sink at ``.lilbot/events.jsonl``. Every record is one line:
 ``{"ts", "event", ...payload}`` with a namespaced event name (``lilbot_turn_start``,
 ``lilbot_tool_call``, ``lilbot_compaction``, ``lilbot_recovery`` …). This is the
 raw material for the exact metrics the resume claims (tool success rate, failure
-recovery rate, complex-task completion) and for bad-case analysis — the point CC
+recovery rate, complex-task completion) and for bad-case analysis — the point
 makes with its telemetry→decision→code loop.
 
-Design rules (all from CC's telemetry discipline):
+Design rules (all from the telemetry discipline):
   * never raise into the agent loop — logging is not the critical path;
   * only whitelisted scalar fields are written, so no file paths / secrets /
-    large blobs leak into analytics (CC types its metadata for exactly this);
+    large blobs leak into analytics (metadata is typed for exactly this);
   * one file per session dir, opened append-per-write (crash-safe, no handle to
     leak across a long session).
 """

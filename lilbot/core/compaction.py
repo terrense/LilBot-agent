@@ -44,8 +44,8 @@ _CHARS_PER_TOKEN_OTHER = 2.0  # non-ASCII, non-CJK (accents, Cyrillic, emoji…)
 # CJK ideographs, kana, hangul and full-width punctuation: BPE vocabularies
 # (cl100k, Qwen, DeepSeek, MiniMax) spend roughly 0.6–1.5 tokens per character
 # here, so ``len/4`` undercounted Chinese 3–4x and compaction fired far too
-# late. Counted at 1 token/char — slightly conservative, like Hermes' rough
-# estimator; the agent then calibrates against the provider's real usage.
+# late. Counted at 1 token/char — slightly conservative; the agent then
+# calibrates against the provider's real usage.
 _CJK_RE = re.compile(
     "[⺀-⿿　-〿぀-ヿ㄀-ㇿ㐀-䶿"
     "一-鿿가-힯豈-﫿＀-￯]"
@@ -72,16 +72,15 @@ RETRY_BASE_DELAY_S = 0.35
 # with the model's window; a manual /compact bypasses this scaled floor.
 SUMMARIZE_FLOOR_FRACTION = 0.02
 
-# --- CC-parity additions ----------------------------------------------------
+# --- Cache-aware compaction helpers ----------------------------------------
 
-# Server prompt caches (Anthropic/DeepSeek/OpenAI) expire after ~5 minutes idle.
+# Server prompt caches typically expire after ~5 minutes idle.
 # Past this gap the prefix is cold: clearing tool bodies is "free" because the
-# whole prefix will be re-tokenized regardless. Mirrors CC's time-based
-# microcompact (gapThresholdMinutes) — CC uses 60min tied to the 1h server TTL;
-# we use the conservative 5min floor common to OpenAI-compatible caches.
+# whole prefix will be re-tokenized regardless. A conservative 5-minute floor
+# is common to OpenAI-compatible caches.
 CACHE_TTL_SECONDS = 300.0
 
-# Total recovery-attachment budget (tokens). CC caps post-compact file restore
+# Total recovery-attachment budget (tokens). The post-compact file restore budget is capped
 # at ~50k tokens / 5 files; we bound the whole attachment so the summary message
 # can't itself blow the window.
 RECOVERY_TOTAL_TOKENS = 12_000
@@ -208,7 +207,7 @@ class RecoveryState:
             "user's original wording, re-read the source rather than guessing from the summary.\n"
         )
         attachment = "\n".join(sections)
-        # Total-token budget (CC caps post-compact restore at ~50k tokens): never
+        # Total-token budget (the post-compact restore budget is ~50k tokens): never
         # let the recovery attachment itself grow the post-compact window without
         # bound — trim from the end (tool list / note first).
         estimated = estimate_tokens_text(attachment)
@@ -310,7 +309,7 @@ def is_context_overflow_error(message: str) -> bool:
 
 SUMMARY_SYSTEM = "You are a conversation-summarizer. Output plain text only. Do not call any tools."
 
-# NO_TOOLS preamble (ported from CC prompt.ts): the cache-sharing summary fork
+# NO_TOOLS preamble: the cache-sharing summary fork
 # inherits the full tool schema set, and some models attempt a tool call despite
 # a weak trailer. A rejected tool call wastes the single summary turn, so we
 # forbid tools up front AND in the trailer.
@@ -344,7 +343,7 @@ The <summary> must cover, in order:
 def format_compact_summary(summary: str) -> str:
     """Strip the ``<analysis>`` scratchpad and unwrap ``<summary>`` tags.
 
-    Faithful to CC's formatCompactSummary: the analysis block improves summary
+    The summary format: the analysis block improves summary
     quality but has no informational value once written, so it never enters
     context. Tolerant of models that ignore the tags entirely (returns the text
     unchanged), so the offline provider and simple models still work.
@@ -381,7 +380,7 @@ def render_prefix_for_summary(prefix: list[dict[str, Any]]) -> str:
 def group_messages_by_round(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     """Group messages into API rounds: one group per assistant response.
 
-    Port of CC's groupMessagesByApiRound. A boundary fires when a new assistant
+    Group messages by API round. A boundary fires when a new assistant
     message begins and the current group is non-empty; ``tool`` results attach to
     the assistant round that produced them (they follow it). The leading system /
     user preamble forms group 0. Keeping tool_calls together with their tool
@@ -408,7 +407,7 @@ def truncate_head_for_retry(
 ) -> list[dict[str, Any]] | None:
     """Drop the oldest API rounds so an over-long summary request fits.
 
-    Port of CC's truncateHeadForPTLRetry (the "dumb but safe" fallback): drop
+    Truncate the head before a prompt-too-long retry (the "dumb but safe" fallback): drop
     ~``drop_fraction`` of the oldest rounds, always keep the system message and at
     least one round, and re-insert a marker so a follow-up retry is idempotent
     (the marker is stripped before regrouping). Returns None when there is
@@ -476,7 +475,7 @@ Summarizer = Callable[[str, str], str]
 # text. It exists so the Agent can send the SAME message objects the main loop
 # used (system + prefix) plus a trailing instruction, reusing the provider's
 # prompt-cache prefix instead of paying a 100% cache-miss on a fresh 2-message
-# conversation. Mirrors CC's fork-based prompt-cache-sharing summary.
+# conversation. A fork-based prompt-cache-sharing summary.
 MessageSummarizer = Callable[[dict[str, Any], list[dict[str, Any]]], str]
 
 
@@ -515,7 +514,7 @@ def _summarize_messages_with_retry(
 
     On a context-overflow error from the summary call itself (the request can be
     almost the whole window), drop the oldest rounds (truncate_head_for_retry)
-    and retry — CC's CC-1180 fix. Returns "" when every attempt fails.
+    and retry — the truncation-retry fix. Returns "" when every attempt fails.
     """
     msgs = to_summarize
     for attempt in range(max(1, max_retries)):
@@ -572,7 +571,7 @@ def auto_compact(
     body = messages[1:]
     before = estimate_tokens(messages)
     # Prefer the provider's real reported prompt-token count for the trigger
-    # decision; fall back to the char/4 estimate. CC's lesson: trust API usage,
+    # decision; fall back to the char/4 estimate. The lesson: trust API usage,
     # estimate only as a backstop.
     trigger_tokens = actual_tokens if (actual_tokens and actual_tokens > 0) else before
     threshold = compute_threshold(context_window)
@@ -693,7 +692,7 @@ def partial_compact(
     tool_names: list[str] | None = None,
     message_summarizer: MessageSummarizer | None = None,
 ) -> CompactResult | None:
-    """User-selected partial compaction (CC's partialCompactConversation).
+    """User-selected partial compaction (partial compaction).
 
     ``pivot`` is an index into ``messages`` (system at 0 is always preserved).
       * ``up_to``: summarize ``messages[1:pivot]``, keep ``messages[pivot:]`` —

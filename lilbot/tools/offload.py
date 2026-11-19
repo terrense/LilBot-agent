@@ -65,9 +65,9 @@ def maybe_offload(output: str, state_dir: Path | None, limit: int | None = None)
     replaced by a preview pointer. If no session dir is available (e.g. no
     config), fall back to a plain truncation so behaviour stays bounded.
 
-    ``limit`` is the per-tool cap (CC's maxResultSizeChars):
+    ``limit`` is the per-tool cap (the per-tool result cap):
       * None or 0 -> use the global default INLINE_LIMIT
-      * negative  -> never offload (CC's Infinity; e.g. read_file)
+      * negative  -> never offload (an infinite cap; e.g. read_file)
       * positive  -> this tool's own threshold
     """
     if limit is not None and limit < 0:

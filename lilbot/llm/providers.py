@@ -14,7 +14,7 @@ from .retry import parse_retry_after
 class ProviderError(RuntimeError):
     """Provider failure. Carries a structured ``status_code`` and ``is_overflow``
     flag so the agent can react to a context-overflow (413 / context_length_exceeded)
-    by compacting and retrying, instead of matching error strings (CC's lesson:
+    by compacting and retrying, instead of matching error strings (the lesson:
     judge errors by structured signals, use text only as a fallback).
 
     ``reason`` names a transport failure with no HTTP status (``"timeout"`` /
@@ -96,7 +96,7 @@ def _truncate(text: str, limit: int = 2000) -> str:
 
 
 def _is_overflow_error(status_code: int, detail: str) -> bool:
-    """Structured context-overflow classification (CC parity).
+    """Structured context-overflow classification .
 
     A 413 ("request entity too large") is always overflow; otherwise fall back to
     the error-body text markers (``context_length_exceeded`` / "prompt too long"
@@ -307,6 +307,24 @@ def _iter_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
         except json.JSONDecodeError:
             continue
 
+        if "error" in obj:
+            err = obj.get("error")
+            if isinstance(err, dict):
+                detail = (
+                    err.get("message")
+                    or err.get("code")
+                    or err.get("type")
+                    or json.dumps(err, ensure_ascii=False)
+                )
+                code = err.get("code")
+            else:
+                detail, code = str(err), None
+            raise ProviderError(
+                f"provider stream returned an error: {detail}"
+                + (f" (code={code})" if code else ""),
+                reason="provider",
+            )
+
         raw_usage = obj.get("usage")
         if isinstance(raw_usage, dict) and raw_usage:
             usage = _normalize_usage(raw_usage)
@@ -369,10 +387,25 @@ class RuleBasedProvider(BaseProvider):
 
     def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> ProviderTurn:
         last = messages[-1] if messages else {"role": "user", "content": ""}
-        content = str(last.get("content", ""))
-        if last.get("role") == "tool":
-            name = last.get("name", "tool")
-            return ProviderTurn(content=f"Tool `{name}` returned:\n\n{content}")
+
+        # The newest message is usually a system reminder repeated before each
+        # model call, so route on the latest user turn. If a tool has already
+        # run for that turn, answer with its observation instead of calling the
+        # same tool forever.
+        last_user = max(
+            (i for i, m in enumerate(messages) if m.get("role") == "user"),
+            default=-1,
+        )
+        tool_results = [
+            m for m in messages[last_user + 1:] if m.get("role") == "tool"
+        ]
+        if tool_results:
+            last_tool = tool_results[-1]
+            name = last_tool.get("name", "tool")
+            return ProviderTurn(content=f"Tool `{name}` returned:\n\n{last_tool.get('content', '')}")
+
+        user = messages[last_user] if last_user >= 0 else last
+        content = str(user.get("content", ""))
 
         if not tools:
             return ProviderTurn(content=self._small_answer(content))
@@ -456,7 +489,7 @@ class OpenAICompatibleProvider(BaseProvider):
             import httpx
         except ImportError as exc:  # pragma: no cover - dependency hint
             raise ProviderError("httpx is required for OpenAI-compatible provider") from exc
-        if not self.config.api_key:
+        if not self.config.api_key and not is_local_endpoint(self.config.base_url or ""):
             raise ProviderError("missing LILBOT_API_KEY or OPENAI_API_KEY", reason="auth")
 
         body: dict[str, Any] = {
@@ -467,10 +500,9 @@ class OpenAICompatibleProvider(BaseProvider):
             body["tools"] = [self._tool_schema(tool) for tool in tools]
             body["tool_choice"] = "auto"
         body.update(_vendor_body_extras(self.config.base_url))
-        headers = {
-            "Authorization": f"Bearer {self.config.api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Content-Type": "application/json"}
+        if self.config.api_key:
+            headers["Authorization"] = f"Bearer {self.config.api_key}"
         url = f"{self.config.base_url.rstrip('/')}/chat/completions"
         try:
             response = self._http_client().post(url, headers=headers, json=body)
@@ -518,7 +550,7 @@ class OpenAICompatibleProvider(BaseProvider):
             import httpx
         except ImportError as exc:  # pragma: no cover - dependency hint
             raise ProviderError("httpx is required for OpenAI-compatible provider") from exc
-        if not self.config.api_key:
+        if not self.config.api_key and not is_local_endpoint(self.config.base_url or ""):
             raise ProviderError("missing LILBOT_API_KEY or OPENAI_API_KEY", reason="auth")
 
         body: dict[str, Any] = {
@@ -533,10 +565,9 @@ class OpenAICompatibleProvider(BaseProvider):
             body["tools"] = [self._tool_schema(tool) for tool in tools]
             body["tool_choice"] = "auto"
         body.update(_vendor_body_extras(self.config.base_url))
-        headers = {
-            "Authorization": f"Bearer {self.config.api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Content-Type": "application/json"}
+        if self.config.api_key:
+            headers["Authorization"] = f"Bearer {self.config.api_key}"
         url = f"{self.config.base_url.rstrip('/')}/chat/completions"
         try:
             client = self._http_client()
@@ -654,8 +685,7 @@ class OpenAICompatibleProvider(BaseProvider):
         }
 
 
-# LilBot ships no model of its own — it's a model-agnostic runtime (hermes-agent
-# style). Any OpenAI-compatible Chat Completions endpoint plugs in: cloud vendors
+# LilBot ships no model of its own — it is model-agnostic by design. Any OpenAI-compatible Chat Completions endpoint plugs in: cloud vendors
 # below, plus any self-hosted server (Ollama / vLLM / LM Studio / TGI …). Unknown
 # providers still work via an explicit --base-url. Map: name -> base_url.
 KNOWN_PROVIDERS: dict[str, str] = {

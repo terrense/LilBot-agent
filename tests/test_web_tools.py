@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from lilbot.tools.builtin import _parse_bing_results, _parse_duckduckgo_results, _validate_public_url
+from lilbot.tools.builtin import (
+    _parse_bing_results,
+    _parse_duckduckgo_results,
+    _validate_public_url,
+)
 
 
 class WebToolTests(unittest.TestCase):

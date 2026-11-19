@@ -12,13 +12,13 @@ from lilbot.tui.dashboard import (
     LILBOT_AGENT_LOGO_COMPACT_ROWS,
     LILBOT_AGENT_LOGO_ROWS,
     WELCOME_TRACE_ROWS,
+    DashboardUI,
     _clip_line,
     _format_markdown_tables,
     _highlight_trace_line,
     _summarize_interim_text,
     _summarize_tool_output,
     _windows_clipboard_payload,
-    DashboardUI,
 )
 
 

@@ -1,4 +1,4 @@
-"""Tests for the composer input-history navigation (Claude-Code-style recall)."""
+"""Tests for composer input-history navigation."""
 from __future__ import annotations
 
 from lilbot.tui.input_history import InputHistory

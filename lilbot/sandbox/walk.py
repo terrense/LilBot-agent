@@ -6,8 +6,8 @@ Why not ``Path.rglob("*")`` + filter: rglob descends into ``.venv`` /
 filter drivers that stat is ~0.2 ms, so 4,500 mostly-ignored entries cost
 ~0.8 s per tool call. ``os.scandir`` reports the entry type from the
 directory listing itself, and pruning ``dirnames`` before descending means
-ignored trees are never listed at all (Hermes ``tools/file_operations.py``
-gets the same effect by shelling out to ripgrep).
+ignored trees are never listed at all (a ripgrep-backed search gets the
+same effect by honoring ``.gitignore``).
 
 Ordering: children are visited sorted, depth-first, which reproduces
 ``sorted(base.rglob("*"))`` so tool output stays stable.
@@ -233,8 +233,8 @@ def read_texts(paths: Iterable[Path], *, workers: int = SEARCH_READ_WORKERS,
 # --- glob ------------------------------------------------------------------------
 
 def glob_matches_dirs_only(pattern: str) -> bool:
-    """A trailing ``**`` segment selects directories only (pathlib <= 3.12)."""
-    return pattern.replace("\\", "/").rstrip("/").split("/")[-1] == "**"
+    """Only an explicit trailing slash selects directories (``pkg/``, ``**/``)."""
+    return pattern.replace("\\", "/").rstrip().endswith("/")
 
 
 def glob_to_regex(pattern: str) -> re.Pattern[str]:
@@ -245,7 +245,7 @@ def glob_to_regex(pattern: str) -> re.Pattern[str]:
     any depth (an implicit leading ``**/``). Case-insensitive on Windows, as
     pathlib is there.
     """
-    pattern = pattern.replace("\\", "/").lstrip("/")
+    pattern = pattern.replace("\\", "/").lstrip("/").rstrip("/")
     while pattern.startswith("./"):
         pattern = pattern[2:]
     out = ["(?:.*/)?"]

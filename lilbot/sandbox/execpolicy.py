@@ -40,6 +40,21 @@ SAFE_ALLOW_PREFIXES: set[str] = {
     "cargo --version", "go version", "rustc --version", "pip --version",
 }
 
+# Flags/subcommands that turn an otherwise read-only command into a mutating
+# one. Prefix matching ignores flags, so these must be checked explicitly.
+_UNSAFE_ALLOW_TOKENS: dict[str, set[str]] = {
+    "find": {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint",
+             "-fprint0", "-fprintf", "-fls"},
+    "git branch": {"-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C",
+                   "--copy", "-f", "--force", "-u", "--set-upstream-to",
+                   "--unset-upstream", "--edit-description", "--track",
+                   "--no-track"},
+    "git diff": {"--output"},
+    "git log": {"--output"},
+    "git show": {"--output"},
+    "git blame": {"--output"},
+}
+
 # Shell operators that make a command compound — never auto-classify those.
 _SHELL_OPERATORS = re.compile(r"[;&|<>`]|\$\(|\bsudo\b|\n")
 
@@ -135,11 +150,38 @@ def _positional_tokens(command: str) -> list[str]:
     return [t for t in tokens if not t.startswith("-")]
 
 
+def _rule_stays_read_only(rule: str, raw: list[str]) -> bool:
+    """Reject allow-rule matches that contain a mutating flag or subcommand.
+
+    Prefix matching deliberately ignores flags, which is what makes
+    `git status -s` match `git status`. The same leniency would also let
+    `git branch -D main` or `find . -exec rm -rf {} +` through, so those
+    token classes are checked explicitly here.
+    """
+    if rule == "git branch":
+        for token in raw[2:]:
+            if token.startswith("-"):
+                if token.split("=", 1)[0] in _UNSAFE_ALLOW_TOKENS["git branch"]:
+                    return False
+            else:
+                # `git branch <name>` creates a branch; only listing is safe.
+                return False
+        return True
+    if rule == "git remote":
+        # `git remote add/remove/set-url/...` are positional subcommands.
+        return not any(not token.startswith("-") for token in raw[2:])
+    unsafe = _UNSAFE_ALLOW_TOKENS.get(rule)
+    if unsafe:
+        return not any(token.split("=", 1)[0] in unsafe for token in raw)
+    return True
+
+
 def matches_allow_rule(command: str, allow_prefixes: set[str] | None = None) -> bool:
     """True when the command's leading positional tokens equal an allow rule.
 
     Flags are ignored (they are not positional), so `git status -s` matches the
-    `git status` rule while `git push` does not.
+    `git status` rule while `git push` does not. Rules with mutating flags or
+    subcommands are rejected by `_rule_stays_read_only`.
     """
     if allow_prefixes is None:
         allow_prefixes = SAFE_ALLOW_PREFIXES
@@ -148,20 +190,21 @@ def matches_allow_rule(command: str, allow_prefixes: set[str] | None = None) -> 
     positional = _positional_tokens(command)
     if not positional:
         return False
+    try:
+        raw = shlex.split(command, posix=True)
+    except ValueError:
+        raw = command.split()
     for rule in allow_prefixes:
         rule_tokens = rule.split()
         n = len(rule_tokens)
+        matched = False
         # An allow rule may itself contain a flag-looking token (e.g.
         # "git config --get"); compare against the raw tokens for those.
         if any(t.startswith("-") for t in rule_tokens):
-            try:
-                raw = shlex.split(command, posix=True)
-            except ValueError:
-                raw = command.split()
-            if raw[:n] == rule_tokens:
-                return True
-            continue
-        if positional[:n] == rule_tokens:
+            matched = raw[:n] == rule_tokens
+        else:
+            matched = positional[:n] == rule_tokens
+        if matched and _rule_stays_read_only(rule, raw):
             return True
     return False
 

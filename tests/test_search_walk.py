@@ -1,4 +1,4 @@
-"""Day 4 (Hermes gap P5): one pruning walker behind every search tool."""
+"""One pruning walker behind every search tool."""
 from __future__ import annotations
 
 import os

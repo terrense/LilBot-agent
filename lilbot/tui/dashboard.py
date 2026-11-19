@@ -11,13 +11,25 @@ from datetime import datetime
 from time import monotonic
 from typing import Iterable
 
+from .. import __version__
+from ..cli import (
+    handle_slash,
+    run_prompt,
+    slash_command_runs_agent,
+    slash_commands_matching,
+)
 from ..core.agent import Agent
 from ..core.compaction import estimate_tokens
-from ..cli import handle_slash, run_prompt, slash_command_runs_agent, slash_commands_matching
-from ..core.events import ProviderRetry, TextDelta, ToolFinished, ToolStarted, TurnFinished
-from .classic import _retry_notice
+from ..core.events import (
+    ProviderRetry,
+    TextDelta,
+    ToolFinished,
+    ToolStarted,
+    TurnFinished,
+)
 from ..security import redact_args, redact_secrets
 from ..tools import ToolContext, ToolRegistry
+from .classic import _retry_notice
 from .input_history import InputHistory
 
 try:
@@ -28,7 +40,15 @@ try:
     from prompt_toolkit.filters import Condition
     from prompt_toolkit.formatted_text import FormattedText
     from prompt_toolkit.key_binding import KeyBindings
-    from prompt_toolkit.layout import ConditionalContainer, Float, FloatContainer, HSplit, Layout, VSplit, Window
+    from prompt_toolkit.layout import (
+        ConditionalContainer,
+        Float,
+        FloatContainer,
+        HSplit,
+        Layout,
+        VSplit,
+        Window,
+    )
     from prompt_toolkit.layout.controls import FormattedTextControl
     from prompt_toolkit.layout.dimension import Dimension
     from prompt_toolkit.layout.margins import Margin
@@ -536,7 +556,7 @@ class DashboardUI:
         self.scrollbar_render_heights = {"trace": 1, "work": 1}
         self.slash_selection = 0
         self.slash_hidden_for_text = ""
-        # Composer prompt history (up/down recall, Claude-Code style).
+        # Composer prompt history (up/down recall, shell-style).
         self.history = InputHistory()
         self.command_popup_title = ""
         self.command_popup_lines: list[str] = []
@@ -829,7 +849,7 @@ class DashboardUI:
         self.slash_hidden_for_text = ""
         if not line:
             return False
-        # Remember submitted prompts for up/down recall (Claude-Code style).
+        # Remember submitted prompts for up/down recall (shell-style).
         self.history.record(line)
         if self._answer_permission(line):
             return False
@@ -1037,7 +1057,7 @@ class DashboardUI:
                 self.agent.request_interrupt()
                 self._append("Interrupt requested; waiting for the current operation to finish safely.")
                 return
-            # Claude-Code behavior: a non-empty composer is cleared first; only an
+            # Composer behavior: a non-empty composer is cleared first; only an
             # already-empty composer arms/confirms exit on a second Ctrl+C.
             if self.input.buffer.text.strip():
                 self.input.buffer.text = ""
@@ -1672,7 +1692,7 @@ class DashboardUI:
         cfg = self.ctx.config
         context_pct = self._context_percent()
         text = f" Agent  LilBot-agent-code  |  {cfg.model}  |  {cfg.provider} "
-        right = f" ctx {context_pct:02d}%  permissions {self.ctx.permissions.mode}  |  v0.1 "
+        right = f" ctx {context_pct:02d}%  permissions {self.ctx.permissions.mode}  |  v{__version__} "
         width = self._width()
         gap = max(1, width - len(text) - len(right))
         return FormattedText(
@@ -1698,8 +1718,6 @@ class DashboardUI:
             return 64000
         if "gpt-4o" in model:
             return 128000
-        if "claude" in model:
-            return 200000
         if "gemini" in model:
             return 1000000
         # Same window compaction uses, so the bar and the trigger agree.
@@ -1716,8 +1734,8 @@ class DashboardUI:
 
         fragments.extend(
             [
-                ("class:signature", "Terrence Shen  //  China  //  Deeplearningman0723@gmail.com\n"),
-                ("class:accent", ">_ clean-room local agent deck\n"),
+                ("class:signature", "ShenXin  //  github.com/terrense  //  local-first coding agent\n"),
+                ("class:accent", ">_ local coding agent deck\n"),
                 ("class:muted", "model: "),
                 ("class:deep", self.ctx.config.model),
                 ("class:muted", "   provider: "),

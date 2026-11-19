@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from lilbot.sandbox.execpolicy import classify, is_dangerous, matches_allow_rule
+from lilbot.sandbox.execpolicy import classify, matches_allow_rule
 
 
 @pytest.mark.parametrize("cmd", [
@@ -82,6 +82,7 @@ def test_empty_command_is_ask():
 
 def test_shell_permission_denies_dangerous(tmp_path):
     from types import SimpleNamespace
+
     from lilbot.tools.builtin import _shell_permission
     from lilbot.tools.registry import ToolContext
     cfg = SimpleNamespace(auto_allow_safe_commands=True)
@@ -100,6 +101,7 @@ def test_shell_permission_denies_dangerous(tmp_path):
 
 def test_shell_permission_auto_allows_safe(tmp_path):
     from types import SimpleNamespace
+
     from lilbot.tools.builtin import _shell_permission
     from lilbot.tools.registry import ToolContext
     cfg = SimpleNamespace(auto_allow_safe_commands=True)
@@ -114,3 +116,28 @@ def test_shell_permission_auto_allows_safe(tmp_path):
     allowed, _safety, denied = _shell_permission(ctx, "bash:git", "x", "git status -s")
     assert allowed is True
     assert prompted["called"] is False  # auto-allowed, no prompt
+
+@pytest.mark.parametrize("cmd", [
+    "find . -exec rm -rf {} +",
+    "find . -delete",
+    "git branch -D main",
+    "git branch new-feature",
+    "git remote add origin https://example.com/repo.git",
+    "git diff --output=patch.txt",
+    "git log --output=log.txt",
+])
+def test_mutating_lookalikes_are_never_auto_allowed(cmd):
+    assert classify(cmd)[0] != "allow", cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    "find . -name '*.py'",
+    "git branch -a",
+    "git branch --list",
+    "git remote -v",
+    "git diff --stat",
+    "git status -s",
+])
+def test_read_only_lookalikes_still_auto_allowed(cmd):
+    assert classify(cmd)[0] == "allow", cmd
+

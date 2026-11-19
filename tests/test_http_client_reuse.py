@@ -1,4 +1,4 @@
-"""Day 1 (Hermes gap P1): the OpenAI-compatible provider reuses one keep-alive
+"""The OpenAI-compatible provider reuses one keep-alive
 httpx.Client instead of building a new one (and reloading certifi) per request."""
 from __future__ import annotations
 

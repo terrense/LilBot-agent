@@ -7,14 +7,13 @@ T-4.3: Gate enforcement unchanged
 
 from __future__ import annotations
 
-import pytest
-from pathlib import Path
 from unittest.mock import MagicMock
 
-from lilbot.subagents.manager import AgentDefinition, SubAgentManager, SubAgentTask
-from lilbot.subagents.render import render_agent_types, render_active_agents
-from lilbot.tools.registry import ToolContext, ToolDef, ToolRegistry
+import pytest
 
+from lilbot.subagents.manager import AgentDefinition, SubAgentManager, SubAgentTask
+from lilbot.subagents.render import render_active_agents, render_agent_types
+from lilbot.tools.registry import ToolDef, ToolRegistry
 
 # ── Test data ──────────────────────────────────────────────────────────────
 
@@ -169,7 +168,7 @@ class TestDynamicSchemas:
     def test_agent_and_task_aliases_also_expanded(self):
         """Agent and Task are compatibility aliases for agent_open."""
         registry = ToolRegistry()
-        registry.register(ToolDef("Agent", "Claude-style agent.", {}, lambda a, c: MagicMock()))
+        registry.register(ToolDef("Agent", "Compatible agent.", {}, lambda a, c: MagicMock()))
         registry.register(ToolDef("Task", "Legacy task alias.", {}, lambda a, c: MagicMock()))
 
         definitions = [_agent_def("general", "General worker.")]

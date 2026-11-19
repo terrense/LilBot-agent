@@ -4,7 +4,14 @@ import sys
 from datetime import datetime
 from typing import Iterable
 
-from ..core.events import ProviderRetry, TextDelta, ToolFinished, ToolStarted, TurnFinished
+from .. import __version__
+from ..core.events import (
+    ProviderRetry,
+    TextDelta,
+    ToolFinished,
+    ToolStarted,
+    TurnFinished,
+)
 from ..security import redact_args, redact_secrets
 
 try:
@@ -12,7 +19,6 @@ try:
     from rich.align import Align
     from rich.columns import Columns
     from rich.console import Console
-    from rich.padding import Padding
     from rich.panel import Panel
     from rich.syntax import Syntax
     from rich.table import Table
@@ -77,11 +83,11 @@ class LilBotUI:
             top.add_row(
                 "[bold bright_cyan]Agent[/] [white]LilBot-agent-code[/] "
                 f"[dim]- {model}[/]",
-                "[bright_cyan]ready[/] [dim]ctx 0%[/] [blue]====[/] [dim]v0.1.0[/]",
+                f"[bright_cyan]ready[/] [dim]ctx 0%[/] [blue]====[/] [dim]v{__version__}[/]",
             )
 
             logo = Text(LOGO, style="bold bright_cyan")
-            logo.append("\n>_ clean-room local coding agent", style="bold yellow")
+            logo.append("\n>_ local-first coding agent", style="bold yellow")
             logo.append("\nmodel: ", style="dim")
             logo.append(model, style="white")
             logo.append("    provider: ", style="dim")

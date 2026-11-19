@@ -8,7 +8,14 @@ of LilBot's existing subagent runtime.
 from __future__ import annotations
 
 from .mailbox import Mailbox, MailboxMessage, create_message
-from .models import AgentTeam, BackendType, TeammateInfo, resolve_team_dir, teams_root, unique_team_name
+from .models import (
+    AgentTeam,
+    BackendType,
+    TeammateInfo,
+    resolve_team_dir,
+    teams_root,
+    unique_team_name,
+)
 from .progress import TeammateProgress, random_verb
 from .registry import AgentNameRegistry
 from .shared_task import SharedTask, SharedTaskStore

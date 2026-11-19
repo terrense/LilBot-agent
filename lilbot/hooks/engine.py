@@ -27,7 +27,7 @@ class PreToolOutcome:
 
 
 def _parse_structured(stdout: str) -> dict[str, Any]:
-    """Parse a hook's stdout as the CC-style structured JSON protocol.
+    """Parse a hook's stdout as the structured JSON protocol.
 
     Returns {} when stdout isn't a JSON object — so a plain-text hook (the common
     case) keeps working exactly as before. Only a top-level JSON object with
@@ -68,7 +68,7 @@ def _run_action(action: HookAction, ctx: HookContext, cwd: Path | None) -> HookR
             )
             out = (proc.stdout or "") + (proc.stderr or "")
             result = HookResult(proc.returncode == 0, out.strip()[:4000])
-            # Structured protocol (CC parity): JSON on stdout can rewrite the
+            # Structured protocol: JSON on stdout can rewrite the
             # tool input, block, inject context, or forbid stopping.
             data = _parse_structured(proc.stdout)
             if data:
@@ -128,7 +128,7 @@ class HookEngine:
     def run_pre_tool(self, ctx: HookContext) -> PreToolOutcome:
         """Run pre_tool_use hooks; return block reason and/or rewritten input.
 
-        CC-parity structured protocol: a command hook may print JSON to
+        structured protocol: a command hook may print JSON to
         ``decision: "block"`` (reject), ``updatedInput`` (rewrite the tool's
         arguments before it runs), and ``additionalContext`` (inject guidance for
         the next model call). Plain-text hooks and exit codes keep their old
@@ -159,12 +159,12 @@ class HookEngine:
     def run_stop(self, ctx: HookContext) -> str | None:
         """Run stop hooks; return a continuation instruction, or None to stop.
 
-        CC parity (handleStopHooks): when the model is about to end the turn, a
+        Stop-hook control: when the model is about to end the turn, a
         stop hook can force it to keep working. A hook forces continuation by
         blocking (``decision: "block"`` / ``continue: false`` / non-zero exit);
         its reason/output becomes an injected instruction. The caller caps how
         many times this can fire so a misbehaving hook can't spin forever
-        (CC's death-spiral guard).
+        (a death-spiral guard).
         """
         for hook in self._matching("stop", ctx):
             hook.mark_executed()

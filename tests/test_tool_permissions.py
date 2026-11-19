@@ -7,7 +7,13 @@ from types import SimpleNamespace
 import pytest
 
 from lilbot.sandbox import PermissionManager, Sandbox
-from lilbot.tools import ToolContext, ToolDef, ToolRegistry, ToolResult, register_builtins
+from lilbot.tools import (
+    ToolContext,
+    ToolDef,
+    ToolRegistry,
+    ToolResult,
+    register_builtins,
+)
 from lilbot.tools.builtin import _permission_preflight, _shell_permission
 from lilbot.tools.registry import ApprovalRequirement, ToolCapability
 
@@ -81,7 +87,8 @@ def test_generic_approval_does_not_skip_narrow_handler_check(tmp_path):
 def test_nested_tool_does_not_inherit_allow_once_scope(tmp_path):
     ctx, prompts = _context(tmp_path, answers=["y", "n"])
     registry = ToolRegistry()
-    preflight = lambda args, ctx: _permission_preflight(ctx, "write:target.txt", "write target")
+    def preflight(args, ctx):
+        return _permission_preflight(ctx, "write:target.txt", "write target")
     registry.register(ToolDef("inner", "write", {}, lambda args, ctx: ToolResult(True, "inner executed"), criteria=ToolCapability.WRITE, permission_check=preflight))
     registry.register(ToolDef("outer", "write", {}, lambda args, ctx: registry.execute("inner", {}, ctx)[0], criteria=ToolCapability.WRITE, permission_check=preflight))
     assert not registry.execute("outer", {}, ctx)[0].ok
@@ -224,3 +231,17 @@ def test_worktree_creation_reuses_generated_target_permission(tmp_path, monkeypa
     assert len(prompts) == 1
     assert len(actions) == 2 and actions[0] == actions[1]
     assert ctx.sandbox.root == Path(actions[0].removeprefix("worktree:add:"))
+
+def test_validator_exception_fails_closed():
+    from lilbot.tools.registry import ToolDef, ToolResult
+
+    def broken(args, ctx):
+        raise RuntimeError("boom")
+
+    tool = ToolDef(
+        "x", "test", {}, lambda args, ctx: ToolResult(True, "ok"), validate=broken
+    )
+    result = tool.run_validation({}, None)
+    assert result.ok is False
+    assert "validator error" in result.message
+

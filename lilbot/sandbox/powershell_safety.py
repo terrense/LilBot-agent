@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-
 CONTROL_OPERATORS = {";", "|", "&&", "||"}
 REDIRECTION_OPERATORS = {">", ">>", "1>", "1>>", "2>", "2>>", "3>", "3>>", "4>", "4>>", "5>", "5>>", "6>", "6>>", "*>", "*>>"}
 DESTRUCTIVE_COMMANDS = {

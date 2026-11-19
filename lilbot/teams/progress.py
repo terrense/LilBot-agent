@@ -13,7 +13,6 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-
 SPINNER_VERBS = [
     "Accomplishing", "Architecting", "Brewing", "Calculating", "Cascading",
     "Cerebrating", "Churning", "Cogitating", "Composing", "Computing",

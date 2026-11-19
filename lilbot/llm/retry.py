@@ -1,6 +1,6 @@
 """Retry timing: jittered exponential backoff + Retry-After parsing.
 
-Modeled on Hermes ``agent/retry_utils.py``. Jitter decorrelates concurrent
+Jitter decorrelates concurrent
 retries (main loop, recall prefetch, subagents) so they don't all hit a
 rate-limited endpoint again at the same instant (thundering herd).
 """

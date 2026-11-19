@@ -5,7 +5,6 @@ import json
 
 from lilbot.sandbox.execpolicy import classify
 from lilbot.sandbox.permission_rules import (
-    PermissionRule,
     PermissionRuleSet,
     load_rules,
     parse_rule,
@@ -79,3 +78,49 @@ def test_load_rules_layers_sources(tmp_path):
     assert sources == {"project", "user"}
     assert rs.evaluate("Bash", "git push origin")[0] == "deny"
     assert rs.evaluate("write_file", "secrets.env")[0] == "ask"
+
+def test_shell_permission_uses_loaded_project_rules(tmp_path):
+    from types import SimpleNamespace
+
+    from lilbot.tools.builtin import _shell_permission
+
+    class _Perm:
+        mode = "ask"
+
+        def check(self, action, desc):
+            return SimpleNamespace(allowed=False)
+
+    rules = PermissionRuleSet([parse_rule("Bash(git push*)", "deny")])
+    ctx = SimpleNamespace(
+        permissions=_Perm(),
+        config=SimpleNamespace(auto_allow_safe_commands=True),
+        sandbox=SimpleNamespace(root=tmp_path),
+        permission_rules=rules,
+    )
+    allowed, _safety, blocked = _shell_permission(
+        ctx, "bash:git push", "run git push", "git push origin main"
+    )
+    assert allowed is False
+    assert blocked is not None and "permission rule" in blocked.output.lower()
+
+
+def test_tool_permission_gate_uses_loaded_rules(tmp_path):
+    from types import SimpleNamespace
+
+    from lilbot.tools.registry import ApprovalRequirement, ToolDef, ToolResult, _tool_permission_gate
+
+    class _Perm:
+        mode = "ask"
+
+        def check(self, action, desc):
+            return SimpleNamespace(allowed=False)
+
+    rules = PermissionRuleSet([parse_rule("write_file(*.env)", "deny")])
+    ctx = SimpleNamespace(permissions=_Perm(), permission_rules=rules)
+    tool = ToolDef(
+        "write_file", "write", {}, lambda args, ctx: ToolResult(True, "ok"),
+        approval_requirement=ApprovalRequirement.Required,
+    )
+    blocked = _tool_permission_gate(tool, {"path": ".env"}, ctx)
+    assert blocked is not None and blocked.ok is False
+

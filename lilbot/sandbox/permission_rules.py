@@ -1,6 +1,6 @@
-"""Layered permission rules with `Tool(pattern)` syntax (CC parity, #15).
+"""Layered permission rules with `Tool(pattern)` syntax.
 
-A small, portable subset of Claude Code's permission engine:
+The engine:
 
   * rules are written ``Tool(pattern)`` — e.g. ``Bash(git *)``, ``write_file(*.env)``
     — or bare ``Tool`` (whole-tool);
@@ -9,7 +9,7 @@ A small, portable subset of Claude Code's permission engine:
   * evaluation precedence is **deny > ask > allow** (a deny always wins);
   * ``find_shadowed`` reports rules that can never fire because a
     higher-precedence rule already covers everything they match — the class of
-    misconfiguration CC's shadowed-rule detection surfaces.
+    misconfiguration that shadowed-rule detection surfaces.
 
 The engine is consulted BEFORE the built-in execpolicy classifier (see
 ``execpolicy.classify(..., rules=...)``): a matching rule wins, and no match

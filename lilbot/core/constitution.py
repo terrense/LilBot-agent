@@ -9,7 +9,6 @@ The only addition is a concrete usage example at the top.
 
 from __future__ import annotations
 
-
 USAGE_EXAMPLE = """## Usage Example
 
 When the user asks "compare iPhone 18 and Samsung S26 camera, battery, price",

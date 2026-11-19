@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from lilbot.hooks import HookContext, HookEngine, load_hooks
 from lilbot.hooks.models import Hook, HookAction, HookMatch
@@ -93,8 +92,6 @@ def test_run_once_hook_fires_only_once():
 
 
 def test_agent_blocks_tool_via_hook(tmp_path):
-    import sys
-    from types import SimpleNamespace
     from lilbot.config import LilBotConfig
     from lilbot.core.agent import Agent
     from lilbot.core.events import ProviderTurn, ToolCall
@@ -136,7 +133,7 @@ def test_agent_blocks_tool_via_hook(tmp_path):
 
     ctx = ToolContext(None, None, Mem(), Sk(), None, None, cfg)
     agent = Agent(cfg, P(), registry, ctx)
-    events = list(agent.run_turn("write the env file"))
+    list(agent.run_turn("write the env file"))
 
     assert executed["called"] is False  # tool never ran
     blocked = [m for m in agent.messages if m.get("role") == "tool" and "Blocked by hook" in str(m.get("content"))]

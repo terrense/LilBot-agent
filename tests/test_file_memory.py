@@ -71,8 +71,9 @@ def test_files_are_plaintext_markdown(tmp_path):
 
 def test_drop_in_with_recall(tmp_path):
     # FileMemoryStore.list() yields the same MemoryEntry recall expects.
-    from lilbot.memory.recall import recall
     import json
+
+    from lilbot.memory.recall import recall
     s = _store(tmp_path)
     e = s.add(name="pref", text="user likes tabs", kind="user")
     reminder, ids = recall(

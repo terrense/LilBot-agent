@@ -1,16 +1,51 @@
+# Python
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
+*$py.class
+*.so
+.Python
 .venv/
 venv/
 env/
+env.bak/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local runtime state
+.lilbot/
 .env
 .env.*
-.lilbot/
+!.env.example
 *.log
+WORKLOG.md
 
-/leetcode-master
-/mewcode-python/
-*.egg-info/
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Personal workspace material that is not part of the project.
+# The generic patterns keep reference checkouts out of history without
+# naming them in this file.
+/leetcode-master/
+/*-python/
+/reference-*/
+/*-source-code/
+/*-source-code.7z
+/scratch/
+/private/
+/notes/
+
+# Temporary files
+*.tmp
+*.bak
+
+# Generated example output
+/examples/result.txt

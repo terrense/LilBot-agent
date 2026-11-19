@@ -1,11 +1,11 @@
-"""Session-memory living document (CC's SessionMemory analogue, #12).
+"""Session-memory living document (Session-memory living document, #12).
 
 A single structured Markdown file, ``.lilbot/session-memory.md``, with a FIXED
 set of sections. Instead of re-summarizing the whole conversation from scratch
 each time, the model **incrementally updates the sections that changed** — the
 template is the schema, so updates are small, diffable, and preserve structure.
 
-Adaptation to LilBot: CC hands a fork subagent the Edit tool to patch the file
+Adaptation to LilBot: A fork subagent is handed the Edit tool to patch the file
 in place. LilBot doesn't need that machinery — a side-query returns a JSON
 ``{section: new_content}`` of only the changed sections, and ``merge_updates``
 writes them back while preserving every header and the untouched sections. Same

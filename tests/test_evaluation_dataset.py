@@ -5,7 +5,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from evaluation.dataset import DatasetError, load_dataset, resolve_safe_path, safe_relative_path
+from evaluation.dataset import (
+    DatasetError,
+    load_dataset,
+    resolve_safe_path,
+    safe_relative_path,
+)
 
 
 def _task(**overrides):

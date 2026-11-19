@@ -7,9 +7,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from lilbot.cli import normalize_model_name, slash_commands_matching, switch_runtime_model
-from lilbot.config import DEFAULT_TUI_FONT_SIZE, load_config
-from lilbot.config import LilBotConfig
+from lilbot.cli import (
+    normalize_model_name,
+    slash_commands_matching,
+    switch_runtime_model,
+)
+from lilbot.config import DEFAULT_TUI_FONT_SIZE, LilBotConfig, load_config
 from lilbot.tui.windows_console import set_windows_console_font_size
 
 

@@ -1,8 +1,7 @@
 """Classify provider failures into a reason + recovery hints.
 
-Modeled on Hermes ``agent/error_classifier.py``: the retry loop asks
-``classify(exc)`` what to do instead of matching status codes / strings
-itself. Structured signals (``ProviderError.status_code`` / ``is_overflow`` /
+The retry loop asks ``classify(exc)`` what to do instead of matching status
+codes / strings itself. Structured signals (``ProviderError.status_code`` / ``is_overflow`` /
 ``reason``, httpx exception types) win; message text is only a fallback.
 """
 from __future__ import annotations

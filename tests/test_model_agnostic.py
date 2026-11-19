@@ -1,6 +1,6 @@
 """Model-agnostic provider wiring: any OpenAI-compatible model/endpoint plugs in.
 
-LilBot ships no model of its own (hermes-agent style), so switching to an
+LilBot ships no model of its own, so switching to an
 arbitrary provider/model and picking the right transport must work.
 """
 from __future__ import annotations
@@ -17,7 +17,6 @@ from lilbot.llm.providers import (
     is_local_endpoint,
     resolve_endpoint,
 )
-
 
 # ── endpoint resolution + provider selection ─────────────────────────────
 
@@ -61,8 +60,8 @@ def test_parse_model_request_provider_qualified():
     assert provider == "moonshot" and model == "kimi-k2"
     assert base == "https://api.moonshot.cn/v1"
     # slash separator + a model name that itself contains a slash
-    provider, model, base = _parse_model_request("openrouter/anthropic/claude-3.5")
-    assert provider == "openrouter" and model == "anthropic/claude-3.5"
+    provider, model, base = _parse_model_request("openrouter/meta-llama/llama-3.1-70b-instruct")
+    assert provider == "openrouter" and model == "meta-llama/llama-3.1-70b-instruct"
 
 
 def test_parse_model_request_bare_model_keeps_provider():

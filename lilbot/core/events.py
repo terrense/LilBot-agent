@@ -21,7 +21,7 @@ class ProviderTurn:
     reasoning_content: str = ""
     # OpenAI-style finish_reason ("stop" | "length" | "tool_calls" | …). "length"
     # means the model was cut off at max output tokens — the agent can inject a
-    # "continue from where you left off" message and resume (CC parity, #9).
+    # "continue from where you left off" message and resume (recovery path #9).
     finish_reason: str = ""
 
 
@@ -41,7 +41,7 @@ class StreamEvent:
 
     Incremental deltas set ``text`` or ``reasoning``; a ``tool_call`` event fires
     when one tool call has fully streamed in (its args are complete), enabling
-    the agent to start executing it while the model keeps streaming (CC's
+    the agent to start executing it while the model keeps streaming (the runtime's
     StreamingToolExecutor overlap, #2); the terminal event carries the
     fully-assembled ``final`` turn (content, tool_calls, usage).
     """

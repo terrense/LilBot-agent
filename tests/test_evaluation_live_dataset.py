@@ -5,7 +5,6 @@ import pytest
 
 from evaluation.dataset import DatasetError, load_dataset
 
-
 _LIVE_DATASET = Path(__file__).resolve().parents[1] / "evaluation" / "datasets" / "live.jsonl"
 
 

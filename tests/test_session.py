@@ -1,8 +1,6 @@
 """Tests for session persistence + resume."""
 from __future__ import annotations
 
-from pathlib import Path
-
 from lilbot.config import LilBotConfig
 from lilbot.core.agent import Agent
 from lilbot.core.events import ProviderTurn

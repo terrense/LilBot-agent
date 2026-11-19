@@ -1,4 +1,4 @@
-"""Runtime micro-benchmarks for the Hermes-gap optimization plan.
+"""Runtime micro-benchmarks for LilBot.
 
 Offline and free: requests go to a local fake SSE server, never to a model.
 

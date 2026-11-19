@@ -1,11 +1,11 @@
-"""Composer input history — up/down recall of previous prompts (Claude Code style).
+"""Composer input history — up/down recall of previous prompts.
 
 Extracted from the dashboard so the navigation logic is unit-testable without
 prompt_toolkit. The dashboard wires ``older``/``newer`` to Up/Down when the
 cursor is at the first/last line of the composer (so multi-line editing still
 works), and ``record`` on submit.
 
-Semantics match a shell/Claude-Code history:
+Semantics match a shell history:
   * Up from a fresh composer saves the current draft, then walks newest→oldest.
   * Down walks back toward newest, and past the newest restores the saved draft.
   * Consecutive duplicates are collapsed; blank lines are never recorded.

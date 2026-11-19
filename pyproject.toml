@@ -4,14 +4,42 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lilbot-agent"
-version = "0.1.0"
-description = "LilBot: a clean-room local coding agent playground."
+version = "0.2.0"
+description = "A local-first coding agent runtime for the terminal."
+readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "ShenXin" }]
+keywords = ["agent", "coding-agent", "llm", "mcp", "terminal", "windows"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
   "httpx>=0.27.0,<1",
   "prompt_toolkit>=3.0.0,<4",
   "rich>=13.0.0,<16",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.urls]
+Homepage = "https://github.com/terrense/LilBot-agent"
+Documentation = "https://github.com/terrense/LilBot-agent/tree/main/docs"
+Issues = "https://github.com/terrense/LilBot-agent/issues"
+Changelog = "https://github.com/terrense/LilBot-agent/blob/main/CHANGELOG.md"
 
 [project.scripts]
 lilbot = "lilbot.cli:main"
@@ -19,3 +47,19 @@ lilbot = "lilbot.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["lilbot*", "evaluation*"]
+
+[tool.setuptools.package-data]
+lilbot = ["skills/bundled/**/*.md", "skills/bundled/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+exclude = [".venv", "build", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501", "E402"]

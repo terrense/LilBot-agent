@@ -5,7 +5,6 @@ from evaluation import runner
 from evaluation.dataset import load_dataset
 from evaluation.trace import read_trace
 
-
 _SMOKE = Path(__file__).resolve().parents[1] / "evaluation" / "datasets" / "smoke.jsonl"
 
 
