@@ -57,16 +57,30 @@ class PermissionManager:
             raise ValueError("permission mode must be ask, accept-all, or deny-all")
         self.mode = mode
 
-    def check(self, action: str, description: str) -> PermissionDecision:
-        if self.mode == "accept-all":
-            return PermissionDecision(True)
+    def check(
+        self,
+        action: str,
+        description: str,
+        *,
+        force: bool = False,
+    ) -> PermissionDecision:
+        """Resolve one permission request.
+
+        ``force`` is for an explicit ``ask`` rule: it skips the mode shortcut
+        and remembered exact-action decisions, but deny-all still wins. This
+        keeps the pipeline order deny > ask > tool > mode > allow without
+        letting accept-all silently swallow an explicit ask.
+        """
         if self.mode == "deny-all":
             return PermissionDecision(False)
-        if action in self.rules:
-            return PermissionDecision(self.rules[action], True)
-        decisions = self._tool_decisions.get()
-        if decisions is not None and action in decisions:
-            return decisions[action]
+        decisions = None if force else self._tool_decisions.get()
+        if not force:
+            if self.mode == "accept-all":
+                return PermissionDecision(True)
+            if action in self.rules:
+                return PermissionDecision(self.rules[action], True)
+            if decisions is not None and action in decisions:
+                return decisions[action]
         if not self.interactive:
             return PermissionDecision(False)
 

@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](#环境要求)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-4B5563?style=for-the-badge)](#环境要求)
-[![Tests](https://img.shields.io/badge/tests-660%20passing-16A34A?style=for-the-badge)](#开发)
+[![Tests](https://img.shields.io/badge/tests-732%20passing-16A34A?style=for-the-badge)](#开发)
 [![License](https://img.shields.io/badge/license-MIT-7C3AED?style=for-the-badge)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.2.0-DB2777?style=for-the-badge)](CHANGELOG.md)
 
@@ -228,7 +228,7 @@ lilbot/                 运行时包
   skills/               技能 registry 与内置技能
   tui/                  Dashboard 与经典渲染器
 evaluation/             mock/live 评测、基线、trace
-tests/                  660 个通过的测试
+tests/                  732 个通过的测试
 benchmarks/             运行时微基准与结果
 docs/                   架构、设计、评测、指南、素材
 examples/               可运行的小示例
@@ -238,7 +238,7 @@ examples/               可运行的小示例
 ## 开发
 
 ```bash
-python -m pytest tests -q          # 660 passed, 7 skipped
+python -m pytest tests -q          # 732 passed, 7 skipped
 python -m compileall lilbot        # 语法检查
 ruff check lilbot tests            # lint（可选 dev 依赖）
 ```

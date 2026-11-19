@@ -382,6 +382,10 @@ class Agent:
         # ============================================================
         self._reload_hooks_if_changed()
         self._turn_count += 1
+        # An inline skill may narrow the tool set for the rest of this turn.
+        # Reset at the boundary so it cannot leak into a later user turn.
+        if getattr(self, "ctx", None) is not None:
+            self.ctx.active_skill = None
         self._append({"role": "user", "content": user_text})
         self._edited_this_turn = []
         self._stop_continuations = 0
@@ -1319,7 +1323,15 @@ class Agent:
             self._raise_if_interrupted()
             progress = {"emitted": False}
             messages = self._provider_messages()
-            schemas = self.registry.schemas(render_ctx)
+            active_skill = getattr(self.ctx, "active_skill", None)
+            allowed_names = None
+            if active_skill:
+                allowed_names = (
+                    active_skill.get("allowed_tools")
+                    if isinstance(active_skill, dict)
+                    else getattr(active_skill, "allowed_tools", None)
+                )
+            schemas = self.registry.schemas(render_ctx, allowed_names=allowed_names)
             self._note_request_size(messages, schemas)
             try:
                 result = yield from self._drive_stream(

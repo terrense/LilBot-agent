@@ -186,8 +186,15 @@ def _bounded_text_projection(text: str, args: dict[str, Any]) -> tuple[str, dict
     return projected, metadata
 
 
-def _permission(ctx: ToolContext, action: str, description: str) -> bool:
-    return ctx.permissions.check(action, description).allowed
+def _permission(ctx: ToolContext, action: str, description: str, *, force: bool = False) -> bool:
+    check = ctx.permissions.check
+    if force:
+        try:
+            return check(action, description, force=True).allowed
+        except TypeError:
+            # Embedding/test permission objects with the old signature.
+            pass
+    return check(action, description).allowed
 
 
 def _permission_preflight(ctx: ToolContext, action: str, description: str) -> ToolResult | None:
@@ -220,7 +227,8 @@ def _shell_permission(ctx: ToolContext, action: str, description: str, command: 
         prompt = f"{description} | {reason}"
     if safety:
         prompt = f"{prompt} | {safety.get('summary')}"
-    if not _permission(ctx, action, prompt):
+    force_prompt = decision == "ask" and reason.startswith("permission rule")
+    if not _permission(ctx, action, prompt, force=force_prompt):
         metadata = {"powershell_safety": safety} if safety else {}
         return False, safety, ToolResult(False, "Permission denied.", metadata)
     return True, safety, None
@@ -2937,6 +2945,19 @@ def _skill_run(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         "agent": skill.agent,
     }
     if skill.mode.lower() != "fork":
+        allowed = [str(item).strip() for item in (skill.allowed_tools or []) if str(item).strip()]
+        if allowed:
+            existing = getattr(ctx, "active_skill", None)
+            existing_allowed = (
+                existing.get("allowed_tools")
+                if isinstance(existing, dict)
+                else getattr(existing, "allowed_tools", None)
+            )
+            # Never broaden an already-narrowed scope: nested skills intersect.
+            if existing_allowed:
+                allowed = sorted(set(allowed) & set(existing_allowed))
+            ctx.active_skill = {"name": skill.name, "allowed_tools": frozenset(allowed)}
+            metadata["skill_scope"] = allowed
         return ToolResult(True, rendered, metadata)
     if ctx.subagents is None:
         return ToolResult(False, "Forked skill execution requires subagent support.", metadata)

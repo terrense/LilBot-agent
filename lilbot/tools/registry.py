@@ -260,6 +260,15 @@ class ToolDef:
         return self.concurrency_safe
 
 
+# Skill control tools stay callable while an inline skill narrows the tool set,
+# so the model can load another skill or inspect the registry without escaping
+# the declared allowed_tools.
+_SKILL_CONTROL_TOOLS = frozenset({
+    "Skill", "load_skill", "skill_list", "ToolSearch",
+    "tool_search_tool_regex", "tool_search_tool_bm25",
+})
+
+
 @dataclass
 class ToolContext:
     sandbox: Any
@@ -279,6 +288,9 @@ class ToolContext:
     # historical behavior for tests and embedding callers that build a context
     # by hand.
     permission_rules: Any = None
+    # Active inline skill scope: {"name": str, "allowed_tools": frozenset[str]}.
+    # None means the parent conversation is unrestricted. Reset at turn start.
+    active_skill: Any = None
 
 
 class ToolRegistry:
@@ -425,14 +437,28 @@ class ToolRegistry:
     def list(self) -> list[ToolDef]:
         return sorted(self._tools.values(), key=lambda tool: tool.name)
 
-    def schemas(self, subagent_render_context: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    def schemas(
+        self,
+        subagent_render_context: dict[str, Any] | None = None,
+        allowed_names: Any = None,
+    ) -> list[dict[str, Any]]:
         """Return tool schemas for the LLM provider.
 
         When subagent_render_context is provided (from SubAgentManager.get_render_context()),
         the agent_open and agent_eval descriptions are dynamically expanded with live agent type
         listings and active subagent status — single source of truth.
+
+        When an inline skill is active, ``allowed_names`` narrows the advertised
+        set to its declared tools plus the skill control tools. The allowed
+        tools are taken from the full catalog, so a deferred tool declared by a
+        skill is still advertised for that scope.
         """
-        base = self._base_catalog()
+        if allowed_names:
+            allowed = {self.resolve(str(item)) or str(item) for item in allowed_names}
+            allowed |= _SKILL_CONTROL_TOOLS
+            base = [self._schema_of(t) for t in self.list() if t.name in allowed]
+        else:
+            base = self._base_catalog()
         if subagent_render_context is None:
             return base
         # Copy each schema before the dynamic agent-description mutation so the
@@ -478,6 +504,26 @@ class ToolRegistry:
         tool = self.get(resolved_name)
         if not tool:
             return ToolResult(False, f"Unknown tool: {name}"), 0
+        skill_scope = getattr(ctx, "active_skill", None)
+        if skill_scope:
+            allowed = (
+                skill_scope.get("allowed_tools")
+                if isinstance(skill_scope, dict)
+                else getattr(skill_scope, "allowed_tools", None)
+            )
+            if allowed:
+                resolved_allowed = {self.resolve(str(item)) or str(item) for item in allowed}
+                if resolved_name not in resolved_allowed and resolved_name not in _SKILL_CONTROL_TOOLS:
+                    skill_name = (
+                        skill_scope.get("name", "?")
+                        if isinstance(skill_scope, dict)
+                        else "?"
+                    )
+                    return ToolResult(
+                        False,
+                        f"Tool '{resolved_name}' is outside the active skill '{skill_name}' allowed tools.",
+                        {"gate": "skill_scope", "skill": skill_name, "allowed_tools": sorted(resolved_allowed)},
+                    ), 0
         # If the model called a deferred tool directly (without ToolSearch),
         # honor it and reveal its schema for subsequent turns — no regression.
         if tool.should_defer and tool.name not in self._discovered:
@@ -539,6 +585,8 @@ def _tool_permission_gate(tool: ToolDef, arguments: dict[str, Any], ctx: ToolCon
         return ToolResult(False, "Permission denied: permission manager is unavailable.", metadata)
     rules = getattr(ctx, "permission_rules", None)
     canonical = json.dumps(arguments, sort_keys=True, ensure_ascii=False, default=str)
+    rule_decision = ""
+    rule = None
     if rules is not None and callable(getattr(rules, "evaluate", None)):
         # Pattern rules on file tools should see the path, not the JSON wrapper.
         rule_text = canonical
@@ -546,18 +594,26 @@ def _tool_permission_gate(tool: ToolDef, arguments: dict[str, Any], ctx: ToolCon
             if arguments.get(key):
                 rule_text = str(arguments[key])
                 break
-        decision, rule = rules.evaluate(tool.name, rule_text)
-        if decision == "deny":
+        rule_decision, rule = rules.evaluate(tool.name, rule_text)
+        if rule_decision == "deny":
             source = getattr(rule, "source", "user")
             spec = rule.spec() if hasattr(rule, "spec") else "rule"
             return ToolResult(False, f"Permission denied by [{source}] {spec}.", metadata)
-        if decision == "allow":
-            return None
+    # deny-all is a hard mode and outranks ask/tool/allow.
     if getattr(permissions, "mode", None) == "deny-all":
         return ToolResult(False, "Permission denied by deny-all mode.", metadata)
+    if rule_decision == "ask":
+        source = getattr(rule, "source", "user")
+        spec = rule.spec() if hasattr(rule, "spec") else "rule"
+        action = f"rule:{tool.name}:{source}:{spec}"
+        description = f"permission rule asks for {tool.name}: {redact_known_secrets(canonical)[:300]}"
+        if not permissions.check(action, description, force=True).allowed:
+            return ToolResult(False, f"Permission denied by [{source}] {spec}.", metadata)
+    # Tool-specific safety/policy runs before a blanket allow rule.
     if tool.permission_check is not None:
         return tool.permission_check(arguments, ctx)
-    canonical = json.dumps(arguments, sort_keys=True, ensure_ascii=False, default=str)
+    if rule_decision == "allow":
+        return None
     signature = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     action = f"tool:{tool.name}:{signature}"
     description = f"run {tool.name}: {redact_known_secrets(canonical)[:500]}"
