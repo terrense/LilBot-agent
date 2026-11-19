@@ -149,3 +149,13 @@ def test_rule_ask_does_not_prompt_twice_in_ask_mode(tmp_path):
     assert result is None
     assert len(prompts) == 1
 
+def test_force_ask_remembers_always_allow(tmp_path):
+    rules = [parse_rule("write_file", "ask")]
+    ctx, prompts = _ctx(tmp_path, mode="accept-all", answers=["a"], rules=rules)
+    first = _tool_permission_gate(_write_tool(), {"path": "x"}, ctx)
+    assert first is None
+    assert len(prompts) == 1
+    second = _tool_permission_gate(_write_tool(), {"path": "x"}, ctx)
+    assert second is None
+    assert len(prompts) == 1  # the "always" answer was remembered
+

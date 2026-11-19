@@ -73,6 +73,9 @@ class PermissionManager:
         """
         if self.mode == "deny-all":
             return PermissionDecision(False)
+        if force and action in self.rules:
+            # "Always allow/deny" chosen at a forced ask is a persistent choice.
+            return PermissionDecision(self.rules[action], True)
         decisions = None if force else self._tool_decisions.get()
         if not force:
             if self.mode == "accept-all":

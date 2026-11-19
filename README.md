@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-4B5563?style=for-the-badge)](#requirements)
-[![Tests](https://img.shields.io/badge/tests-733%20passing-16A34A?style=for-the-badge)](#development)
+[![Tests](https://img.shields.io/badge/tests-734%20passing-16A34A?style=for-the-badge)](#development)
 [![License](https://img.shields.io/badge/license-MIT-7C3AED?style=for-the-badge)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.2.0-DB2777?style=for-the-badge)](CHANGELOG.md)
 
@@ -257,7 +257,7 @@ lilbot/                 Runtime package
   skills/               Skill registry and bundled skills
   tui/                  Dashboard and classic renderers
 evaluation/             Mock and live evaluation harness, baselines, traces
-tests/                  733 passing tests
+tests/                  734 passing tests
 benchmarks/             Runtime micro-benchmarks and results
 docs/                   Architecture, design, evaluation, guides, assets
 examples/               Small runnable demos
@@ -267,7 +267,7 @@ examples/               Small runnable demos
 ## Development
 
 ```bash
-python -m pytest tests -q          # 733 passed, 7 skipped
+python -m pytest tests -q          # 734 passed, 7 skipped
 python -m compileall lilbot        # syntax check
 ruff check lilbot tests            # lint (optional dev dependency)
 ```
