@@ -587,6 +587,7 @@ def _tool_permission_gate(tool: ToolDef, arguments: dict[str, Any], ctx: ToolCon
     canonical = json.dumps(arguments, sort_keys=True, ensure_ascii=False, default=str)
     rule_decision = ""
     rule = None
+    rule_prompted = False
     if rules is not None and callable(getattr(rules, "evaluate", None)):
         # Pattern rules on file tools should see the path, not the JSON wrapper.
         rule_text = canonical
@@ -609,10 +610,11 @@ def _tool_permission_gate(tool: ToolDef, arguments: dict[str, Any], ctx: ToolCon
         description = f"permission rule asks for {tool.name}: {redact_known_secrets(canonical)[:300]}"
         if not permissions.check(action, description, force=True).allowed:
             return ToolResult(False, f"Permission denied by [{source}] {spec}.", metadata)
+        rule_prompted = True
     # Tool-specific safety/policy runs before a blanket allow rule.
     if tool.permission_check is not None:
         return tool.permission_check(arguments, ctx)
-    if rule_decision == "allow":
+    if rule_decision == "allow" or rule_prompted:
         return None
     signature = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     action = f"tool:{tool.name}:{signature}"

@@ -59,7 +59,7 @@ LilBot 是一个 **Windows 优先、模型可替换（任意 OpenAI 兼容接口
 | 共享任务看板有依赖字段但不是 DAG 调度器 | ✅ 属实 | `teams/shared_task.py` |
 | `delegation.py` 含已停用的关键词路由 | ✅ 属实，标记 DEPRECATED，但仍有部分引用 | 见模块清单 |
 | 审计流程图中 "Permission Check" 是主循环里的统一步骤 | ❌ **不准确**：registry 只做校验和计划闸门，权限由各工具 handler 自行检查 | `registry.py:417`、`builtin.py:195-221` |
-| 历史文档记录测试数 184 → 257 → 304 → 353 | ✅ 现为 **732 passed / 7 skipped**，比历史记录更多 | [基线测试报告](../evaluation/baseline-test-report.md) |
+| 历史文档记录测试数 184 → 257 → 304 → 353 | ✅ 现为 **733 passed / 7 skipped**，比历史记录更多 | [基线测试报告](../evaluation/baseline-test-report.md) |
 
 ## 5. 本次新发现的问题
 

@@ -141,3 +141,11 @@ def test_allow_rule_never_reopens_catastrophic_command(tmp_path):
     )
     assert allowed is False and blocked is not None
     assert prompts == []
+
+def test_rule_ask_does_not_prompt_twice_in_ask_mode(tmp_path):
+    rules = [parse_rule("write_file", "ask")]
+    ctx, prompts = _ctx(tmp_path, mode="ask", answers=["y"], rules=rules)
+    result = _tool_permission_gate(_write_tool(), {"path": "x"}, ctx)
+    assert result is None
+    assert len(prompts) == 1
+
