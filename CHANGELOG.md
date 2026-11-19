@@ -6,6 +6,20 @@ All notable changes to LilBot are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- One permission pipeline with explicit `deny > ask > tool > mode > allow`
+  ordering. Explicit ask rules prompt even under accept-all, and deny-all is a
+  hard override.
+- Inline skills narrow the advertised and executable tool set to their declared
+  `allowed_tools`; forked skills pass the same allowlist to the subagent.
+- A 40-case dangerous-command corpus and a 12-case path/symlink/junction
+  boundary corpus in the test suite.
+
+### Changed
+
+- Test suite: 733 passed, 7 skipped.
+
 ## [0.2.0] - 2026-11-19
 
 ### Added
