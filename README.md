@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-4B5563?style=for-the-badge)](#requirements)
-[![Tests](https://img.shields.io/badge/tests-734%20passing-16A34A?style=for-the-badge)](#development)
+[![Tests](https://img.shields.io/badge/tests-757%20passing-16A34A?style=for-the-badge)](#development)
 [![License](https://img.shields.io/badge/license-MIT-7C3AED?style=for-the-badge)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.2.0-DB2777?style=for-the-badge)](CHANGELOG.md)
 
@@ -257,7 +257,7 @@ lilbot/                 Runtime package
   skills/               Skill registry and bundled skills
   tui/                  Dashboard and classic renderers
 evaluation/             Mock and live evaluation harness, baselines, traces
-tests/                  734 passing tests
+tests/                  757 passing tests
 benchmarks/             Runtime micro-benchmarks and results
 docs/                   Architecture, design, evaluation, guides, assets
 examples/               Small runnable demos
@@ -267,7 +267,7 @@ examples/               Small runnable demos
 ## Development
 
 ```bash
-python -m pytest tests -q          # 734 passed, 7 skipped
+python -m pytest tests -q          # 757 passed, 7 skipped
 python -m compileall lilbot        # syntax check
 ruff check lilbot tests            # lint (optional dev dependency)
 ```
@@ -292,6 +292,12 @@ CI runs the test suite on Python 3.10–3.13 on Ubuntu and Windows. See
 Issues and pull requests are welcome. Please read
 [CONTRIBUTING.md](CONTRIBUTING.md) and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 first. For security reports, use [SECURITY.md](SECURITY.md), not a public issue.
+
+[AGENTS.md](AGENTS.md) is the working agreement for anyone changing this
+repository, including AI assistants: the rules that must hold (no attribution,
+no secrets, no third-party names) and the rule that every change updates the
+README, the changelog, and the
+[development log](docs/development-log.md) in the same change.
 
 ## License
 

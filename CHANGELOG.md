@@ -8,6 +8,19 @@ All notable changes to LilBot are documented here. The format follows
 
 ### Added
 
+- A per-model context-window table and resolver (`lilbot/core/model_windows.py`).
+  The window is derived from the model, so a 64k endpoint no longer gets the
+  128k default budget, and the compaction trigger and the context bar now use
+  the same number. An explicit `LILBOT_CONTEXT_WINDOW` always wins.
+- The context budget is now checked before every provider call, not only once
+  per turn, so a long turn can no longer cross the window between iterations.
+- The tool schemas are counted in the request estimate. They travel with every
+  request but are not part of the message list, and with 146 registered tools
+  they are a large fixed cost.
+- `AGENTS.md` — the working agreement for anyone changing the repository.
+- `docs/development-log.md` — what changed in each milestone, why, and what it
+  means for the runtime.
+
 - One permission pipeline with explicit `deny > ask > tool > mode > allow`
   ordering. Explicit ask rules prompt even under accept-all, and deny-all is a
   hard override.
@@ -18,7 +31,7 @@ All notable changes to LilBot are documented here. The format follows
 
 ### Changed
 
-- Test suite: 734 passed, 7 skipped.
+- Test suite: 757 passed, 7 skipped.
 
 ## [0.2.0] - 2026-11-19
 

@@ -39,6 +39,13 @@ The README is the front door; this page is the map. If you are new, read the
 - [Baseline test report](evaluation/baseline-test-report.md) — the regression
   baseline and the bugs it surfaced.
 
+## Working agreement
+
+- [AGENTS.md](../AGENTS.md) — the rules every change must hold: no attribution,
+  no secrets, no third-party names, and keep the public surface current.
+- [Development log](development-log.md) — what changed in each milestone, why,
+  and what it means for the runtime.
+
 ## Engineering reports
 
 - [M1-M8 implementation](reports/m1-m8-implementation.md) — secret redaction,

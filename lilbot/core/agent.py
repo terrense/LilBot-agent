@@ -18,6 +18,7 @@ from .compaction import (
     CompactCircuitBreaker,
     RecoveryState,
     auto_compact,
+    compute_threshold,
     estimate_tokens,
     estimate_tokens_text,
     is_context_overflow_error,
@@ -32,6 +33,7 @@ from .delegation import (
 from .eventlog import EventLog
 from .guardrails import GuardrailNotice, ToolCallGuardrailController
 from .history import FileHistory
+from .model_windows import ContextWindow, resolve_context_window
 from .session import SessionStore, interrupted_tool_result_messages
 from .session_memory import SessionMemory
 from .tool_budget import ToolBudgetState, enforce_tool_result_budget
@@ -278,6 +280,12 @@ class Agent:
         self._estimate_samples = 0
         self._last_request_estimate = 0
         self._last_request_len = 0
+        # Token cost of the tool schemas in the request being prepared, and of
+        # the schemas in the request whose usage we last saw. The difference is
+        # the schema growth the provider has not reported yet (a newly
+        # discovered deferred tool).
+        self._schema_tokens = 0
+        self._sent_schema_tokens = 0
 
     def run_turn(self, user_text: str) -> Iterator[object]:
         """One user turn. A failure (provider error, Ctrl+C) still persists the
@@ -1151,6 +1159,23 @@ class Agent:
         # offline rule provider returns canned text, so keep the text path there.
         return self._provider_is_capable()
 
+    def effective_context_window(self) -> int:
+        """The window the trigger and the UI both use.
+
+        Resolved from the model so a 64k endpoint does not get a 128k budget
+        and a local server keeps whatever the operator configured.
+        """
+        return self.context_window_info().window
+
+    def context_window_info(self) -> ContextWindow:
+        """The resolved window plus the reason it was chosen."""
+        return resolve_context_window(
+            model=self.config.model,
+            base_url=self.config.base_url,
+            configured=getattr(self.config, "context_window", 0) or 0,
+            explicit=bool(getattr(self.config, "context_window_explicit", False)),
+        )
+
     def compact(self, manual: bool = True) -> str:
         # Carry the session-memory living document (#12) through compaction: it
         # rides along in the recovery attachment so the post-compact model keeps
@@ -1161,7 +1186,7 @@ class Agent:
         result = auto_compact(
             self.messages,
             self._summarize,
-            self.config.context_window,
+            self.effective_context_window(),
             manual=manual,
             recovery=self.recovery,
             tool_names=self._tool_names_for_recovery(),
@@ -1169,6 +1194,7 @@ class Agent:
             actual_tokens=self.context_tokens(),
             cache_cold=self._cache_is_cold(),
             message_summarizer=self._message_summarizer if self._shared_summary_available() else None,
+            reserved_tokens=self._schema_tokens,
         )
         if result is None:
             return "Nothing to compact yet." if manual else ""
@@ -1278,6 +1304,24 @@ class Agent:
         if len(self.messages) > self.config.compact_after_messages * 4:
             self.compact(manual=True)
 
+    def _ensure_context_budget(self) -> None:
+        """Check the budget before every provider call.
+
+        The turn-entry check is not enough: a long turn grows the context
+        between iterations, and the first signal was the provider rejecting
+        the request rather than the cheap local prune that would have avoided
+        it. The estimate here is the last reported usage plus the estimated
+        tail, so the check costs a scan of the tail, not of the history.
+        """
+        trigger = compute_threshold(self.effective_context_window())
+        estimate = self.context_tokens()
+        if estimate <= 0:
+            estimate = self._last_request_estimate
+        if estimate < trigger:
+            return
+        self._apply_tool_budget()
+        self.compact(manual=False)
+
     def _is_overflow_error(self, exc: Exception) -> bool:
         """Structured-first overflow classification (structured-first classification).
 
@@ -1322,7 +1366,6 @@ class Agent:
         while True:
             self._raise_if_interrupted()
             progress = {"emitted": False}
-            messages = self._provider_messages()
             active_skill = getattr(self.ctx, "active_skill", None)
             allowed_names = None
             if active_skill:
@@ -1332,6 +1375,13 @@ class Agent:
                     else getattr(active_skill, "allowed_tools", None)
                 )
             schemas = self.registry.schemas(render_ctx, allowed_names=allowed_names)
+            # Count the schemas before the budget check: a newly discovered
+            # deferred tool makes the next request bigger.
+            self._update_schema_tokens(schemas)
+            # Budget check first: it may compact, and the messages have to be
+            # built after that so the request carries the compacted history.
+            self._ensure_context_budget()
+            messages = self._provider_messages()
             self._note_request_size(messages, schemas)
             try:
                 result = yield from self._drive_stream(
@@ -1493,6 +1543,10 @@ class Agent:
             prompt_tokens = turn.usage.get("prompt_tokens") or turn.usage.get("input_tokens")
             if main_loop and isinstance(prompt_tokens, int) and prompt_tokens > 0:
                 self._last_input_tokens = prompt_tokens
+                # The reported count already includes the schemas of the request
+                # that produced it; remember them so the next estimate only
+                # adds schema growth, not the schemas twice.
+                self._sent_schema_tokens = self._schema_tokens
                 self._calibrate_estimate(prompt_tokens)
             self._last_activity_ts = time.time()
 
@@ -1501,10 +1555,22 @@ class Agent:
     _CALIBRATION_ALPHA = 0.3          # EMA weight of the newest sample
     _CALIBRATION_BOUNDS = (0.3, 3.0)  # ignore absurd samples (mocks, proxies)
 
-    def _note_request_size(self, messages: list[dict[str, Any]], schemas: list[dict[str, Any]]) -> None:
-        """Remember the raw estimate of what this main-loop request sends."""
+    def _update_schema_tokens(self, schemas: list[dict[str, Any]]) -> int:
+        """Record the token cost of the schemas about to be sent.
+
+        Called as soon as the schemas are built, before the budget check, so a
+        newly discovered deferred tool is counted against the window that the
+        provider will actually see.
+        """
         tools = estimate_tokens_text(json.dumps(schemas, ensure_ascii=False)) if schemas else 0
         with self._usage_lock:
+            self._schema_tokens = tools
+        return tools
+
+    def _note_request_size(self, messages: list[dict[str, Any]], schemas: list[dict[str, Any]]) -> None:
+        """Remember the raw estimate of what this main-loop request sends."""
+        with self._usage_lock:
+            tools = self._schema_tokens
             self._last_request_estimate = estimate_tokens(messages) + tools
             self._last_request_len = len(self.messages)
 
@@ -1529,19 +1595,48 @@ class Agent:
 
         The last real ``prompt_tokens`` plus a calibrated estimate of the
         messages appended since (tool results, the new user turn) - the runtime's
-        "usage + estimate of the tail". Before any real usage this is the
-        calibrated full estimate, or 0 meaning "no better signal than the raw
-        estimate".
+        "usage + estimate of the tail". Before any real usage it is the raw
+        estimate of the messages plus the cost of the tool schemas.
+
+        The tool schemas travel with every request but are not part of the
+        message list, so they are counted separately: the reported usage
+        already includes the schemas as sent, and only their growth since then
+        (a newly discovered deferred tool) is added.
         """
         with self._usage_lock:
             last, ratio, samples = self._last_input_tokens, self._estimate_ratio, self._estimate_samples
             since = self._last_request_len
+            schema_now, schema_sent = self._schema_tokens, self._sent_schema_tokens
         if last > 0:
             tail = self.messages[since:] if 0 < since <= len(self.messages) else []
-            return last + int(estimate_tokens(tail) * ratio)
-        if samples:
-            return int(estimate_tokens(self.messages) * ratio)
-        return 0
+            # The reported usage already counted the schemas as sent, so only
+            # the growth since then is added.
+            return last + int(estimate_tokens(tail) * ratio) + max(0, schema_now - schema_sent)
+        base = int(estimate_tokens(self.messages) * (ratio if samples else 1.0))
+        return base + schema_now
+
+    def token_breakdown(self) -> dict[str, Any]:
+        """Split the next request's estimated size for /tokens."""
+        with self._usage_lock:
+            last, ratio, samples = self._last_input_tokens, self._estimate_ratio, self._estimate_samples
+            since = self._last_request_len
+            schema_now, schema_sent = self._schema_tokens, self._sent_schema_tokens
+        if last > 0:
+            tail = self.messages[since:] if 0 < since <= len(self.messages) else []
+            messages_tokens = last + int(estimate_tokens(tail) * ratio)
+        else:
+            messages_tokens = int(estimate_tokens(self.messages) * (ratio if samples else 1.0))
+        window = self.context_window_info()
+        return {
+            "messages_tokens": messages_tokens,
+            "tool_schema_tokens": schema_now,
+            "schema_growth_tokens": max(0, schema_now - schema_sent),
+            "total_tokens": self.context_tokens(),
+            "context_window": window.window,
+            "window_source": window.source,
+            "window_detail": window.detail,
+            "threshold": compute_threshold(window.window),
+        }
 
     def token_calibration(self) -> dict[str, Any]:
         """Estimate-vs-real numbers for /tokens."""

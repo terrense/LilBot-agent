@@ -24,7 +24,13 @@ class LilBotConfig:
     font_size: int = DEFAULT_TUI_FONT_SIZE
     subagent_max_concurrent: int = DEFAULT_SUBAGENT_MAX_CONCURRENT
     compact_after_messages: int = 28
+    # Fallback context window. The effective window is resolved from the model
+    # (core/model_windows.py); this value is used when the model is unknown
+    # and is used verbatim when `context_window_explicit` is set.
     context_window: int = 128_000
+    # True when the operator actually chose a window (LILBOT_CONTEXT_WINDOW),
+    # so an explicit choice is never overridden by the model table.
+    context_window_explicit: bool = False
     auto_diagnostics: bool = True
     auto_allow_safe_commands: bool = True
     verbose: bool = False
@@ -141,6 +147,7 @@ def apply_env_overrides(cfg: LilBotConfig) -> LilBotConfig:
         cfg.subagent_max_concurrent = max(1, _env_int("LILBOT_SUBAGENT_MAX_CONCURRENT", cfg.subagent_max_concurrent))
     if _env("LILBOT_CONTEXT_WINDOW"):
         cfg.context_window = max(8_000, _env_int("LILBOT_CONTEXT_WINDOW", cfg.context_window))
+        cfg.context_window_explicit = True
     if _env("LILBOT_STREAM"):
         cfg.stream_output = _env("LILBOT_STREAM").strip().lower() not in {"0", "false", "no", "off"}
     if _env("LILBOT_MAX_RETRIES"):

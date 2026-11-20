@@ -417,13 +417,21 @@ def _token_rows(agent: Agent, ctx: ToolContext) -> list[tuple[str, str]]:
         visible_tools = len(registry.schemas()) if registry else 0
     except Exception:
         catalog_fp, visible_tools = "n/a", 0
-    return [
+    window = _context_window(agent, ctx)
+    breakdown = _token_breakdown(agent)
+    rows = [
         ("tools_visible", str(visible_tools)),
         ("tool_catalog_fp", catalog_fp),
         ("messages", str(len(messages))),
         ("approx_context_tokens", str(_context_tokens(agent, messages))),
         ("estimate_calibration", _calibration_text(agent)),
-        ("context_window", str(getattr(ctx.config, "context_window", 128_000))),
+        ("context_window", f"{window['window']} ({window['source']}: {window['detail']})"),
+        ("compact_threshold", str(breakdown.get("threshold", "n/a"))),
+    ]
+    if breakdown:
+        rows.append(("context_messages_tokens", str(breakdown.get("messages_tokens", "n/a"))))
+        rows.append(("context_tool_schema_tokens", str(breakdown.get("tool_schema_tokens", "n/a"))))
+    rows += [
         ("prompt_tokens", str(prompt_tokens)),
         ("cache_read_tokens", f"{cache_read} ({cache_rate} of prompt)"),
         ("completion_tokens", str(completion_tokens)),
@@ -431,6 +439,45 @@ def _token_rows(agent: Agent, ctx: ToolContext) -> list[tuple[str, str]]:
         ("compact_after_messages", str(getattr(ctx.config, "compact_after_messages", 28))),
         ("max_steps", str(getattr(ctx.config, "max_steps", 20))),
     ]
+    return rows
+
+
+def _context_window(agent: Agent, ctx: ToolContext) -> dict[str, str]:
+    """The effective context window and why it was chosen."""
+    fn = getattr(agent, "context_window_info", None)
+    if callable(fn):
+        try:
+            info = fn()
+            return {
+                "window": str(info.window),
+                "source": str(info.source),
+                "detail": str(info.detail),
+            }
+        except Exception:
+            pass
+    from .core.model_windows import resolve_context_window
+
+    resolved = resolve_context_window(
+        model=getattr(ctx.config, "model", ""),
+        base_url=getattr(ctx.config, "base_url", ""),
+        configured=getattr(ctx.config, "context_window", 0) or 0,
+        explicit=bool(getattr(ctx.config, "context_window_explicit", False)),
+    )
+    return {
+        "window": str(resolved.window),
+        "source": str(resolved.source),
+        "detail": str(resolved.detail),
+    }
+
+
+def _token_breakdown(agent: Agent) -> dict:
+    fn = getattr(agent, "token_breakdown", None)
+    if not callable(fn):
+        return {}
+    try:
+        return fn() or {}
+    except Exception:
+        return {}
 
 
 def _reset_conversation(agent: Agent) -> str:

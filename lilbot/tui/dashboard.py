@@ -1713,15 +1713,26 @@ class DashboardUI:
         return min(99, int((estimated_tokens / limit) * 100))
 
     def _model_context_limit(self) -> int:
-        model = self.ctx.config.model.lower()
-        if "deepseek" in model:
-            return 64000
-        if "gpt-4o" in model:
-            return 128000
-        if "gemini" in model:
-            return 1000000
-        # Same window compaction uses, so the bar and the trigger agree.
-        return int(getattr(self.ctx.config, "context_window", 0) or 32000)
+        """The window the context bar divides by.
+
+        Resolved through the same path as the compaction trigger, so the bar
+        and the trigger cannot disagree about how large the window is.
+        """
+        fn = getattr(self.agent, "effective_context_window", None)
+        if callable(fn):
+            try:
+                return int(fn())
+            except Exception:
+                pass
+        from ..core.model_windows import resolve_context_window
+
+        resolved = resolve_context_window(
+            model=getattr(self.ctx.config, "model", ""),
+            base_url=getattr(self.ctx.config, "base_url", ""),
+            configured=getattr(self.ctx.config, "context_window", 0) or 0,
+            explicit=bool(getattr(self.ctx.config, "context_window_explicit", False)),
+        )
+        return resolved.window
 
     def _agent_panel(self):
         width = self._width()

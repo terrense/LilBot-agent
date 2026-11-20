@@ -91,7 +91,9 @@ def _agent(tmp_path: Path, provider, **cfg) -> Agent:
 
 def test_ratio_learns_from_real_usage(tmp_path):
     agent = _agent(tmp_path, _Usage(ratio=2.0))
-    assert agent.context_tokens() == 0  # no signal yet -> caller uses raw estimate
+    # Before any provider answer the runtime still reports an estimate: the
+    # raw message count plus the cost of the tool schemas.
+    assert agent.context_tokens() > 0
     list(agent.run_turn("你好，帮我看看这个问题"))
     info = agent.token_calibration()
     assert info["samples"] == 1

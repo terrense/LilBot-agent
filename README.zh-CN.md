@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](#环境要求)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-4B5563?style=for-the-badge)](#环境要求)
-[![Tests](https://img.shields.io/badge/tests-734%20passing-16A34A?style=for-the-badge)](#开发)
+[![Tests](https://img.shields.io/badge/tests-757%20passing-16A34A?style=for-the-badge)](#开发)
 [![License](https://img.shields.io/badge/license-MIT-7C3AED?style=for-the-badge)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.2.0-DB2777?style=for-the-badge)](CHANGELOG.md)
 
@@ -228,7 +228,7 @@ lilbot/                 运行时包
   skills/               技能 registry 与内置技能
   tui/                  Dashboard 与经典渲染器
 evaluation/             mock/live 评测、基线、trace
-tests/                  734 个通过的测试
+tests/                  757 个通过的测试
 benchmarks/             运行时微基准与结果
 docs/                   架构、设计、评测、指南、素材
 examples/               可运行的小示例
@@ -238,7 +238,7 @@ examples/               可运行的小示例
 ## 开发
 
 ```bash
-python -m pytest tests -q          # 734 passed, 7 skipped
+python -m pytest tests -q          # 757 passed, 7 skipped
 python -m compileall lilbot        # 语法检查
 ruff check lilbot tests            # lint（可选 dev 依赖）
 ```
@@ -259,6 +259,10 @@ CI 在 Ubuntu 和 Windows 上跑 Python 3.10–3.13 的测试矩阵。完整流�
 欢迎 issue 和 pull request。动手前请先读
 [CONTRIBUTING.md](CONTRIBUTING.md) 和 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
 安全问题请走 [SECURITY.md](SECURITY.md)，不要开公开 issue。
+
+[AGENTS.md](AGENTS.md) 是任何改动本仓库的人（包括 AI 助手）都要遵守的工作约定：
+必须守住的规则（不留 AI 署名、不留密钥、不出现第三方项目名），以及每次改动
+都要同步更新 README、变更日志和[开发日志](docs/development-log.md)。
 
 ## 许可证
 

@@ -546,6 +546,7 @@ def auto_compact(
     actual_tokens: int | None = None,
     cache_cold: bool = False,
     message_summarizer: MessageSummarizer | None = None,
+    reserved_tokens: int = 0,
 ) -> CompactResult | None:
     """Compact messages in place-by-return. messages[0] (system) is preserved.
 
@@ -573,8 +574,12 @@ def auto_compact(
     # Prefer the provider's real reported prompt-token count for the trigger
     # decision; fall back to the char/4 estimate. The lesson: trust API usage,
     # estimate only as a backstop.
-    trigger_tokens = actual_tokens if (actual_tokens and actual_tokens > 0) else before
+    # `actual_tokens` already counts the schemas; the raw estimate does not,
+    # so the reserved tokens are added on that path.
+    trigger_tokens = actual_tokens if (actual_tokens and actual_tokens > 0) else before + reserved_tokens
     threshold = compute_threshold(context_window)
+    # The tool schemas travel with every request but are not part of the
+    # message list, so they are reserved against the threshold separately.
     over_threshold = trigger_tokens >= threshold
 
     if not manual:
@@ -603,7 +608,7 @@ def auto_compact(
         # In auto mode, stop here when pruning cleared the pressure (or when the
         # cache is cold and we're only allowed to prune). Manual /compact always
         # proceeds to a summary so the user gets a real handoff.
-        if not manual and (prune_only or after_prune < threshold):
+        if not manual and (prune_only or after_prune + reserved_tokens < threshold):
             if breaker is not None:
                 breaker.record_success()
             return CompactResult(
