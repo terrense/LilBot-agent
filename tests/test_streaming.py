@@ -96,6 +96,23 @@ class StreamParserTests(unittest.TestCase):
         self.assertEqual(call.arguments, {"path": "README.md"})
         self.assertEqual(call.call_id, "call_a")
 
+
+    def test_idless_tool_calls_get_distinct_ids(self):
+        lines = _sse(
+            '{"choices":[{"delta":{"tool_calls":[{"index":0,'
+            '"function":{"name":"read_file","arguments":"{}"}}]}}]}',
+            '{"choices":[{"delta":{"tool_calls":[{"index":1,'
+            '"function":{"name":"list_dir","arguments":"{}"}}]}}]}',
+            "[DONE]",
+        )
+        events = list(_iter_stream_events(lines))
+        final = events[-1].final
+        assert final is not None
+        assert [c.name for c in final.tool_calls] == ["read_file", "list_dir"]
+        ids = [c.call_id for c in final.tool_calls]
+        assert len(set(ids)) == 2
+        assert all(call_id and call_id != "tool" for call_id in ids)
+
     def test_malformed_and_empty_lines_are_skipped(self):
         lines = [
             "",

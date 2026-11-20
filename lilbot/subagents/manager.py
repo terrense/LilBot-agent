@@ -847,8 +847,15 @@ class SubAgentManager:
             if steps >= limit:
                 content = self._step_limit_report(transcript)
                 break
-            messages.append(_assistant_tool_message(turn))
-            for call in turn.tool_calls[: max(0, limit - steps)]:
+            calls_to_run = turn.tool_calls[: max(0, limit - steps)]
+            if not calls_to_run:
+                content = self._step_limit_report(transcript)
+                break
+            # Only the calls we will actually execute go into the assistant
+            # message; a truncated calls list would leave an orphan tool_call
+            # with no matching tool result in the provider history.
+            messages.append(_assistant_tool_message(replace(turn, tool_calls=calls_to_run)))
+            for call in calls_to_run:
                 if progress is not None:
                     progress.record_tool_use(call.name, call.arguments)
                 self._append_transcript(

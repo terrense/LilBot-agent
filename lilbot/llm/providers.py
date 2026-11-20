@@ -369,7 +369,11 @@ def _iter_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
             args = json.loads(slot["args"] or "{}")
         except json.JSONDecodeError:
             args = {"raw": slot["args"]}
-        calls.append(ToolCall(slot["name"], args, slot["id"] or "tool"))
+        calls.append(
+            ToolCall(slot["name"], args, slot["id"])
+            if slot["id"]
+            else ToolCall(slot["name"], args)
+        )
 
     yield StreamEvent(
         final=ProviderTurn(
@@ -530,7 +534,12 @@ class OpenAICompatibleProvider(BaseProvider):
                 args = json.loads(fn.get("arguments") or "{}")
             except json.JSONDecodeError:
                 args = {"raw": fn.get("arguments", "")}
-            calls.append(ToolCall(fn.get("name", ""), args, call.get("id") or "tool"))
+            call_id = str(call.get("id") or "")
+            calls.append(
+                ToolCall(fn.get("name", ""), args, call_id)
+                if call_id
+                else ToolCall(fn.get("name", ""), args)
+            )
         usage = _normalize_usage(data.get("usage") or {})
         content, reasoning = split_inline_think(
             message.get("content") or "", str(message.get("reasoning_content") or "")
