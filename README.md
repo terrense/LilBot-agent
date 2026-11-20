@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-4B5563?style=for-the-badge)](#requirements)
-[![Tests](https://img.shields.io/badge/tests-757%20passing-16A34A?style=for-the-badge)](#development)
+[![Tests](https://img.shields.io/badge/tests-767%20passing-16A34A?style=for-the-badge)](#development)
 [![License](https://img.shields.io/badge/license-MIT-7C3AED?style=for-the-badge)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.2.0-DB2777?style=for-the-badge)](CHANGELOG.md)
 
@@ -164,6 +164,28 @@ Prefix a line with `!` to run a shell command through the permission gate:
 > ! python -m pytest -q
 ```
 
+## Cost and budgets
+
+Token counts are measured by the runtime; money is derived from a local price
+table in `lilbot/core/model_cost.py`. `/tokens` shows the session total, the
+last turn's cost, the price source, and the remaining budget. The dashboard
+status strip shows the same total.
+
+```bash
+python -m lilbot --budget-usd 2.50
+```
+
+- At **80%** of the budget the runtime emits a warning and records a
+  `budget_warning` transition.
+- At **100%** it stops *before* the next provider request, leaving the turn
+  with a clear message instead of a surprise bill.
+- A resumed session restores the accumulated total.
+- An unknown cloud model shows `price unknown`; local endpoints and the
+  offline provider are free.
+
+The price table is a snapshot (`price_table_date` is shown in `/tokens`). It is
+easy to correct in one file, and it is not a billing authority.
+
 ## Architecture
 
 ```mermaid
@@ -257,7 +279,7 @@ lilbot/                 Runtime package
   skills/               Skill registry and bundled skills
   tui/                  Dashboard and classic renderers
 evaluation/             Mock and live evaluation harness, baselines, traces
-tests/                  757 passing tests
+tests/                  767 passing tests
 benchmarks/             Runtime micro-benchmarks and results
 docs/                   Architecture, design, evaluation, guides, assets
 examples/               Small runnable demos
@@ -267,7 +289,7 @@ examples/               Small runnable demos
 ## Development
 
 ```bash
-python -m pytest tests -q          # 757 passed, 7 skipped
+python -m pytest tests -q          # 767 passed, 7 skipped
 python -m compileall lilbot        # syntax check
 ruff check lilbot tests            # lint (optional dev dependency)
 ```

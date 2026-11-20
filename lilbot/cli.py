@@ -148,6 +148,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url", default=None, help="OpenAI-compatible endpoint base URL (overrides the provider preset).")
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--permission-mode", choices=["ask", "accept-all", "deny-all"], default=None)
+    parser.add_argument(
+        "--budget-usd", type=float, default=None,
+        help="Stop before the next request once estimated session spend reaches this USD amount.",
+    )
     parser.add_argument("--font-size", type=int, default=None, help="Request a Windows console font size for the TUI.")
     parser.add_argument("--print", action="store_true", dest="print_mode", help="Run one prompt and exit.")
     parser.add_argument("--classic", action="store_true", help="Use the legacy printed Rich interface.")
@@ -314,6 +318,8 @@ def apply_args(cfg: LilBotConfig, args: argparse.Namespace) -> LilBotConfig:
         cfg.api_key = args.api_key
     if args.permission_mode:
         cfg.permission_mode = args.permission_mode
+    if getattr(args, "budget_usd", None) is not None:
+        cfg.budget_usd = args.budget_usd if args.budget_usd > 0 else None
     if args.font_size is not None:
         cfg.font_size = max(0, args.font_size)
     return cfg
@@ -431,6 +437,21 @@ def _token_rows(agent: Agent, ctx: ToolContext) -> list[tuple[str, str]]:
     if breakdown:
         rows.append(("context_messages_tokens", str(breakdown.get("messages_tokens", "n/a"))))
         rows.append(("context_tool_schema_tokens", str(breakdown.get("tool_schema_tokens", "n/a"))))
+    cost = _cost_info(agent)
+    if cost:
+        rows.append(("cost_usd_total", f"${float(cost.get('total_usd', 0.0)):.6f}"))
+        rows.append(("cost_usd_last_turn", f"${float(cost.get('last_turn_usd', 0.0)):.6f}"))
+        budget = cost.get("budget_usd")
+        rows.append(("budget_usd", f"${float(budget):.4f}" if budget else "none"))
+        price = cost.get("price")
+        if price:
+            rows.append(("price_model", str(cost.get("model") or "")))
+            rows.append(("price_input_per_million", f"${price.get('input_per_million')}"))
+            rows.append(("price_output_per_million", f"${price.get('output_per_million')}"))
+            rows.append(("price_cache_read_per_million", f"${price.get('cache_read_per_million')}"))
+            rows.append(("price_table_date", str(price.get("table_date") or "")))
+        else:
+            rows.append(("price_model", f"{cost.get('model')} (price unknown)"))
     rows += [
         ("prompt_tokens", str(prompt_tokens)),
         ("cache_read_tokens", f"{cache_read} ({cache_rate} of prompt)"),
@@ -468,6 +489,16 @@ def _context_window(agent: Agent, ctx: ToolContext) -> dict[str, str]:
         "source": str(resolved.source),
         "detail": str(resolved.detail),
     }
+
+
+def _cost_info(agent: Agent) -> dict:
+    fn = getattr(agent, "cost_info", None)
+    if not callable(fn):
+        return {}
+    try:
+        return fn() or {}
+    except Exception:
+        return {}
 
 
 def _token_breakdown(agent: Agent) -> dict:

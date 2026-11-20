@@ -72,6 +72,24 @@ python -m lilbot --provider my-server --base-url http://10.0.0.5:8080/v1 --model
   A 404 usually means the model id or base URL is wrong. A 400 with a tool-schema
   message usually means the model does not support the tools you enabled.
 
+## Cost and budgets
+
+LilBot measures tokens itself and converts them to USD with a local price table
+(`lilbot/core/model_cost.py`). The table is a snapshot, not a billing
+authority; `/tokens` shows the price source and the table date.
+
+```bash
+python -m lilbot --budget-usd 2.50
+```
+
+- 80% of the budget: a warning is emitted and a `budget_warning` transition is
+  recorded.
+- 100%: the runtime stops before the next provider request. The turn that
+  already ran is preserved and the reason is visible in `/tokens`.
+- `--resume` restores the accumulated total; `/clear` resets it.
+- Unknown cloud models show `price unknown`; a local endpoint and the offline
+  provider are free.
+
 ## Offline provider
 
 `--provider mock` uses a deterministic rule-based provider. It can call a small

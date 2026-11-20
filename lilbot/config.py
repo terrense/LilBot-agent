@@ -31,6 +31,9 @@ class LilBotConfig:
     # True when the operator actually chose a window (LILBOT_CONTEXT_WINDOW),
     # so an explicit choice is never overridden by the model table.
     context_window_explicit: bool = False
+    # Optional session budget in USD. None/0 disables it. The agent checks the
+    # accumulated estimate before every provider call: 80% warns, 100% stops.
+    budget_usd: float | None = None
     auto_diagnostics: bool = True
     auto_allow_safe_commands: bool = True
     verbose: bool = False
@@ -148,6 +151,12 @@ def apply_env_overrides(cfg: LilBotConfig) -> LilBotConfig:
     if _env("LILBOT_CONTEXT_WINDOW"):
         cfg.context_window = max(8_000, _env_int("LILBOT_CONTEXT_WINDOW", cfg.context_window))
         cfg.context_window_explicit = True
+    if _env("LILBOT_BUDGET_USD"):
+        try:
+            value = float(_env("LILBOT_BUDGET_USD"))
+            cfg.budget_usd = value if value > 0 else None
+        except ValueError:
+            pass
     if _env("LILBOT_STREAM"):
         cfg.stream_output = _env("LILBOT_STREAM").strip().lower() not in {"0", "false", "no", "off"}
     if _env("LILBOT_MAX_RETRIES"):

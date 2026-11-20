@@ -2003,14 +2003,31 @@ class DashboardUI:
             return self._busy_status_strip()
         model = self._model_badge()
         context_pct = self._context_percent()
+        cost_text = self._cost_text()
         return FormattedText(
             [
                 ("class:toolbar", " "),
                 ("class:hotkey", model),
-                ("class:toolbar", f" ready   ctx {context_pct:02d}%   "),
+                ("class:toolbar", f" ready   ctx {context_pct:02d}%{cost_text}   "),
                 ("class:wave", "▁▁▁▁▁▁▁▁▁▁"),
             ]
         )
+
+    def _cost_text(self) -> str:
+        fn = getattr(self.agent, "cost_info", None)
+        if not callable(fn):
+            return ""
+        try:
+            info = fn() or {}
+        except Exception:
+            return ""
+        total = float(info.get("total_usd", 0.0) or 0.0)
+        if total <= 0:
+            return ""
+        budget = info.get("budget_usd")
+        if budget:
+            return f"   ${total:.4f}/${float(budget):.2f}"
+        return f"   ${total:.4f}"
 
     def _busy_status_strip(self):
         frame = WAVE_FRAMES[self.wave_index % len(WAVE_FRAMES)]

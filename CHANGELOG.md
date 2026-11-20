@@ -8,6 +8,16 @@ All notable changes to LilBot are documented here. The format follows
 
 ### Added
 
+- A local USD price table (`lilbot/core/model_cost.py`) with per-model input,
+  cache-read, and output prices. `/tokens` shows session and last-turn cost,
+  the budget, and the price source; the dashboard status strip shows the same
+  total.
+- `--budget-usd` / `LILBOT_BUDGET_USD`: warn at 80% and stop before the next
+  provider request at 100%. `--resume` restores the accumulated total.
+- Exact tool-call identity: id-less streaming and non-streaming calls receive a
+  unique id, and a subagent step limit only serializes the calls that actually
+  execute.
+
 - A per-model context-window table and resolver (`lilbot/core/model_windows.py`).
   The window is derived from the model, so a 64k endpoint no longer gets the
   128k default budget, and the compaction trigger and the context bar now use
@@ -31,7 +41,7 @@ All notable changes to LilBot are documented here. The format follows
 
 ### Changed
 
-- Test suite: 757 passed, 7 skipped.
+- Test suite: 767 passed, 7 skipped.
 
 ## [0.2.0] - 2026-11-19
 

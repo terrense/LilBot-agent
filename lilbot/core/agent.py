@@ -33,6 +33,7 @@ from .delegation import (
 from .eventlog import EventLog
 from .guardrails import GuardrailNotice, ToolCallGuardrailController
 from .history import FileHistory
+from .model_cost import estimate_cost, price_for
 from .model_windows import ContextWindow, resolve_context_window
 from .session import SessionStore, interrupted_tool_result_messages
 from .session_memory import SessionMemory
@@ -172,6 +173,10 @@ class _TurnInterrupted(Exception):
         self.partial_text = partial_text
 
 
+class BudgetExceeded(RuntimeError):
+    """The session's USD budget is exhausted; stop before the next request."""
+
+
 class Agent:
     def __init__(
         self,
@@ -286,11 +291,19 @@ class Agent:
         # discovered deferred tool).
         self._schema_tokens = 0
         self._sent_schema_tokens = 0
+        # USD accounting. The table is a local snapshot; unknown models keep
+        # cost at None rather than pretending to be free.
+        self._cost_total = 0.0
+        self._cost_last_turn = 0.0
+        self._budget_warned = False
+        self._pricing_model = self.config.model
 
     def run_turn(self, user_text: str) -> Iterator[object]:
         """One user turn. A failure (provider error, Ctrl+C) still persists the
         messages gathered so far before the exception propagates."""
         self._turn_provider = None  # every turn starts on the main model again
+        self._pricing_model = self.config.model
+        self._cost_last_turn = 0.0
         self._interrupt_event.clear()
         self._tool_guardrails.reset()
         if self.sessions is not None:
@@ -420,6 +433,15 @@ class Agent:
             render_ctx = self.ctx.subagents.get_render_context() if getattr(self.ctx, "subagents", None) else None
             try:
                 turn, streamed = yield from self._stream_turn(render_ctx)
+            except BudgetExceeded as exc:
+                self._append(self._assistant_content_message(str(exc), ""))
+                self._fire_turn_end()
+                self._maybe_extract()
+                self._maybe_update_session_memory()
+                self._persist_session()
+                self._log_turn_finished(steps, "budget_exceeded")
+                yield TurnFinished(steps, dict(self.usage))
+                return
             except _TurnInterrupted as exc:
                 yield from self._finish_interrupted(steps, exc.partial_text)
                 return
@@ -726,6 +748,7 @@ class Agent:
         with self._messages_lock:
             self.messages = messages
         self.usage = dict(data.get("usage") or {})
+        self._cost_total = float(self.usage.get("cost_usd", 0.0) or 0.0)
         self.session_id = sid
         # Let the first post-resume append re-check/seed SQLite. This is a no-op
         # for a DB-backed session and also covers a legacy JSON session whose
@@ -1272,6 +1295,9 @@ class Agent:
             {"role": "system", "content": build_system_prompt(self.ctx.memory, self.ctx.skills)}
         ]
         self.usage.clear()
+        self._cost_total = 0.0
+        self._cost_last_turn = 0.0
+        self._budget_warned = False
         self._replace_messages(messages)
         return "Conversation reset. Messages now: 1"
 
@@ -1303,6 +1329,47 @@ class Agent:
         self.compact(manual=False)
         if len(self.messages) > self.config.compact_after_messages * 4:
             self.compact(manual=True)
+
+    def cost_info(self) -> dict[str, object]:
+        """How much this session has spent, and against what price table."""
+        price = price_for(self._pricing_model or self.config.model, self.config.base_url)
+        return {
+            "total_usd": round(self._cost_total, 6),
+            "last_turn_usd": round(self._cost_last_turn, 6),
+            "budget_usd": getattr(self.config, "budget_usd", None),
+            "model": self._pricing_model or self.config.model,
+            "price": price.as_dict() if price is not None else None,
+            "price_unknown": price is None,
+        }
+
+    def _ensure_cost_budget(self) -> str | None:
+        """Check the USD budget before a request.
+
+        Returns a warning string at 80%, or raises ``BudgetExceeded`` at 100%.
+        A budget is a hard stop checked *before* the next request, so the
+        provider is never called once the ceiling is reached.
+        """
+        budget = getattr(self.config, "budget_usd", None)
+        if not budget or budget <= 0:
+            return None
+        if self._cost_total >= budget:
+            raise BudgetExceeded(
+                f"USD budget reached: ${self._cost_total:.4f} of ${budget:.4f}. "
+                "Increase --budget-usd or start a new session."
+            )
+        if self._cost_total >= budget * 0.8 and not self._budget_warned:
+            self._budget_warned = True
+            self._record_transition("budget_warning")
+            self.events.log(
+                "cost_warning",
+                total_usd=round(self._cost_total, 6),
+                budget_usd=round(float(budget), 6),
+            )
+            return (
+                f"Budget warning: ${self._cost_total:.4f} of ${budget:.4f} used "
+                f"({self._cost_total / budget * 100:.0f}%)."
+            )
+        return None
 
     def _ensure_context_budget(self) -> None:
         """Check the budget before every provider call.
@@ -1378,9 +1445,12 @@ class Agent:
             # Count the schemas before the budget check: a newly discovered
             # deferred tool makes the next request bigger.
             self._update_schema_tokens(schemas)
-            # Budget check first: it may compact, and the messages have to be
-            # built after that so the request carries the compacted history.
+            # Budget checks first: compaction may rewrite history, and a spent
+            # USD budget must stop before the request is sent.
             self._ensure_context_budget()
+            cost_warning = self._ensure_cost_budget()
+            if cost_warning:
+                yield TextDelta(cost_warning, interim=True)
             messages = self._provider_messages()
             self._note_request_size(messages, schemas)
             try:
@@ -1444,6 +1514,7 @@ class Agent:
             if stale is not None:
                 stale.close()
         self._turn_provider = self._fallback_provider
+        self._pricing_model = model
         return True
 
     def _build_fallback_provider(self, config: LilBotConfig) -> BaseProvider:
@@ -1548,6 +1619,12 @@ class Agent:
                 # adds schema growth, not the schemas twice.
                 self._sent_schema_tokens = self._schema_tokens
                 self._calibrate_estimate(prompt_tokens)
+            price = price_for(self._pricing_model or self.config.model, self.config.base_url)
+            if price is not None:
+                estimate = estimate_cost(turn.usage, price)
+                self._cost_total += estimate.total_cost_usd
+                self._cost_last_turn += estimate.total_cost_usd
+                self.usage["cost_usd"] = round(self._cost_total, 6)
             self._last_activity_ts = time.time()
 
     # --- token estimate calibration ------------------------------------------

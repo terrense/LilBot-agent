@@ -13,6 +13,59 @@ Each entry follows the same shape:
 
 ---
 
+## 2026-11-20 · S7/S8 — Visible cost and exact tool-call identity
+
+**What**
+
+- `lilbot/core/model_cost.py` (new): a local USD price table, a price resolver,
+  and `estimate_cost()` (uncached input, cache reads, and output are priced
+  separately).
+- `lilbot/config.py`: `budget_usd` and `LILBOT_BUDGET_USD`.
+- `lilbot/core/agent.py`: cost accumulates on every provider response; the
+  guard checks the budget before every request (80% warning, 100% stop);
+  `--resume` restores the total; `/clear` resets it.
+- `lilbot/cli.py`: `--budget-usd`, and `/tokens` now shows total/last-turn
+  cost, the budget, and the price source.
+- `lilbot/tui/dashboard.py`: the status strip shows the same total.
+- `lilbot/llm/providers.py`: id-less streamed and non-streamed tool calls keep
+  their unique default id instead of collapsing to the literal `"tool"`.
+- `lilbot/subagents/manager.py`: at a step limit, only the calls that actually
+  execute are serialized into the assistant message, so no orphan `tool_call`
+  reaches the provider.
+
+**Why**
+
+Two different trust failures:
+
+1. **Cost was invisible.** Token counts existed, but an operator could not see
+   what a session cost, and nothing stopped a runaway turn. A budget that is
+   checked *after* the request is a bill, not a budget.
+2. **Tool-call identity was not unique.** Providers that omit ids produced the
+   same `"tool"` for every call; the second result could be dropped or paired
+   with the wrong call. The same class of bug appeared at a subagent step
+   limit, where an assistant message could carry a `tool_call` with no matching
+   `tool_result`.
+
+**Consequence**
+
+- Cost is a first-class number next to tokens, with the same source of truth
+  for the operator and the enforcement path.
+- The budget stops the *next* request; the turn that already ran is preserved
+  and the reason is visible in `/tokens`.
+- Every tool call in provider history has a unique id and a matching result.
+  Replay and transcript inspection no longer depend on a coincidence of
+  ordering.
+- The price table is deliberately local and dated. Unknown models say
+  `price unknown`; the runtime never invents a zero.
+
+**Measurement**
+
+`tests/test_cost.py` covers the price resolver, the cost split, accumulation,
+the 80% warning, the 100% stop, and reset. `tests/test_streaming.py` covers two
+id-less calls. `tests/test_subagent_lifecycle.py` covers the step-limit pairing.
+
+---
+
 ## 2026-11-20 · S5/S6 — Context accounting that matches the real window
 
 **What**
