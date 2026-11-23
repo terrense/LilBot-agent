@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-4B5563?style=for-the-badge)](#requirements)
-[![Tests](https://img.shields.io/badge/tests-767%20passing-16A34A?style=for-the-badge)](#development)
+[![Tests](https://img.shields.io/badge/tests-792%20passing-16A34A?style=for-the-badge)](#development)
 [![License](https://img.shields.io/badge/license-MIT-7C3AED?style=for-the-badge)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.2.0-DB2777?style=for-the-badge)](CHANGELOG.md)
 
@@ -238,6 +238,24 @@ LilBot assumes the model can be wrong, curious, or manipulated:
   workspace, but the shell is still a host process. For untrusted code, add a
   container or VM around it.
 
+## Failure recovery
+
+A turn classifies every provider failure and recovers in a fixed order:
+
+1. **Context overflow** — local prune/compact first, then a bounded reactive
+   compact.
+2. **Transient** — 429/5xx/timeouts/network errors back off and retry, honoring
+   `Retry-After`.
+3. **Fallback** — a configured fallback model serves the rest of the turn, once.
+4. **Explicit failure** — when every step is exhausted, the error is surfaced.
+
+Recoverable errors keep the partial text the user already saw, but mark it
+incomplete and never persist it as a final answer. A response cut off at the
+output limit resumes from the breakpoint (bounded); exhausted truncation ends
+with an explicit `output_truncated` outcome instead of a silent success. A
+20+ case recovery matrix injects SSE error frames, 413, 429/5xx, timeouts,
+truncation, compaction failure, and fallback failure.
+
 ## Evaluation
 
 LilBot ships an evaluation harness rather than a leaderboard claim. The included
@@ -279,7 +297,7 @@ lilbot/                 Runtime package
   skills/               Skill registry and bundled skills
   tui/                  Dashboard and classic renderers
 evaluation/             Mock and live evaluation harness, baselines, traces
-tests/                  767 passing tests
+tests/                  792 passing tests
 benchmarks/             Runtime micro-benchmarks and results
 docs/                   Architecture, design, evaluation, guides, assets
 examples/               Small runnable demos
@@ -289,7 +307,7 @@ examples/               Small runnable demos
 ## Development
 
 ```bash
-python -m pytest tests -q          # 767 passed, 7 skipped
+python -m pytest tests -q          # 792 passed, 7 skipped
 python -m compileall lilbot        # syntax check
 ruff check lilbot tests            # lint (optional dev dependency)
 ```

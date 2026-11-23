@@ -13,6 +13,54 @@ Each entry follows the same shape:
 
 ---
 
+## 2026-11-23 · S9 — Withheld errors and an ordered recovery chain
+
+**What**
+
+- `lilbot/llm/providers.py`: a streamed SSE `error` frame is classified as a
+  server failure (`reason="server_error"`), so the retry/fallback chain can own
+  it.
+- `lilbot/core/agent.py`:
+  - classification happens before the "partial text was emitted" decision, so a
+    classified failure after partial output is still recoverable;
+  - the chain is ordered: context compact -> bounded retries -> fallback ->
+    explicit failure;
+  - a failed compaction falls back when a fallback model exists, otherwise
+    raises a structured error;
+  - partial text is attached to the exception by `_drive_stream`, preserved
+    across attempts, and persisted with an explicit "incomplete" marker;
+  - exhausted output truncation (text or a tool call) ends with an
+    `output_truncated` outcome instead of a completed turn.
+- `tests/test_recovery_matrix.py` (new): 22 injected cases covering SSE errors,
+  413/429/5xx, timeout, network, auth/format, truncation, compaction failure,
+  and fallback failure.
+
+**Why**
+
+The old rule "if any text was emitted, re-raise immediately" made the most
+common real failure — a transient error after a few streamed tokens — the one
+case the runtime could not recover. The opposite failure is worse: a turn cut
+off at `max_tokens` was appended and reported as `completed`, so a partial
+answer could be read as a finished one. Both are failure-path bugs, not model
+quality.
+
+**Consequence**
+
+- The user keeps the partial text, but the transcript explicitly says it is
+  incomplete. A later turn, a resumed session, or a reviewer cannot mistake it
+  for a final answer.
+- A transient failure after partial output now retries/falls back like any
+  other transient failure; the recovery is visible as a `ProviderRetry` event.
+- An exhausted truncation is a non-success outcome, not a silent completion.
+- The recovery matrix turns "the chain works" into a measured claim: 22/22
+  cases either recover or end in an explicit non-success state.
+
+**Measurement**
+
+`tests/test_recovery_matrix.py`; the suite is 792 passed / 7 skipped.
+
+---
+
 ## 2026-11-20 · S7/S8 — Visible cost and exact tool-call identity
 
 **What**

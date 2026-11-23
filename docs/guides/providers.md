@@ -72,6 +72,21 @@ python -m lilbot --provider my-server --base-url http://10.0.0.5:8080/v1 --model
   A 404 usually means the model id or base URL is wrong. A 400 with a tool-schema
   message usually means the model does not support the tools you enabled.
 
+## Failure recovery
+
+Every provider failure is classified before it is shown to the user. The chain
+is ordered and bounded:
+
+1. context overflow -> local prune/compact, then a bounded reactive compact;
+2. 429/5xx/timeout/network -> backoff retry (honors `Retry-After`);
+3. a configured fallback model -> the rest of the turn, once;
+4. exhausted -> the classified error is surfaced.
+
+A failure after partial output does not lose the text: the partial answer is
+kept, marked incomplete, and never saved as a final answer. A response cut off
+at the output limit resumes from the breakpoint; exhausted truncation ends with
+an explicit `output_truncated` outcome.
+
 ## Cost and budgets
 
 LilBot measures tokens itself and converts them to USD with a local price table

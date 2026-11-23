@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](#环境要求)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-4B5563?style=for-the-badge)](#环境要求)
-[![Tests](https://img.shields.io/badge/tests-767%20passing-16A34A?style=for-the-badge)](#开发)
+[![Tests](https://img.shields.io/badge/tests-792%20passing-16A34A?style=for-the-badge)](#开发)
 [![License](https://img.shields.io/badge/license-MIT-7C3AED?style=for-the-badge)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.2.0-DB2777?style=for-the-badge)](CHANGELOG.md)
 
@@ -210,6 +210,20 @@ LilBot 假设模型会犯错、会好奇、也可能被提示注入操纵：
 - **密钥不可达。** 模型发起的子进程默认剥离 `*_KEY`、`*_TOKEN`、`*_SECRET`、`*_PASSWORD`；读取密钥变量或 `.env` 的命令永不自动放行；工具输出在回灌模型前替换已知密钥原值。
 - **沙箱是边界，不是容器。** 路径必须落在 workspace 内，但 Shell 仍然是宿主进程。跑不可信代码时，请在外面再加容器或虚拟机。
 
+## 失败恢复
+
+每个 provider 失败都会先分类，再按固定顺序恢复：
+
+1. **上下文溢出**：先本地裁剪/压缩，再有界地做一次反应式压缩。
+2. **瞬时错误**：429/5xx/超时/网络错误退避重试，遵守 `Retry-After`。
+3. **降级**：配置了 fallback 模型时，本回合剩余部分切过去，只切一次。
+4. **显式失败**：所有步骤耗尽才把错误抛给用户。
+
+可恢复的错误会保留用户已经看到的半截文本，但明确标记为不完整，**绝不**把它
+持久化成最终答案。输出被 max tokens 截断时从断点续写（有界）；续写耗尽后以
+显式的 `output_truncated` 结束，而不是静默成功。测试里有一个 20+ 例的恢复
+矩阵，注入 SSE error、413、429/5xx、超时、截断、摘要失败和 fallback 失败。
+
 ## 评测
 
 LilBot 提供评测工具，不提供排行榜口号。内置 live suite 有 24 个 trial，覆盖读取、搜索、编辑、错误恢复、护栏、权限、记忆和上下文任务。
@@ -246,7 +260,7 @@ lilbot/                 运行时包
   skills/               技能 registry 与内置技能
   tui/                  Dashboard 与经典渲染器
 evaluation/             mock/live 评测、基线、trace
-tests/                  767 个通过的测试
+tests/                  792 个通过的测试
 benchmarks/             运行时微基准与结果
 docs/                   架构、设计、评测、指南、素材
 examples/               可运行的小示例
@@ -256,7 +270,7 @@ examples/               可运行的小示例
 ## 开发
 
 ```bash
-python -m pytest tests -q          # 767 passed, 7 skipped
+python -m pytest tests -q          # 792 passed, 7 skipped
 python -m compileall lilbot        # 语法检查
 ruff check lilbot tests            # lint（可选 dev 依赖）
 ```

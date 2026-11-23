@@ -322,7 +322,9 @@ def _iter_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
             raise ProviderError(
                 f"provider stream returned an error: {detail}"
                 + (f" (code={code})" if code else ""),
-                reason="provider",
+                # A streamed error frame is a server-side failure: retry it,
+                # then fall back if the endpoint keeps failing.
+                reason="server_error",
             )
 
         raw_usage = obj.get("usage")

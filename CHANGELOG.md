@@ -41,7 +41,20 @@ All notable changes to LilBot are documented here. The format follows
 
 ### Changed
 
-- Test suite: 767 passed, 7 skipped.
+- Test suite: 792 passed, 7 skipped.
+
+### Fixed
+
+- Provider failures are classified and recovered in order (compact, retry,
+  fallback) instead of surfacing as an immediate error. A recoverable failure
+  after partial text keeps the text but marks it incomplete and never persists
+  it as a final answer.
+- Exhausted output truncation now ends with an explicit `output_truncated`
+  outcome instead of presenting the cut-off text as a completed answer.
+- SSE error frames are classified as server failures so the retry/fallback
+  chain can handle them.
+- A failed compaction falls back to the fallback model when available, and
+  otherwise raises a structured error with the partial text preserved.
 
 ## [0.2.0] - 2026-11-19
 

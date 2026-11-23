@@ -149,7 +149,7 @@ class SideQueryPrefetch:
 
 
 from ..llm.errors import classify
-from ..llm.providers import BaseProvider, choose_provider
+from ..llm.providers import BaseProvider, ProviderError, choose_provider
 from ..llm.retry import retry_delay
 from ..tools import ToolContext, ToolRegistry, ToolResult
 from ..tools.registry import ToolCapability
@@ -471,12 +471,19 @@ class Agent:
                     or "The response was truncated while emitting a tool call. The call was not executed.",
                     turn.reasoning_content,
                 ))
+                self._append({
+                    "role": "system",
+                    "content": (
+                        "The response was cut off at the output token limit while emitting a "
+                        "tool call. The call was NOT executed; the assistant text above is incomplete."
+                    ),
+                })
                 self._fire_turn_end()
                 self._maybe_extract()
                 self._maybe_update_session_memory()
                 self._persist_session()
                 self._log_turn_finished(steps, "truncated_tool_call")
-                yield TurnFinished(steps, dict(self.usage))
+                yield TurnFinished(steps, dict(self.usage), outcome="output_truncated")
                 return
             if not turn.tool_calls:
                 self._append(self._assistant_content_message(turn.content, turn.reasoning_content))
@@ -495,6 +502,23 @@ class Agent:
                         ),
                     })
                     continue
+                if turn.finish_reason == "length":
+                    # Recovery is exhausted. Keep the text, but mark it as
+                    # incomplete instead of presenting a cut-off answer as done.
+                    self._append({
+                        "role": "system",
+                        "content": (
+                            "The response was cut off at the output token limit after repeated "
+                            "resume attempts. The assistant text above is incomplete."
+                        ),
+                    })
+                    self._fire_turn_end()
+                    self._maybe_extract()
+                    self._maybe_update_session_memory()
+                    self._persist_session()
+                    self._log_turn_finished(steps, "output_truncated")
+                    yield TurnFinished(steps, dict(self.usage), outcome="output_truncated")
+                    return
                 # Then consult stop hooks: one may force the model to keep working
                 # (the stop-hook path), bounded so a misbehaving hook can't spin.
                 cont = self._run_stop_hook()
@@ -1430,6 +1454,7 @@ class Agent:
         """
         overflow_attempts = 0
         retries = 0
+        partial_text = ""
         while True:
             self._raise_if_interrupted()
             progress = {"emitted": False}
@@ -1467,16 +1492,45 @@ class Agent:
             except Exception as exc:
                 if self._interrupt_event.is_set():
                     raise _TurnInterrupted() from exc
-                if progress["emitted"]:
-                    raise
                 info = classify(exc)
+                current_partial = getattr(exc, "partial_text", "")
+                if current_partial:
+                    partial_text = current_partial
+                recoverable = bool(
+                    info.should_compress
+                    or info.retryable
+                    or info.should_fallback
+                    or self._is_overflow_error(exc)
+                )
+                # A partial answer can still be recovered for a classified
+                # failure: keep the text, run the ordered chain, and only
+                # expose the error when every step is exhausted. A non-
+                # recoverable failure (auth, malformed request) is surfaced now.
+                if progress["emitted"] and not recoverable:
+                    self._preserve_partial_text(partial_text, exc)
+                    raise
                 if info.should_compress or self._is_overflow_error(exc):
                     if overflow_attempts >= MAX_OVERFLOW_RECOVERIES:
+                        if self._activate_fallback():
+                            self._record_transition("fallback_after_overflow")
+                            continue
+                        self._preserve_partial_text(partial_text, exc)
                         raise
                     overflow_attempts += 1
                     self._record_transition("reactive_compact_retry")
                     # Reactive compaction: bypass the token floor and summarize now.
-                    self.compact(manual=True)
+                    try:
+                        self.compact(manual=True)
+                    except Exception as compact_exc:
+                        self._record_transition("reactive_compact_failed")
+                        self.events.log("compaction_error", error=type(compact_exc).__name__)
+                        if self._activate_fallback():
+                            self._record_transition("fallback_after_compact_failure")
+                            continue
+                        self._preserve_partial_text(partial_text, exc)
+                        raise ProviderError(
+                            f"Context compaction failed: {compact_exc}", reason="format_error"
+                        ) from compact_exc
                     continue
                 if info.retryable and retries < self._max_retries():
                     retries += 1
@@ -1490,7 +1544,34 @@ class Agent:
                     self._record_transition(f"fallback_{info.reason.value}")
                     yield ProviderRetry(info.reason.value, "fallback", detail=self.config.fallback_model)
                     continue
+                self._preserve_partial_text(partial_text, exc)
                 raise
+
+    def _preserve_partial_text(self, text: str, exc: BaseException) -> None:
+        """Persist text the user already saw, marked as incomplete.
+
+        The turn failed, so this must never be read as a final answer. The
+        marker is a system message immediately after the partial text; the
+        event log records the failure for the evaluation harness.
+        """
+        if not text.strip():
+            return
+        self._append(self._assistant_content_message(text, ""))
+        self._append({
+            "role": "system",
+            "content": (
+                "The previous assistant text is incomplete: the provider failed "
+                f"before the turn finished ({type(exc).__name__}: {_brief_error(exc)}). "
+                "Do not treat it as a final answer."
+            ),
+        })
+        self._persist_session()
+        self.events.log(
+            "turn_error",
+            turn=self._turn_count,
+            error=type(exc).__name__,
+            partial_chars=len(text),
+        )
 
     def _max_retries(self) -> int:
         return max(0, int(getattr(self.config, "max_retries", 3) or 0))
@@ -1586,6 +1667,12 @@ class Agent:
         except Exception as exc:
             if self._interrupt_event.is_set():
                 raise _TurnInterrupted("".join(parts)) from exc
+            # Preserve what the user already saw. The turn is not complete, so
+            # the caller must not present this text as a finished answer.
+            try:
+                exc.partial_text = "".join(parts)
+            except Exception:
+                pass
             raise
         finally:
             if self._interrupt_event.is_set():

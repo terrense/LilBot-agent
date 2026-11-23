@@ -11,7 +11,7 @@ import pytest
 
 from lilbot.config import LilBotConfig, apply_env_overrides
 from lilbot.core.agent import Agent
-from lilbot.core.events import ProviderRetry, ProviderTurn, StreamEvent, TurnFinished
+from lilbot.core.events import ProviderRetry, ProviderTurn, StreamEvent, TextDelta, TurnFinished
 from lilbot.llm.errors import FailoverReason, classify
 from lilbot.llm.providers import OpenAICompatibleProvider, ProviderError
 from lilbot.llm.retry import jittered_backoff, parse_retry_after, retry_delay
@@ -243,13 +243,33 @@ def test_failed_turn_is_persisted(tmp_path):
     assert any(m.get("content") == "remember this question" for m in saved["messages"])
 
 
-def test_no_retry_after_text_was_streamed(tmp_path):
-    # The user already saw "Hal"; replaying would print it twice.
+def test_recoverable_error_after_text_is_retried(tmp_path):
+    # A classified transient failure is recoverable even after the user saw a
+    # partial line; the partial stays interim and the retry supplies the final.
     provider = _Scripted(_err(503), partial="Hal")
     agent, sleeps = _agent(tmp_path, provider)
+    events = list(agent.run_turn("hello"))
+    assert provider.calls == 2 and len(sleeps) == 1
+    assert any(isinstance(e, TextDelta) and e.text == "Hal" for e in events)
+    assert agent.messages[-1]["content"] == "ok"
+
+
+def test_nonrecoverable_error_after_text_is_not_retried_and_preserves_partial(tmp_path):
+    # Auth cannot be fixed by replaying; keep the text, mark it incomplete,
+    # and surface the error.
+    provider = _Scripted(_err(401, "invalid api key"), partial="Hal")
+    agent, sleeps = _agent(tmp_path, provider, fallback_model="backup")
     with pytest.raises(ProviderError):
         list(agent.run_turn("hello"))
     assert provider.calls == 1 and sleeps == []
+    assert any(
+        m.get("role") == "assistant" and "Hal" in str(m.get("content"))
+        for m in agent.messages
+    )
+    assert any(
+        m.get("role") == "system" and "incomplete" in str(m.get("content"))
+        for m in agent.messages
+    )
 
 
 def test_hidden_stream_can_still_be_retried(tmp_path):
