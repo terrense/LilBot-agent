@@ -41,7 +41,7 @@ All notable changes to LilBot are documented here. The format follows
 
 ### Changed
 
-- Test suite: 792 passed, 7 skipped.
+- Test suite: 819 passed, 7 skipped.
 
 ### Fixed
 

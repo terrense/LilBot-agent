@@ -17,6 +17,7 @@ from .compaction import (
     SUMMARY_INSTRUCTION,
     CompactCircuitBreaker,
     RecoveryState,
+    SessionMemoryState,
     auto_compact,
     compute_threshold,
     estimate_tokens,
@@ -36,7 +37,12 @@ from .history import FileHistory
 from .model_cost import estimate_cost, price_for
 from .model_windows import ContextWindow, resolve_context_window
 from .session import SessionStore, interrupted_tool_result_messages
-from .session_memory import SessionMemory
+from .session_memory import (
+    SESSION_MEMORY_NOTE_TITLE,
+    SESSION_MEMORY_TOKEN_THRESHOLD,
+    SESSION_MEMORY_TOOL_CALL_THRESHOLD,
+    SessionMemory,
+)
 from .tool_budget import ToolBudgetState, enforce_tool_result_budget
 
 # Tools that mutate a file at a `path` arg — snapshot before they run so /rewind
@@ -53,6 +59,10 @@ MAX_DIAGNOSED_FILES = 5
 MEMORY_EXTRACTION_INTERVAL = 3
 
 # How often (in turns) to refresh the session-memory living document (#12).
+# A turn count alone is a poor clock: one turn can add a hundred tool calls or
+# none at all. The document is also refreshed when the *content* since the last
+# refresh crosses a token or tool-call threshold, so it stays current relative
+# to the work rather than relative to the calendar.
 SESSION_MEMORY_UPDATE_INTERVAL = 4
 
 def _extract_json_object(raw: str) -> dict[str, Any] | None:
@@ -234,6 +244,20 @@ class Agent:
         self.session_memory = SessionMemory(state_dir)
         self._sm_lock = threading.Lock()
         self._sm_thread: threading.Thread | None = None
+        # Coverage accounting for the living document. The counters are
+        # monotone: the agent only ever adds to them, and a successful
+        # document write records where they stood. The difference between
+        # "now" and "at the last write" is how much conversation the document
+        # has not seen yet — which is what decides whether it may stand in
+        # for a summary at compaction time.
+        self._sm_tokens_total = 0
+        self._sm_tool_calls_total = 0
+        self._sm_tokens_at_update = 0
+        self._sm_tool_calls_at_update = 0
+        # The document lives on disk and survives across sessions, so a
+        # document found on disk may describe a *different* conversation. It
+        # only becomes a compaction source once this session has written it.
+        self._sm_written_here = False
         # Session persistence. One file per session.
         self.sessions = SessionStore(state_dir) if state_dir else None
         self.session_id = time.strftime("%Y%m%d-%H%M%S")
@@ -354,6 +378,11 @@ class Agent:
 
     def _append(self, message: dict[str, Any]) -> None:
         """Append to memory and commit the same message to SQLite immediately."""
+        # Coverage accounting for the living document: only the user/assistant
+        # turns are what the document is written from, so only those count
+        # toward its staleness.
+        if message.get("role") in ("user", "assistant"):
+            self._sm_tokens_total += estimate_tokens_text(str(message.get("content") or ""))
         with self._messages_lock:
             if self.sessions is not None and not self._session_bootstrapped:
                 self.sessions.ensure_incremental(
@@ -557,6 +586,7 @@ class Agent:
                 # batch is >1 read-only tool), then report results in order.
                 for call in batch:
                     self._recent_tools.append(call.name)
+                    self._sm_tool_calls_total += 1
                     yield ToolStarted(call.name, call.arguments)
                 if self._interrupt_event.is_set():
                     yield from self._finish_interrupted(steps)
@@ -911,15 +941,24 @@ class Agent:
         extraction). A side-query returns only the changed sections as JSON;
         ``merge_updates`` writes them back while preserving the template. The
         conversation snapshot is taken here on the main thread.
+
+        The refresh is due when either the turn interval elapsed *or* the
+        conversation has moved a threshold's worth of tokens / tool calls since
+        the document was last written. A turn count alone is a bad clock: one
+        turn can add a hundred tool calls, and a hundred quiet turns can add
+        almost nothing.
         """
         if not self._provider_is_capable() or self.session_memory.path is None:
             return
-        if self._turn_count % SESSION_MEMORY_UPDATE_INTERVAL != 0:
+        if not self._session_memory_refresh_due():
             return
         convo = self._recent_conversation_text()
         if not convo.strip():
             return
         current = self.session_memory.render()
+        # The document will describe the conversation as of this moment.
+        tokens_at = self._sm_tokens_total
+        calls_at = self._sm_tool_calls_total
 
         def job() -> None:
             with self._sm_lock:
@@ -931,11 +970,57 @@ class Agent:
                     updates = _extract_json_object(raw)
                     if isinstance(updates, dict) and updates:
                         self.session_memory.merge_updates(updates)
+                        # Only now does the document cover this much of the
+                        # conversation; until it lands, the coverage counters
+                        # keep growing and the compaction layer treats the
+                        # document as stale.
+                        self._sm_tokens_at_update = tokens_at
+                        self._sm_tool_calls_at_update = calls_at
+                        self._sm_written_here = True
                 except Exception:
                     pass
 
         self._sm_thread = threading.Thread(target=job, daemon=True)
         self._sm_thread.start()
+
+    def _session_memory_refresh_due(self) -> bool:
+        """Whether the living document is due for a refresh.
+
+        Due when the turn interval elapsed, or when the conversation has grown
+        past the token / tool-call thresholds since the last write.
+        """
+        if self._turn_count % SESSION_MEMORY_UPDATE_INTERVAL == 0:
+            return True
+        if self._sm_tokens_total - self._sm_tokens_at_update >= SESSION_MEMORY_TOKEN_THRESHOLD:
+            return True
+        if self._sm_tool_calls_total - self._sm_tool_calls_at_update >= SESSION_MEMORY_TOOL_CALL_THRESHOLD:
+            return True
+        return False
+
+    def _session_memory_state(self) -> SessionMemoryState:
+        """The living document plus how far the conversation has moved past it.
+
+        ``covered_tokens`` / ``covered_tool_calls`` are the gaps since the
+        document was last written. Past the thresholds the notes no longer
+        describe the session, so a compaction must fall back to the summary
+        model instead of trusting them.
+        """
+        if not self._sm_written_here:
+            # A document this session never wrote describes another
+            # conversation; report it as maximally stale so it is never used
+            # as a compaction source.
+            return SessionMemoryState(
+                document=self.session_memory.handoff_text(),
+                populated_sections=self.session_memory.populated_sections(),
+                covered_tokens=SESSION_MEMORY_TOKEN_THRESHOLD + 1,
+                covered_tool_calls=SESSION_MEMORY_TOOL_CALL_THRESHOLD + 1,
+            )
+        return SessionMemoryState(
+            document=self.session_memory.handoff_text(),
+            populated_sections=self.session_memory.populated_sections(),
+            covered_tokens=self._sm_tokens_total - self._sm_tokens_at_update,
+            covered_tool_calls=self._sm_tool_calls_total - self._sm_tool_calls_at_update,
+        )
 
     def _recent_conversation_text(self, max_messages: int = 20, max_chars: int = 8000) -> str:
         lines: list[str] = []
@@ -952,7 +1037,7 @@ class Agent:
         """Inject teammate messages / idle reports addressed to the lead.
 
         Called at the top of every agent-loop iteration so the lead learns of
-        teammate progress mid-turn without blocking or polling. Mirrors 's
+        teammate progress mid-turn without blocking or polling. Follows 's
         drain_lead_mailbox -> system-reminder injection.
         """
         teams = getattr(self.ctx, "teams", None)
@@ -1227,9 +1312,9 @@ class Agent:
         # Carry the session-memory living document (#12) through compaction: it
         # rides along in the recovery attachment so the post-compact model keeps
         # its running notes even after the transcript is summarized.
-        sm_text = self.session_memory.text()
+        sm_text = self.session_memory.handoff_text()
         if sm_text:
-            self.recovery.record_note("Session memory (running notes)", sm_text)
+            self.recovery.record_note(SESSION_MEMORY_NOTE_TITLE, sm_text)
         result = auto_compact(
             self.messages,
             self._summarize,
@@ -1242,6 +1327,7 @@ class Agent:
             cache_cold=self._cache_is_cold(),
             message_summarizer=self._message_summarizer if self._shared_summary_available() else None,
             reserved_tokens=self._schema_tokens,
+            session_memory=self._session_memory_state(),
         )
         if result is None:
             return "Nothing to compact yet." if manual else ""
@@ -1266,6 +1352,11 @@ class Agent:
             return (
                 f"Pruned context: ~{result.before_tokens:,} -> ~{result.after_tokens:,} est. tokens "
                 f"(cleared {result.pruned:,} chars of old tool output, no summary needed)."
+            )
+        if result.method == "session_memory":
+            return (
+                f"Compacted context: ~{result.before_tokens:,} -> ~{result.after_tokens:,} est. tokens "
+                f"(session notes, replaced {result.summarized} msgs, kept {result.kept}; no summary call)."
             )
         return (
             f"Compacted context: ~{result.before_tokens:,} -> ~{result.after_tokens:,} est. tokens "
@@ -1310,7 +1401,7 @@ class Agent:
             survives) so the model needn't ToolSearch them again — the runtime carries
             preCompactDiscoveredTools across the boundary for the same reason.
         """
-        if method == "summarize":
+        if method in ("summarize", "session_memory"):
             self._last_input_tokens = 0
         self._pending_diagnostics = ""
 
@@ -1318,6 +1409,8 @@ class Agent:
         messages = [
             {"role": "system", "content": build_system_prompt(self.ctx.memory, self.ctx.skills)}
         ]
+        # The document described the conversation that was just discarded.
+        self._sm_written_here = False
         self.usage.clear()
         self._cost_total = 0.0
         self._cost_last_turn = 0.0

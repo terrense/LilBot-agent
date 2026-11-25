@@ -43,6 +43,7 @@ run_turn(user_text)
  │   ├─ events.log("turn_start")             → .lilbot/events.jsonl
  │   ├─ hooks: user_prompt_submit
  │   ├─ _maybe_compact()                     L0 工具结果预算 → token 触发压缩 → 消息数兜底
+ │   │                                          （压缩三层：本地 prune → 会话笔记 → LLM 摘要）
  │   ├─ _start_recall_prefetch()             后台线程做记忆召回（不阻塞）
  │   ├─ hooks: turn_start
  │   └─ steps = _auto_delegate() = 0         旧关键词委派已停用
@@ -58,7 +59,7 @@ run_turn(user_text)
  │   ├─ 无 tool_calls：
  │   │    ├─ finish_reason=="length" → 注入"继续"指令，continue（有上限）
  │   │    ├─ stop hook 要求继续 → continue（有上限）
- │   │    └─ turn_end hook → 后台记忆抽取 → 后台 session memory 更新
+ │   │    └─ turn_end hook → 后台记忆抽取 → 后台 session memory 更新（按 token/工具调用阈值刷新）
  │   │       → _persist_session() → yield TurnFinished → return
  │   │
  │   └─ 有 tool_calls：

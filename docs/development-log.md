@@ -57,7 +57,7 @@ quality.
 
 **Measurement**
 
-`tests/test_recovery_matrix.py`; the suite is 792 passed / 7 skipped.
+`tests/test_recovery_matrix.py`; the suite is 819 passed / 7 skipped.
 
 ---
 

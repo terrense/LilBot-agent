@@ -8,18 +8,18 @@
 | 文件 | 行数 | 职责 | 状态 |
 |---|---|---|---|
 | `__main__.py` | 5 | `python -m lilbot` → `cli.main()` | ✅ |
-| `cli.py` | 850 | 参数解析、`build_runtime()` 组装依赖、slash 命令、交互循环、`--print` 单次模式、MCP server 模式 | ✅ |
-| `config.py` | 180 | `LilBotConfig`；读取 `.env`（不覆盖已有环境变量）→ 环境变量 → `.lilbot/config.json` | ✅ |
+| `cli.py` | 939 | 参数解析、`build_runtime()` 组装依赖、slash 命令、交互循环、`--print` 单次模式、MCP server 模式 | ✅ |
+| `config.py` | 196 | `LilBotConfig`；读取 `.env`（不覆盖已有环境变量）→ 环境变量 → `.lilbot/config.json` | ✅ |
 
 ## core/ — Agent 主循环与上下文
 
 | 文件 | 行数 | 职责 | 状态 |
 |---|---|---|---|
-| `agent.py` | 1649 | `Agent.run_turn()` ReAct 主循环；同时负责压缩触发、记忆召回/抽取、hooks、session 持久化、团队通知、usage/cache 统计、溢出与截断恢复 | ⚠️ 职责过多（God Object 倾向），新功能不要再往这里塞 |
-| `compaction.py` | 755 | 两层上下文压缩（裁剪旧工具输出 + 结构化摘要）+ 压缩后恢复 + 熔断器 | ✅ |
+| `agent.py` | 2041 | `Agent.run_turn()` ReAct 主循环；同时负责压缩触发、记忆召回/抽取、hooks、session 持久化、团队通知、usage/cache 统计、溢出与截断恢复 | ⚠️ 职责过多（God Object 倾向），新功能不要再往这里塞 |
+| `compaction.py` | 876 | 三层上下文压缩（裁剪旧工具输出 → 会话笔记直接接管 → 结构化摘要）+ 压缩后恢复 + 熔断器 | ✅ |
 | `tool_budget.py` | 157 | L0 单轮工具结果预算（frozen/fresh/replaced 状态机） | ✅ |
 | `session.py` | 249 | `SessionStore`：每个会话一个 JSON，回合结束时原子写 | ✅ 仅恢复对话，不恢复执行 |
-| `session_memory.py` | 109 | `.lilbot/session-memory.md` 结构化笔记，后台更新，跨压缩保留 | ✅ |
+| `session_memory.py` | 183 | `.lilbot/session-memory.md` 结构化笔记（活文档）：后台按内容阈值更新，原子写，跨压缩保留；可直接充当压缩交接产物 | ✅ |
 | `history.py` | 123 | `FileHistory`：写文件前快照，支持 `/rewind` | ✅ 只能回滚文件，不能回滚 shell/网络副作用 |
 | `cycles.py` | 73 | 每次摘要压缩归档为一个 cycle，可用 `recall_archive` 找回 | ✅ |
 | `eventlog.py` | 71 | `.lilbot/events.jsonl` 结构化事件（追加写，best-effort） | ✅ 不是权威状态源 |
@@ -32,14 +32,14 @@
 
 | 文件 | 行数 | 职责 | 状态 |
 |---|---|---|---|
-| `providers.py` | 727 | `OpenAICompatibleProvider`（同步 + SSE 流式）、`RuleBasedProvider`（离线）、`KNOWN_PROVIDERS` 预设、`choose_provider()`；消息清洗（丢弃不完整的 tool_call 块） | ⚠️ 不识别内联 `<think>`（MiniMax）；无请求重试/退避 |
+| `providers.py` | 756 | `OpenAICompatibleProvider`（同步 + SSE 流式）、`RuleBasedProvider`（离线）、`KNOWN_PROVIDERS` 预设、`choose_provider()`；消息清洗（丢弃不完整的 tool_call 块） | ⚠️ 不识别内联 `<think>`（MiniMax）；无请求重试/退避 |
 
 ## tools/
 
 | 文件 | 行数 | 职责 | 状态 |
 |---|---|---|---|
-| `registry.py` | 501 | `ToolDef` / `ToolRegistry` / `ToolContext` / `ToolResult`；能力标记、校验、并发安全判定、deferred 工具与 ToolSearch、计划审批闸门、统一异常包装、大输出落盘 | ✅ 设计良好 |
-| `builtin.py` | 4763 | **146 个**内置工具的定义与实现（文件、shell、git、worktree、LSP、web、记忆、技能、子代理、团队、计划模式……） | ⚠️ 过大，按工具组逐步拆分 |
+| `registry.py` | 670 | `ToolDef` / `ToolRegistry` / `ToolContext` / `ToolResult`；能力标记、校验、并发安全判定、deferred 工具与 ToolSearch、计划审批闸门、统一异常包装、大输出落盘 | ✅ 设计良好 |
+| `builtin.py` | 4785 | **146 个**内置工具的定义与实现（文件、shell、git、worktree、LSP、web、记忆、技能、子代理、团队、计划模式……） | ⚠️ 过大，按工具组逐步拆分 |
 | `offload.py` | 98 | 超长工具输出写入磁盘，只回传预览 | ✅ |
 
 ## sandbox/ 与 security/
@@ -47,9 +47,9 @@
 | 文件 | 行数 | 职责 | 状态 |
 |---|---|---|---|
 | `workspace.py` | 128 | `Sandbox`：路径必须在 workspace 内；`run()` 用 `subprocess` 执行（Windows: PowerShell），**继承完整环境变量** | ⚠️ 不是 OS 级隔离 |
-| `permissions.py` | 89 | `PermissionManager`：ask / accept-all / deny-all，"always"规则持久化 | ✅ |
+| `permissions.py` | 106 | `PermissionManager`：ask / accept-all / deny-all，"always"规则持久化 | ✅ |
 | `permission_rules.py` | 140 | `Tool(pattern)` 分层规则 | ✅ |
-| `execpolicy.py` | 197 | 命令分类：灾难性命令 deny、已知只读命令 allow | ⚠️ `echo $env:…`、`cat .env` 被判为安全只读 |
+| `execpolicy.py` | 240 | 命令分类：灾难性命令 deny、已知只读命令 allow | ⚠️ `echo $env:…`、`cat .env` 被判为安全只读 |
 | `powershell_safety.py` | 387 | PowerShell 语法级风险分析（分隔符、重定向、子进程、后台、删除/移动目标） | ✅ |
 | `security/secrets.py` | 89 | 密钥脱敏，**只作用于显示层**；模型上下文与 session 文件保留原值 | ⚠️ 设计如此，需在安全模型中说明 |
 
@@ -57,11 +57,11 @@
 
 | 文件 | 行数 | 职责 | 状态 |
 |---|---|---|---|
-| `subagents/manager.py` | 1429 | 子代理类型（内置 + Markdown 自定义）、工具白名单、并发上限、后台运行、transcript、恢复、worktree 隔离 | ✅ |
+| `subagents/manager.py` | 1453 | 子代理类型（内置 + Markdown 自定义）、工具白名单、并发上限、后台运行、transcript、恢复、worktree 隔离 | ✅ |
 | `subagents/render.py` | 96 | 把可用子代理类型渲染进 Agent 工具描述，由模型自主选择 | ✅ |
 | `teams/manager.py` | 250 | 团队生命周期、持久化、通知路由；**仅 in-process 后端** | ✅ |
 | `teams/spawn_inprocess.py` | 129 | 队友以 `threading.Thread` 长驻运行 | ✅ 非分布式 |
-| `teams/mailbox.py` | 184 | 基于文件 + 锁的代理间信箱 | ✅ |
+| `teams/mailbox.py` | 194 | 基于文件 + 锁的代理间信箱 | ✅ |
 | `teams/shared_task.py` | 145 | JSON 任务看板，含 `blocks` / `blocked_by` 依赖 | ✅ 不是 DAG 调度器 |
 | `teams/models.py` / `progress.py` / `registry.py` | 147 / 109 / 47 | 数据模型、进度、名字寻址 | ✅ |
 
@@ -73,16 +73,16 @@
 | `memory/store.py` | 97 | 旧 JSONL 存储，启动时一次性迁移 | 🗑️ 仅迁移用 |
 | `memory/recall.py` | 168 | LLM 选择相关记忆 + 新鲜度 | ✅ |
 | `memory/extract.py` | 104 | 定期从对话中抽取记忆 | ⚠️ 无来源/置信度/人工审核 |
-| `skills/registry.py` | 232 | 加载技能 | ✅ 无经验→技能闭环 |
+| `skills/registry.py` | 231 | 加载技能 | ✅ 无经验→技能闭环 |
 | `hooks/engine.py` / `loader.py` / `models.py` | 194 / 69 / 95 | 生命周期 hooks（pre/post tool、stop、turn 等），hooks.json 热加载 | ✅ |
 | `mcp/client.py` / `manager.py` | 165 / 167 | 同步 JSON-RPC stdio MCP 客户端，工具注册为 `mcp__<server>__<tool>` | ✅ |
-| `mcp/server.py` | 124 | 把 LilBot 工具以 MCP 暴露给其他客户端（默认只读） | ✅ |
+| `mcp/server.py` | 126 | 把 LilBot 工具以 MCP 暴露给其他客户端（默认只读） | ✅ |
 
 ## tui/
 
 | 文件 | 行数 | 职责 | 状态 |
 |---|---|---|---|
-| `dashboard.py` | 2034 | 默认全屏 TUI（prompt_toolkit） | ✅ 报告建议近期不投入美化 |
+| `dashboard.py` | 2062 | 默认全屏 TUI（prompt_toolkit） | ✅ 报告建议近期不投入美化 |
 | `classic.py` | 321 | 经典 Rich 打印界面，带密钥脱敏 | ✅ |
 | `input_history.py` / `windows_console.py` | 64 / 142 | 输入历史、Windows 控制台字体/编码 | ✅ |
 

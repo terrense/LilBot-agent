@@ -133,7 +133,7 @@ class FileMemoryStore:
                     return path
         return None
 
-    # -- public API (mirrors MemoryStore) ---------------------------------
+    # -- public API (same shape as MemoryStore) --------------------------
 
     def add(self, name: str, text: str, kind: str = "note", scope: str = "project") -> MemoryEntry:
         kind = (kind or "note").strip() or "note"

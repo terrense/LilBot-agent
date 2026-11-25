@@ -234,7 +234,7 @@ class ToolDef:
     def concurrency_safe(self) -> bool:
         """True when this tool is pure read-only and can run in a parallel batch.
 
-        Mirrors the is_concurrency_safe: a tool is safe to run alongside
+        Same rule as is_concurrency_safe: a tool is safe to run alongside
         others only if it neither writes files, executes code, nor requires
         approval. Used by the agent loop to fan out independent read calls.
         """

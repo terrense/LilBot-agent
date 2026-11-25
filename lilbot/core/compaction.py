@@ -21,6 +21,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .session_memory import (
+    MIN_SESSION_MEMORY_SECTIONS,
+    SESSION_MEMORY_NOTE_TITLE,
+    SESSION_MEMORY_TOKEN_THRESHOLD,
+    SESSION_MEMORY_TOOL_CALL_THRESHOLD,
+)
+
 # --- tuning -----------------------------------------------------------------
 
 # Reserve room for the summary completion's own output.
@@ -71,6 +78,15 @@ RETRY_BASE_DELAY_S = 0.35
 # provider's cache) unless the reclaimable prefix is genuinely large. Scales
 # with the model's window; a manual /compact bypasses this scaled floor.
 SUMMARIZE_FLOOR_FRACTION = 0.02
+
+# How much conversation may have happened since the session-memory living
+# document was last written before it stops being usable as a compaction
+# handoff. Beyond these gaps the document no longer describes the current
+# state, so the LLM summary path takes over. The thresholds live in
+# session_memory.py, next to the document they describe.
+
+# Cap on the running notes carried inside a summary message.
+SESSION_MEMORY_NOTE_MAX_CHARS = 4_000
 
 # --- Cache-aware compaction helpers ----------------------------------------
 
@@ -167,7 +183,11 @@ class RecoveryState:
             files = sorted(self._files.values(), key=lambda f: f.ts, reverse=True)
         return files[:limit] if limit > 0 else files
 
-    def build_attachment(self, tool_names: list[str] | None) -> str:
+    def build_attachment(
+        self,
+        tool_names: list[str] | None,
+        skip_titles: set[str] | None = None,
+    ) -> str:
         sections: list[str] = []
 
         files = self._recent_files(RECOVERY_FILE_LIMIT)
@@ -194,6 +214,8 @@ class RecoveryState:
         with self._lock:
             notes = dict(self._notes)
         for title, body in notes.items():
+            if skip_titles and title in skip_titles:
+                continue
             snippet = body if len(body) <= RECOVERY_CHARS_PER_FILE else body[:RECOVERY_CHARS_PER_FILE] + "\n… (truncated)"
             sections.append(f"## {title}\n{snippet}\n")
 
@@ -471,6 +493,55 @@ class CompactResult:
 # A text summarizer takes (system_prompt, prefix_text) and returns summary text.
 Summarizer = Callable[[str, str], str]
 
+
+@dataclass
+class SessionMemoryState:
+    """The running-notes state a compaction may consult before summarizing.
+
+    ``document`` is the rendered session-memory living document, or "" when
+    there is none. ``covered_tokens`` / ``covered_tool_calls`` say how much
+    conversation has happened since the document was written: past the
+    thresholds the document no longer describes the session, so it must not
+    stand in for a summary.
+    """
+
+    document: str = ""
+    populated_sections: int = 0
+    covered_tokens: int = 0
+    covered_tool_calls: int = 0
+
+    def is_usable(self) -> bool:
+        """True when the document is current enough to replace a summary.
+
+        The document is a *living* summary: it is refreshed as the session
+        progresses, so it already carries the state a compaction would
+        otherwise pay a model call to reconstruct. It stops being usable when
+        the conversation has moved too far past the last refresh, or when too
+        few of its sections carry real content to be a handoff.
+        """
+        if not self.document.strip():
+            return False
+        if self.populated_sections < MIN_SESSION_MEMORY_SECTIONS:
+            return False
+        if self.covered_tokens > SESSION_MEMORY_TOKEN_THRESHOLD:
+            return False
+        if self.covered_tool_calls > SESSION_MEMORY_TOOL_CALL_THRESHOLD:
+            return False
+        return True
+
+
+def session_memory_compaction_message(state: SessionMemoryState) -> str:
+    """Render the session-memory document as a compaction handoff message."""
+    document = state.document.strip()
+    if len(document) > SESSION_MEMORY_NOTE_MAX_CHARS:
+        document = document[:SESSION_MEMORY_NOTE_MAX_CHARS] + "\n… (running notes truncated)"
+    return (
+        "This session continues from an earlier conversation that was compacted to save context. "
+        "The running notes below are the maintained summary of that conversation; they were kept "
+        "up to date as the work progressed.\n\n"
+        + document
+    )
+
 # A message summarizer takes (system_msg, to_summarize_msgs) and returns summary
 # text. It exists so the Agent can send the SAME message objects the main loop
 # used (system + prefix) plus a trailing instruction, reusing the provider's
@@ -547,19 +618,23 @@ def auto_compact(
     cache_cold: bool = False,
     message_summarizer: MessageSummarizer | None = None,
     reserved_tokens: int = 0,
+    session_memory: SessionMemoryState | None = None,
 ) -> CompactResult | None:
     """Compact messages in place-by-return. messages[0] (system) is preserved.
 
     Returns a CompactResult with the rebuilt message list, or None when no
     compaction was needed or possible.
 
-    【简历·4 上下文管理｜两层压缩，是“Token 消耗降低 50%+”的主引擎】
+    【简历·4 上下文管理｜三层压缩，是“Token 消耗降低 50%+”的主引擎】
     触发方式有两种（见 agent.py）：接近上下文窗口时“主动压缩”，以及真的超长
-    报错时“被动压缩后重试”。压缩分两层，先便宜后昂贵：
+    报错时“被动压缩后重试”。压缩分三层，先便宜后昂贵：
       · Layer 1 本地裁剪(microcompact)：把“保留尾部”之前的旧工具结果正文清空
         成占位符(prune_tool_results)。不调用 LLM、保持消息结构不变，因此服务端
         prefix 缓存能存活；若裁剪后就已回到预算内，直接返回，method="prune"。
-      · Layer 2 LLM 摘要：裁剪还不够时，才让模型把更早的前缀总结成一段结构化
+      · Layer 2 会话记忆直接接管：把已维护好的“running notes”直接当作压缩产物，
+        **完全不调用摘要模型**——笔记本来就随会话增量维护，压缩时无需再花一次
+        模型调用去重建同样的信息。
+      · Layer 3 LLM 摘要：前两层都不够时，才让模型把更早的前缀总结成一段结构化
         handoff(SUMMARY_INSTRUCTION 的 9 段)，只保留最近若干条原文尾巴
         (compute_keep_start，且绝不拆散 tool_calls/tool 配对)。
     另有三重工程护栏：摘要失败按指数退避重试(_summarize_with_retry)、连续失败
@@ -627,7 +702,6 @@ def auto_compact(
         # threshold. Nothing to do.
         return None
 
-    # --- Layer 2: LLM summary of the older prefix ---------------------------
     to_summarize = body[:keep_start]
     keep_tail = body[keep_start:]
 
@@ -642,6 +716,48 @@ def auto_compact(
     if keep_start <= 0 or estimate_tokens(to_summarize) < summary_floor:
         return None
 
+    # --- Layer 2: session-memory handoff (no summary model call) -----------
+    # The living document is maintained incrementally as the session runs, so it
+    # already carries the state a compaction would otherwise pay a model call to
+    # reconstruct. When it is current enough to stand in for the prefix, use it
+    # and skip the summary entirely.
+    if session_memory is not None and session_memory.is_usable():
+        # The notes must be smaller than the material they replace. A runaway
+        # document would grow the context instead of shrinking it, and the
+        # summary path is sized to fit.
+        notes_tokens = estimate_tokens_text(session_memory.document)
+        if notes_tokens < estimate_tokens(to_summarize):
+            content = session_memory_compaction_message(session_memory)
+            if keep_tail:
+                content += "\n\nThe most recent messages are preserved verbatim below."
+            if recovery is not None:
+                attachment = recovery.build_attachment(
+                    tool_names,
+                    # The document is already the handoff; repeating it inside
+                    # the recovery attachment would double-count it.
+                    skip_titles={SESSION_MEMORY_NOTE_TITLE},
+                )
+                if attachment:
+                    content += "\n\n---\n\n" + attachment
+            summary_msg = {"role": "system", "content": content}
+            new_messages = [system, summary_msg, *keep_tail]
+            if breaker is not None:
+                breaker.record_success()
+            return CompactResult(
+                messages=new_messages,
+                before_tokens=before,
+                after_tokens=estimate_tokens(new_messages),
+                summarized=len(to_summarize),
+                kept=len(keep_tail),
+                # The pruned prefix is replaced wholesale by the document, so
+                # nothing was actually "shaved" from what survived.
+                pruned=0,
+                method="session_memory",
+            )
+        # The document would not reclaim anything. Fall through to the
+        # summary, which is sized to fit the prefix.
+
+    # --- Layer 3: LLM summary of the older prefix ---------------------------
     # Prompt-cache-sharing path (preferred): hand the real prefix objects to the
     # message summarizer so the provider's cached prefix is reused. Fall back to
     # the text summarizer (offline provider / simple callers).
